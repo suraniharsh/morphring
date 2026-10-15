@@ -1,0 +1,36 @@
+[package]
+name = "morphring"
+description = "Offline file converter: the morphring command line"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "morphring"
+path = "src/main.rs"
+
+[dependencies]
+morphring-core = { path = "../core", version = "0.1.0" }
+morphring-engines = { path = "../engines", version = "0.1.0" }
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+directories.workspace = true
+clap.workspace = true
+ctrlc.workspace = true
+glob.workspace = true
+walkdir.workspace = true
+indexmap.workspace = true
+pathdiff.workspace = true
+
+[dev-dependencies]
+morphring-core = { path = "../core", version = "0.1.0", features = ["test-support"] }
+tempfile.workspace = true
+which.workspace = true
+
+[lints]
+workspace = true

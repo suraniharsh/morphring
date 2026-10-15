@@ -1,0 +1,41 @@
+[workspace]
+resolver = "3"
+members = ["crates/core", "crates/engines", "crates/cli", "crates/platform"]
+default-members = ["crates/core", "crates/engines", "crates/cli", "crates/platform"]
+# The Tauri app is its own workspace (PLAN.md D1), so the CLI never builds WebKit.
+exclude = ["app"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT"
+repository = "https://github.com/suraniharsh/morphring"
+
+[workspace.dependencies]
+thiserror = "2"
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tempfile = "3"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+which = "8"
+regex = "1"
+url = "2"
+directories = "6"
+libc = "0.2"
+clap = { version = "4", features = ["derive"] }
+ctrlc = { version = "3", features = ["termination"] }
+glob = "0.3"
+walkdir = "2"
+indexmap = "2"
+pathdiff = "0.2"
+
+[workspace.lints.rust]
+unsafe_code = "deny"
+
+[workspace.lints.clippy]
+unwrap_used = "warn"
+expect_used = "warn"

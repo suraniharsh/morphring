@@ -1,0 +1,23 @@
+[package]
+name = "morphring-core"
+description = "Formats, converter contract, route planning and job running for MorphRing"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[features]
+# Exposes `morphring_core::testing` (the FakeConverter) to other crates' tests.
+test-support = []
+
+[dependencies]
+thiserror.workspace = true
+tracing.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
+chrono.workspace = true
+
+[lints]
+workspace = true
