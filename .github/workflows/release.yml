@@ -1,0 +1,96 @@
+# Draft release for v* tags: test, build the Linux x86_64 CLI, smoke-test it, package it with a SHA256SUMS.txt and
+# open a *draft* GitHub release whose notes are the tag's CHANGELOG.md section. A human publishes the draft after a
+# look. A tag push does not wait for ci.yml, so this job runs the tests itself instead of trusting that someone did.
+# One job on purpose: a half-finished multi-job release can leave a draft with half its assets, and nobody wants to
+# explain to a user why the checksum file lists a tarball that isn't there.
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  linux-cli:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      # The runner has rustup; this installs whatever rust-toolchain.toml pins (stable + rustfmt + clippy).
+      - name: Install Rust toolchain
+        run: rustup toolchain install && rustup show active-toolchain
+
+      - uses: Swatinem/rust-cache@v2
+
+      # ffmpeg 4.4 on 22.04: old, but it turns wav into mp3 just fine, and the golden tests run against it.
+      - name: Install ffmpeg
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ffmpeg
+
+      - name: Test
+        run: cargo test --locked -p morphring-core -p morphring-engines -p morphring
+
+      - name: Build
+        run: cargo build --release --locked -p morphring
+
+      - name: Smoke test
+        run: |
+          set -euo pipefail
+          bin=target/release/morphring
+          expected="morphring ${GITHUB_REF_NAME#v}"
+          actual="$("$bin" --version)"
+          if [ "$actual" != "$expected" ]; then
+            echo "::error::version mismatch: tag says '$expected', binary says '$actual'"
+            exit 1
+          fi
+          T="$(mktemp -d)"
+          "$bin" convert crates/engines/tests/fixtures/sample.wav --to mp3 -o "$T"
+          if [ ! -s "$T/sample.mp3" ]; then
+            echo "::error::smoke conversion produced no $T/sample.mp3"
+            exit 1
+          fi
+
+      - name: Package
+        run: |
+          set -euo pipefail
+          name="morphring-${GITHUB_REF_NAME}-x86_64-linux"
+          mkdir -p "dist/$name"
+          cp target/release/morphring README.md LICENSE THIRD-PARTY-NOTICES.md CHANGELOG.md "dist/$name/"
+          # --owner/--group so the tarball doesn't unpack as uid 1001 "runner" on someone's laptop.
+          tar -C dist --owner=0 --group=0 -czf "dist/$name.tar.gz" "$name"
+          (cd dist && sha256sum "$name.tar.gz" > SHA256SUMS.txt)
+          cat dist/SHA256SUMS.txt
+          echo "ASSET=dist/$name.tar.gz" >> "$GITHUB_ENV"
+
+      # Notes = the lines between '## [x.y.z]' and the next '## [' heading, heading excluded.
+      - name: Extract release notes
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          awk -v ver="$version" '
+            /^## \[/ { if (found) exit; if (index($0, "## [" ver "]") == 1) { found = 1; next } }
+            found { print }
+          ' CHANGELOG.md > "$RUNNER_TEMP/notes.md"
+          if ! grep -q '[^[:space:]]' "$RUNNER_TEMP/notes.md"; then
+            echo "::error::CHANGELOG.md has no '## [$version]' section"
+            exit 1
+          fi
+          cat "$RUNNER_TEMP/notes.md"
+
+      - name: Create draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --draft \
+            --verify-tag \
+            --title "MorphRing ${GITHUB_REF_NAME#v}" \
+            --notes-file "$RUNNER_TEMP/notes.md" \
+            "$ASSET" dist/SHA256SUMS.txt
