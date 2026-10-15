@@ -1,0 +1,120 @@
+# CI for the root workspace (core, engines, cli, platform). The Tauri app is
+# its own workspace (PLAN.md D1), so nothing here builds WebKit except the
+# optional `app` job at the bottom.
+#
+# Linux blocks, other OSes inform (D11). Every cargo call uses --locked (D12):
+# if Cargo.lock is stale, CI should say so instead of quietly rewriting it.
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: "1"
+
+jobs:
+  fmt:
+    name: fmt
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      # The action installs stable, then rust-toolchain.toml gets the final say.
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --all --check
+
+  clippy:
+    name: clippy
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      # --workspace is safe because app/ is excluded (D1).
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+  test:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    # Only Linux gates v0.1.0; Windows and macOS are here to tattle, not to block (D11).
+    continue-on-error: ${{ matrix.os != 'ubuntu-latest' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # ffmpeg on Ubuntu so the ffmpeg golden tests actually run somewhere.
+      # magick and soffice goldens skip in CI and run on the dev box before a tag (D7).
+      - name: Install ffmpeg
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ffmpeg
+      - run: cargo test --workspace --locked
+
+  deny-licenses:
+    name: deny-licenses
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check licenses bans sources
+
+  deny-advisories:
+    name: deny-advisories
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # A RUSTSEC notice published this afternoon should not turn a tag red
+    # without a single line of our code changing (D11). We read it, we don't block on it.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check advisories
+
+  app:
+    name: app
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    continue-on-error: true
+    # hashFiles() is not available in a job-level `if` (and the repo isn't
+    # checked out yet there), so the guard lives on every step after checkout.
+    # Until app/src-tauri/Cargo.toml exists this job is a polite no-op; once
+    # v0.1.1 lands it starts working without anyone touching this file.
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install WebKitGTK
+        if: hashFiles('app/src-tauri/Cargo.toml') != ''
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.1-dev
+      - uses: dtolnay/rust-toolchain@stable
+        if: hashFiles('app/src-tauri/Cargo.toml') != ''
+      - uses: Swatinem/rust-cache@v2
+        if: hashFiles('app/src-tauri/Cargo.toml') != ''
+        with:
+          workspaces: app/src-tauri
+      - name: cargo check (app)
+        if: hashFiles('app/src-tauri/Cargo.toml') != ''
+        run: cargo check --locked --manifest-path app/src-tauri/Cargo.toml

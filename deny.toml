@@ -1,0 +1,67 @@
+# cargo-deny config for the root workspace. The Tauri app has its own
+# workspace (PLAN.md D1), so its licence tree never shows up here.
+#
+# CI runs `check licenses bans sources` as a blocking job and
+# `check advisories` as an informational one (D11).
+
+[graph]
+# Check every target we might ship on, not just whatever the CI runner is.
+targets = [
+    "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
+    "x86_64-pc-windows-msvc",
+    "x86_64-apple-darwin",
+    "aarch64-apple-darwin",
+]
+all-features = true
+
+[advisories]
+version = 2
+# Unmaintained crates get flagged for the whole tree; yanked ones too.
+unmaintained = "all"
+yanked = "deny"
+ignore = []
+
+[licenses]
+version = 2
+# Permissive licences only. GPL tools (ffmpeg builds, Ghostscript, pandoc)
+# are run as separate processes and never linked, so they never land here.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "MPL-2.0",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+]
+confidence-threshold = 0.8
+# The list is policy, not an inventory: a licence nobody uses yet is fine.
+unused-allowed-license = "allow"
+exceptions = []
+
+[licenses.private]
+# Our own crates are MIT anyway, but there's no need to audit ourselves twice.
+ignore = true
+
+[bans]
+# Duplicate versions are a smell, not a crime: warn so we notice, don't block.
+multiple-versions = "warn"
+wildcards = "deny"
+# Internal path deps carry a version too, but allow paths so a future
+# private helper crate doesn't trip the wildcard rule.
+allow-wildcard-paths = true
+highlight = "all"
+deny = []
+skip = []
+skip-tree = []
+
+[sources]
+# crates.io only. A git dependency should be a deliberate choice that edits this file.
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []
