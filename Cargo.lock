@@ -600,6 +600,10 @@ dependencies = [
 [[package]]
 name = "morphring-platform"
 version = "0.1.0"
+dependencies = [
+ "tempfile",
+ "thiserror",
+]
 
 [[package]]
 name = "nix"
