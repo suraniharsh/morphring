@@ -15,9 +15,8 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use serde::Serialize;
-use tauri::{AppHandle, Emitter, Manager, Runtime};
+use tauri::{AppHandle, Manager, Runtime};
 
-use crate::commands::RING_WINDOW;
 use crate::dropzone::MAIN_WINDOW;
 
 /// How long to wait for more `--convert` launches before opening the ring.
@@ -244,35 +243,9 @@ fn enqueue<R: Runtime>(app: &AppHandle<R>, files: Vec<PathBuf>) {
 
 /// Sends `files` to the ring window and shows it.
 pub fn open_ring<R: Runtime>(app: &AppHandle<R>, files: Vec<PathBuf>) {
-    let Some(ring) = app.get_webview_window(RING_WINDOW) else {
-        tracing::warn!("the ring window is missing; cannot open the ring");
-        return;
-    };
-    tracing::debug!(count = files.len(), "opening the ring");
-    let payload = RingFiles {
-        // Display strings for the webview; T35's convert command gets the paths
-        // back as strings and turns them into PathBufs again.
-        files: files
-            .iter()
-            .map(|p| p.to_string_lossy().into_owned())
-            .collect(),
-    };
-    if let Err(e) = ring.emit_to(RING_WINDOW, RING_FILES, payload) {
-        tracing::warn!("could not send the files to the ring: {e}");
-        return;
-    }
-    // Filee opens the ring under the cursor. On Wayland nobody gets to know where
-    // the cursor is, so the ring sits in the middle of the screen like a polite guest.
-    if let Err(e) = ring.center() {
-        tracing::debug!("could not center the ring: {e}");
-    }
-    if let Err(e) = ring.show() {
-        tracing::warn!("could not show the ring: {e}");
-        return;
-    }
-    if let Err(e) = ring.set_focus() {
-        tracing::debug!("could not focus the ring: {e}");
-    }
+    // The ring model (slices, reasons) is built next to the conversion queue,
+    // which knows the engines; this module only decides *when* the ring opens.
+    crate::commands::open_ring(app, files);
 }
 
 fn hide_main<R: Runtime>(app: &AppHandle<R>) {

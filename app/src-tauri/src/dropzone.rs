@@ -6,7 +6,7 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use serde::Serialize;
-use tauri::{DragDropEvent, Emitter, Runtime, Window, WindowEvent};
+use tauri::{DragDropEvent, Emitter, Manager, Runtime, Window, WindowEvent};
 
 /// Label of the window that owns the drop zone.
 pub const MAIN_WINDOW: &str = "main";
@@ -89,6 +89,8 @@ pub fn on_window_event<R: Runtime>(window: &Window<R>, event: &WindowEvent) {
     if let Err(e) = window.emit_to(MAIN_WINDOW, FILES_DROPPED, DroppedFiles::from(&drop)) {
         tracing::warn!("could not send the dropped files to the window: {e}");
     }
+    // Filee's drop zone opens the ring for what landed, and so does ours.
+    crate::commands::open_ring(window.app_handle(), drop.files);
 }
 
 #[cfg(test)]
