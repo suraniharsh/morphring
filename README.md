@@ -69,6 +69,7 @@ the release uses.
   morphring convert <files or folders...> --to <format> [options]
   morphring formats [<format>]
   morphring doctor [--json]
+  morphring integrate install|uninstall
   morphring help [<command>]
   morphring version
 ```
