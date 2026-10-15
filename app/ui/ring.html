@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>MorphRing ring</title>
+    <link rel="stylesheet" href="ring.css" />
+    <script src="ring.math.js" defer></script>
+    <script src="ring.js" defer></script>
+  </head>
+  <body>
+    <svg id="ring" class="off" viewBox="0 0 360 360" role="menu" aria-label="Convert to" focusable="false">
+      <defs>
+        <!-- A soft shadow without a blur filter: one gradient ring, cheap on any GPU. -->
+        <radialGradient id="ring-shadow-fill">
+          <stop offset="0" stop-color="#000" stop-opacity="0" />
+          <stop id="ring-shadow-inner" offset="0.8" stop-color="#000" stop-opacity="0" />
+          <stop id="ring-shadow-peak" offset="0.9" stop-color="#000" stop-opacity="0.18" />
+          <stop offset="1" stop-color="#000" stop-opacity="0" />
+        </radialGradient>
+        <radialGradient id="plate-shadow-fill">
+          <stop offset="0" stop-color="#000" stop-opacity="0" />
+          <stop offset="0.667" stop-color="#000" stop-opacity="0" />
+          <stop offset="0.815" stop-color="#000" stop-opacity="0.2" />
+          <stop offset="1" stop-color="#000" stop-opacity="0" />
+        </radialGradient>
+      </defs>
+
+      <circle id="ring-shadow" fill="url(#ring-shadow-fill)" opacity="0" />
+      <g id="slices"></g>
+
+      <g id="hub">
+        <circle id="hole" class="hole" />
+        <text id="hub-title" class="hub-title" text-anchor="middle"></text>
+        <text id="hub-subtitle" class="hub-subtitle" text-anchor="middle"></text>
+      </g>
+
+      <g id="progress" class="progress" display="none">
+        <circle id="plate-shadow" fill="url(#plate-shadow-fill)" />
+        <circle id="plate" class="plate" />
+        <circle id="track" class="track" fill="none" />
+        <path id="arc" class="arc" fill="none" stroke-linecap="round" />
+        <text id="percent" class="percent" text-anchor="middle" dominant-baseline="central"></text>
+        <g id="badge" display="none">
+          <circle id="badge-disc" class="badge-disc" />
+          <polyline id="badge-check" class="badge-mark" fill="none" stroke-linecap="round" stroke-linejoin="round" />
+          <text id="badge-bang" class="badge-bang" text-anchor="middle" dominant-baseline="central">!</text>
+        </g>
+      </g>
+    </svg>
+
+    <p id="message" class="message" role="alert" hidden></p>
+  </body>
+</html>

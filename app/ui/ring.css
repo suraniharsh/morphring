@@ -1,0 +1,192 @@
+/* The ring window. Same "Soft" palette as style.css, but the page itself is
+   see-through: the window is transparent and only the donut should show. */
+:root {
+  color-scheme: light dark;
+  --surface: #ffffff;
+  --border-subtle: rgba(0, 0, 0, 0.086);
+  --text: #1f1e1d;
+  --text-secondary: #6b6a66;
+  --danger: #c73a39;
+  --success: #0f7a5a;
+  --accent: #7f77dd;
+  --on-accent: #ffffff;
+  --shadow: 0 1px 3px rgba(0, 0, 0, 0.07), 0 6px 18px rgba(0, 0, 0, 0.05);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --surface: #262624;
+    --border-subtle: rgba(255, 255, 255, 0.11);
+    --text: #f1efe8;
+    --text-secondary: #aeaca4;
+    --danger: #f09595;
+    --success: #5dcaa5;
+    --shadow: 0 1px 3px rgba(0, 0, 0, 0.25), 0 8px 24px rgba(0, 0, 0, 0.2);
+  }
+}
+
+:root[data-theme="dark"] {
+  --surface: #262624;
+  --border-subtle: rgba(255, 255, 255, 0.11);
+  --text: #f1efe8;
+  --text-secondary: #aeaca4;
+  --danger: #f09595;
+  --success: #5dcaa5;
+  --shadow: 0 1px 3px rgba(0, 0, 0, 0.25), 0 8px 24px rgba(0, 0, 0, 0.2);
+}
+
+html,
+body {
+  margin: 0;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  /* Transparent on purpose: WebKitGTK paints anything else as a square
+     behind the donut. */
+  background: transparent;
+  color: var(--text);
+  font: 14px/1.3 "Noto Sans", "Noto Sans KR", "Noto Sans SC", system-ui, sans-serif;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+#ring {
+  display: block;
+  width: 100%;
+  height: 100%;
+  cursor: default;
+  outline: none;
+}
+
+#ring.off {
+  display: none;
+}
+
+#ring.pointing {
+  cursor: pointer;
+}
+
+.wedge {
+  fill: var(--surface);
+  stroke: var(--border-subtle);
+  stroke-width: 1;
+}
+
+.wedge-accent {
+  fill: var(--accent);
+  pointer-events: none;
+}
+
+.slice-label {
+  font-size: 13px;
+  font-weight: 600;
+  fill: var(--text);
+}
+
+.slice-caption {
+  font-size: 10.5px;
+  font-weight: 400;
+  fill: var(--text-secondary);
+}
+
+.slice.disabled .slice-label {
+  fill: var(--text-secondary);
+}
+
+.slice.hot .slice-label,
+.slice.hot .slice-caption {
+  fill: var(--on-accent);
+}
+
+.hole,
+.plate {
+  fill: var(--surface);
+  stroke: var(--border-subtle);
+  stroke-width: 1;
+}
+
+.hub-title {
+  font-size: 14px;
+  font-weight: 600;
+  fill: var(--text);
+}
+
+.hub-subtitle {
+  font-size: 11.5px;
+  font-weight: 400;
+  fill: var(--text-secondary);
+}
+
+.track {
+  stroke: var(--text-secondary);
+  stroke-opacity: 0.22;
+}
+
+.arc {
+  stroke: var(--accent);
+}
+
+.arc.succeeded {
+  stroke: var(--success);
+}
+
+.arc.failed {
+  stroke: var(--danger);
+}
+
+.arc.cancelled {
+  stroke: var(--text-secondary);
+}
+
+.percent {
+  font-size: 15px;
+  font-weight: 600;
+  fill: var(--text);
+}
+
+.badge-disc {
+  fill: var(--success);
+}
+
+.badge-disc.failed {
+  fill: var(--danger);
+}
+
+.badge-mark {
+  stroke: var(--on-accent);
+  stroke-width: 3.6;
+}
+
+.badge-bang {
+  font-size: 22px;
+  font-weight: 700;
+  fill: var(--on-accent);
+}
+
+/* The error stays readable under the ring until the user dismisses it,
+   because there is no toast window to hand it to yet. */
+.message {
+  position: absolute;
+  left: 50%;
+  top: calc(50% + 62px);
+  transform: translateX(-50%);
+  box-sizing: border-box;
+  width: min(300px, calc(100% - 32px));
+  max-height: calc(50% - 70px);
+  margin: 0;
+  padding: 8px 12px;
+  overflow: hidden;
+  font-size: 12.5px;
+  line-height: 1.35;
+  text-align: center;
+  overflow-wrap: anywhere;
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--border-subtle);
+  border-radius: 12px;
+  box-shadow: var(--shadow);
+}
+
+.message[hidden] {
+  display: none;
+}
