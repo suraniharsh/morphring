@@ -11,7 +11,7 @@ use std::ffi::OsString;
 use std::io::Write;
 
 use clap::Parser;
-use clap::error::ErrorKind;
+use clap::error::{ContextKind, ContextValue, ErrorKind};
 use morphring_core::CancelToken;
 
 use crate::args::{Cli, Command};
@@ -19,6 +19,9 @@ use crate::ctx::Ctx;
 
 /// The version printed by `morphring --version`.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// Exit code for wrong arguments (Filee's `UsageError`).
+pub const EXIT_USAGE: i32 = 2;
 
 /// Runs the command line with the process's current folder and the installed
 /// engines. `args` excludes the program name. Returns the exit code.
@@ -28,6 +31,12 @@ pub fn run(
     err: &mut dyn Write,
     cancel: CancelToken,
 ) -> i32 {
+    // Help, version and typos are answered before we go looking for engines,
+    // so `morphring --help` works on a machine with nothing installed.
+    let command = match parse(args, out, err) {
+        Parsed::Exit(code) => return code,
+        Parsed::Run(command) => command,
+    };
     let cwd = match std::env::current_dir() {
         Ok(cwd) => cwd,
         Err(e) => {
@@ -42,53 +51,159 @@ pub fn run(
         cancel,
         engines: morphring_engines::registry::all(),
     };
-    run_with(args, &mut ctx)
+    dispatch(command, &mut ctx)
 }
 
 /// Runs the command line against an explicit context. `args` excludes the
 /// program name. Returns the exit code.
 pub fn run_with(args: impl IntoIterator<Item = OsString>, ctx: &mut Ctx) -> i32 {
+    match parse(args, ctx.out, ctx.err) {
+        Parsed::Exit(code) => code,
+        Parsed::Run(command) => dispatch(command, ctx),
+    }
+}
+
+/// What parsing left for us to do.
+enum Parsed {
+    /// Help, version or a usage error was already printed; exit with this code.
+    Exit(i32),
+    /// A command that needs the context (and so, the engines).
+    Run(Command),
+}
+
+fn parse(
+    args: impl IntoIterator<Item = OsString>,
+    out: &mut dyn Write,
+    err: &mut dyn Write,
+) -> Parsed {
     let argv = std::iter::once(OsString::from("morphring")).chain(args);
     let cli = match Cli::try_parse_from(argv) {
         Ok(cli) => cli,
         Err(e) if e.kind() == ErrorKind::DisplayHelp => {
-            let _ = write!(ctx.out, "{e}");
-            return 0;
+            // `--help` anywhere: clap renders the override_help of the command
+            // it was attached to, which is the same text `help <cmd>` prints.
+            let _ = write!(out, "{}", e.render());
+            return Parsed::Exit(0);
         }
-        Err(e) => {
-            // TODO(T15): nicer usage errors. For now: clap's first line, minus its "error: ".
-            let text = e.to_string();
-            let first = text.lines().next().unwrap_or_default();
-            let _ = writeln!(
-                ctx.err,
-                "morphring: {}",
-                first.trim_start_matches("error: ")
-            );
-            let _ = writeln!(ctx.err, "Run 'morphring help' for usage.");
-            return 2;
-        }
+        Err(e) => return Parsed::Exit(usage_error(err, &usage_message(&e))),
     };
 
     if cli.version {
-        return print_version(ctx);
+        return Parsed::Exit(print_version(out));
     }
     match cli.command {
-        Some(Command::Convert(args)) => commands::convert::run(&args, ctx),
-        Some(Command::Formats(args)) => commands::formats::run(&args, ctx),
-        Some(Command::Doctor(args)) => commands::doctor::run(&args, ctx),
-        Some(Command::Version) => print_version(ctx),
-        // TODO(T15): `help <command>`. Everybody gets the full help until then.
-        Some(Command::Help(_)) | None => {
-            use clap::CommandFactory;
-            let _ = write!(ctx.out, "{}", Cli::command().render_help());
-            0
+        None => {
+            let _ = write!(out, "{}", args::help_text(None));
+            Parsed::Exit(0)
         }
+        Some(Command::Help(help)) => {
+            let _ = write!(out, "{}", args::help_text(help.command.as_deref()));
+            Parsed::Exit(0)
+        }
+        Some(Command::Version) => Parsed::Exit(print_version(out)),
+        Some(command) => Parsed::Run(command),
     }
 }
 
-fn print_version(ctx: &mut Ctx) -> i32 {
-    let _ = writeln!(ctx.out, "morphring {VERSION}");
+fn dispatch(command: Command, ctx: &mut Ctx) -> i32 {
+    match command {
+        Command::Convert(args) => commands::convert::run(&args, ctx),
+        Command::Formats(args) => commands::formats::run(&args, ctx),
+        Command::Doctor(args) => commands::doctor::run(&args, ctx),
+        // parse() already answered these; repeating ourselves is cheaper than
+        // a second enum that differs by two variants.
+        Command::Help(help) => {
+            let _ = write!(ctx.out, "{}", args::help_text(help.command.as_deref()));
+            0
+        }
+        Command::Version => print_version(ctx.out),
+    }
+}
+
+fn print_version(out: &mut dyn Write) -> i32 {
+    let _ = writeln!(out, "morphring {VERSION}");
     0
+}
+
+/// Prints a usage error the way Filee does and returns exit code 2.
+fn usage_error(err: &mut dyn Write, message: &str) -> i32 {
+    let _ = writeln!(err, "morphring: {message}");
+    let _ = writeln!(err, "Run 'morphring help' for usage.");
+    EXIT_USAGE
+}
+
+/// Turns a clap error into one Filee-style sentence (src/Filee.Cli/CliOptions.cs).
+fn usage_message(e: &clap::Error) -> String {
+    let string = |kind| match e.get(kind) {
+        Some(ContextValue::String(s)) => Some(s.as_str()),
+        _ => None,
+    };
+    // clap names an option as "--quality <1-100>"; we only want "--quality".
+    let option = || {
+        string(ContextKind::InvalidArg)
+            .and_then(|s| s.split_whitespace().next())
+            .unwrap_or("an option")
+    };
+
+    match e.kind() {
+        ErrorKind::InvalidSubcommand => {
+            let name = string(ContextKind::InvalidSubcommand).unwrap_or_default();
+            format!("Unknown command '{name}'.")
+        }
+        ErrorKind::UnknownArgument => match string(ContextKind::InvalidArg) {
+            Some(arg) if arg.starts_with('-') => format!("Unknown option '{arg}'."),
+            Some(arg) => format!("Unexpected argument '{arg}'."),
+            None => fallback_message(e),
+        },
+        ErrorKind::MissingRequiredArgument => {
+            let missing = match e.get(ContextKind::InvalidArg) {
+                Some(ContextValue::Strings(v)) => v.join(" "),
+                Some(ContextValue::String(s)) => s.clone(),
+                _ => String::new(),
+            };
+            // Same order as Filee: inputs first, then the target.
+            if missing.contains("INPUTS") {
+                "Give at least one file or folder to convert.".to_owned()
+            } else if missing.contains("--to") {
+                "Give a target format with --to <format>.".to_owned()
+            } else {
+                fallback_message(e)
+            }
+        }
+        ErrorKind::ValueValidation | ErrorKind::InvalidValue
+            if option() == "--quality"
+                && string(ContextKind::InvalidValue).is_some_and(|v| !v.is_empty()) =>
+        {
+            "--quality must be a number from 1 to 100.".to_owned()
+        }
+        ErrorKind::InvalidValue if string(ContextKind::InvalidValue).is_none_or(str::is_empty) => {
+            format!("{} needs a value.", option())
+        }
+        ErrorKind::ArgumentConflict => match string(ContextKind::PriorArg) {
+            Some(prior) => {
+                let prior = prior.split_whitespace().next().unwrap_or(prior);
+                format!("Use either {prior} or {}, not both.", option())
+            }
+            None => format!("{} can only be given once.", option()),
+        },
+        _ => fallback_message(e),
+    }
+}
+
+/// clap's own first line without its "error: " prefix, for the rare kinds we
+/// don't rephrase (invalid UTF-8 and friends).
+fn fallback_message(e: &clap::Error) -> String {
+    let text = e.to_string();
+    let first = text.lines().next().unwrap_or_default();
+    let first = first.trim_start_matches("error: ");
+    let mut message = first.to_owned();
+    if let Some(c) = message.get(..1) {
+        message.replace_range(..1, &c.to_ascii_uppercase());
+    }
+    if !message.ends_with('.') {
+        message.push('.');
+    }
+    message
 }
 
 #[cfg(test)]
@@ -116,29 +231,169 @@ mod tests {
         )
     }
 
+    /// Asserts a usage error: exit 2, nothing on stdout, the message and the hint on stderr.
+    fn assert_usage_error(args: &[&str], message: &str) {
+        let (code, out, err) = run_args(args);
+        assert_eq!(code, 2, "{args:?}");
+        assert_eq!(out, "", "{args:?}");
+        assert_eq!(
+            err,
+            format!("morphring: {message}\nRun 'morphring help' for usage.\n"),
+            "{args:?}"
+        );
+    }
+
     #[test]
     fn version_flags_and_command_print_the_version() {
-        for args in [&["--version"][..], &["-v"], &["version"]] {
+        for args in [
+            &["--version"][..],
+            &["-v"],
+            &["version"],
+            &["--verbose", "version"],
+            &["version", "--verbose"],
+        ] {
             assert_eq!(
                 run_args(args),
-                (0, "morphring 0.1.0\n".into(), String::new())
+                (0, "morphring 0.1.0\n".into(), String::new()),
+                "{args:?}"
             );
         }
     }
 
     #[test]
-    fn stub_commands_exit_2() {
-        let (code, out, err) = run_args(&["convert", "x.png", "--to", "jpg"]);
-        assert_eq!(code, 2);
-        assert!(out.is_empty());
-        assert!(err.contains("not implemented yet"));
+    fn capital_v_is_not_a_version_flag() {
+        assert_usage_error(&["-V"], "Unknown option '-V'.");
     }
 
     #[test]
-    fn usage_errors_exit_2_with_a_hint() {
-        let (code, out, err) = run_args(&["bogus"]);
-        assert_eq!(code, 2);
-        assert!(out.is_empty());
-        assert!(err.contains("Run 'morphring help' for usage."));
+    fn no_arguments_and_help_print_the_general_help() {
+        for args in [&[][..], &["help"], &["--help"], &["-h"], &["help", "nope"]] {
+            let (code, out, err) = run_args(args);
+            assert_eq!(code, 0, "{args:?}");
+            assert_eq!(out, args::GENERAL_HELP, "{args:?}");
+            assert_eq!(err, "", "{args:?}");
+        }
+    }
+
+    #[test]
+    fn help_for_a_command_matches_its_dash_dash_help() {
+        for name in ["convert", "formats", "doctor"] {
+            let (code, via_help, _) = run_args(&["help", name]);
+            assert_eq!(code, 0);
+            let (code, via_flag, _) = run_args(&[name, "--help"]);
+            assert_eq!(code, 0);
+            assert_eq!(via_help, via_flag, "{name}");
+            assert_eq!(via_help, args::help_text(Some(name)));
+        }
+        // Filee lowercases the command name for help.
+        assert_eq!(run_args(&["help", "CONVERT"]).1, args::CONVERT_HELP);
+    }
+
+    #[test]
+    fn convert_help_documents_quality_and_not_quiet() {
+        let (_, out, _) = run_args(&["help", "convert"]);
+        assert!(out.contains("-q, --quality <1-100>"));
+        assert!(out.contains("-q is quality, not quiet"));
+        for flag in [
+            "-t, --to",
+            "-o, --output",
+            "-r, --recursive",
+            "--overwrite",
+            "--skip",
+            "--json",
+            "--quiet",
+            "--verbose",
+        ] {
+            assert!(out.contains(flag), "{flag}");
+        }
+    }
+
+    #[test]
+    fn general_help_lists_every_command_and_exit_codes() {
+        for needle in [
+            "morphring convert",
+            "morphring formats",
+            "morphring doctor",
+            "morphring help",
+            "morphring version",
+            "Exit codes",
+            "--verbose",
+        ] {
+            assert!(args::GENERAL_HELP.contains(needle), "{needle}");
+        }
+        // Linux examples, not D:\Scans.
+        assert!(!args::GENERAL_HELP.contains('\\'));
+    }
+
+    #[test]
+    fn unknown_commands_and_options_explain_themselves() {
+        assert_usage_error(&["bogus"], "Unknown command 'bogus'.");
+        assert_usage_error(&["--bogus"], "Unknown option '--bogus'.");
+        assert_usage_error(
+            &["convert", "a.png", "--to", "jpg", "--keep-dates"],
+            "Unknown option '--keep-dates'.",
+        );
+        assert_usage_error(&["version", "extra"], "Unexpected argument 'extra'.");
+    }
+
+    #[test]
+    fn convert_needs_inputs_and_a_target() {
+        assert_usage_error(&["convert"], "Give at least one file or folder to convert.");
+        assert_usage_error(
+            &["convert", "--to", "jpg"],
+            "Give at least one file or folder to convert.",
+        );
+        assert_usage_error(
+            &["convert", "a.png"],
+            "Give a target format with --to <format>.",
+        );
+        assert_usage_error(&["convert", "a.png", "--to"], "--to needs a value.");
+        assert_usage_error(&["convert", "a.png", "-t"], "--to needs a value.");
+    }
+
+    #[test]
+    fn quality_must_be_1_to_100() {
+        for q in ["0", "101", "abc", "-5", "50.5"] {
+            assert_usage_error(
+                &["convert", "a.png", "--to", "jpg", "-q", q],
+                "--quality must be a number from 1 to 100.",
+            );
+        }
+        assert_usage_error(
+            &["convert", "a.png", "--to", "jpg", "--quality"],
+            "--quality needs a value.",
+        );
+    }
+
+    #[test]
+    fn overwrite_and_skip_are_exclusive() {
+        assert_usage_error(
+            &["convert", "a.png", "--to", "jpg", "--skip", "--overwrite"],
+            "Use either --overwrite or --skip, not both.",
+        );
+    }
+
+    #[test]
+    fn repeated_options_are_fine_and_the_last_one_wins() {
+        // Filee lets you say --json twice; clap would call that a conflict.
+        let cli = Cli::try_parse_from([
+            "morphring",
+            "convert",
+            "a",
+            "--json",
+            "--json",
+            "-t",
+            "png",
+            "b",
+            "-t",
+            "jpg",
+        ])
+        .unwrap();
+        let Some(Command::Convert(args)) = cli.command else {
+            panic!("not convert")
+        };
+        assert_eq!(args.inputs, ["a", "b"]);
+        assert_eq!(args.to, "jpg");
+        assert!(args.json);
     }
 }

@@ -11,8 +11,11 @@ use clap::{Args, Parser, Subcommand};
 #[derive(Debug, Parser)]
 #[command(
     name = "morphring",
+    about = "Convert files offline from the command line.",
     disable_version_flag = true,
-    disable_help_subcommand = true
+    disable_help_subcommand = true,
+    args_override_self = true,
+    override_help = GENERAL_HELP
 )]
 pub struct Cli {
     /// Print the version and exit.
@@ -31,14 +34,19 @@ pub struct Cli {
 #[derive(Debug, Subcommand)]
 pub enum Command {
     /// Convert files to another format.
+    #[command(override_help = CONVERT_HELP)]
     Convert(ConvertArgs),
     /// List formats, or the targets one format converts to.
+    #[command(override_help = FORMATS_HELP)]
     Formats(FormatsArgs),
     /// Show which engines are installed.
+    #[command(override_help = DOCTOR_HELP)]
     Doctor(DoctorArgs),
     /// Show help for MorphRing or one command.
+    #[command(override_help = GENERAL_HELP)]
     Help(HelpArgs),
     /// Print the version.
+    #[command(override_help = GENERAL_HELP)]
     Version,
 }
 
@@ -63,6 +71,7 @@ pub struct ConvertArgs {
 
     /// Quality from 1 to 100 (-q is quality, not quiet).
     #[arg(short = 'q', long = "quality", value_name = "1-100",
+          allow_hyphen_values = true,
           value_parser = clap::value_parser!(u8).range(1..=100))]
     pub quality: Option<u8>,
 
@@ -78,7 +87,7 @@ pub struct ConvertArgs {
     #[arg(long)]
     pub json: bool,
 
-    /// Print only the summary.
+    /// Print only the summary and errors.
     #[arg(long)]
     pub quiet: bool,
 }
@@ -105,6 +114,85 @@ pub struct HelpArgs {
     /// The command to show help for.
     #[arg(value_name = "COMMAND")]
     pub command: Option<String>,
+}
+
+// The help texts are written by hand, like Filee's Help.cs, because clap's
+// generated help can't say "-q is quality, not quiet" with a straight face
+// and we want `help convert` and `convert --help` to be the very same words.
+
+/// `morphring help` (and `morphring --help`).
+pub const GENERAL_HELP: &str = "\
+MorphRing: convert files offline from the command line.
+
+Usage:
+  morphring convert <files or folders...> --to <format> [options]
+  morphring formats [<format>]
+  morphring doctor [--json]
+  morphring help [<command>]
+  morphring version
+
+Examples:
+  morphring convert photo.png --to jpg
+  morphring convert *.png --to webp --quality 80 -o converted
+  morphring convert ~/Scans --recursive --to pdf
+  morphring convert clip.mov --to mp4 --skip
+  morphring formats docx
+
+Run 'morphring help <command>' for the options of one command. Add --verbose to any
+command to log what MorphRing runs to stderr (RUST_LOG works too).
+
+Exit codes: 0 all converted, 1 some failed or were cancelled, 2 wrong arguments or a
+missing input, 3 nothing to convert.
+";
+
+/// `morphring help convert` (and `morphring convert --help`).
+pub const CONVERT_HELP: &str = "\
+Usage: morphring convert <files or folders...> --to <format> [options]
+
+Files can be wildcards ('*.heic'). Folders convert the files in them that MorphRing knows.
+
+Options:
+  -t, --to <format>      Target format, e.g. jpg, png, pdf, docx, mp4 (see 'morphring formats')
+  -o, --output <folder>  Save there instead of next to the sources
+  -r, --recursive        Include sub folders
+  -q, --quality <1-100>  Quality for JPG, WebP, AVIF, MP3, ... (-q is quality, not quiet)
+      --overwrite        Replace existing output files (default: add a number)
+      --skip             Leave existing output files alone
+      --json             Print the result as JSON (for scripts and other programs)
+      --quiet            Print only the summary and errors
+      --verbose          Log what MorphRing runs to stderr
+  -h, --help             Show this help
+
+Ctrl+C stops the conversion and removes unfinished output; press it twice to quit at once.
+";
+
+/// `morphring help formats` (and `morphring formats --help`).
+pub const FORMATS_HELP: &str = "\
+Usage: morphring formats [<format>]
+
+Lists every format, or what one format converts to with the engines installed.
+";
+
+/// `morphring help doctor` (and `morphring doctor --help`).
+pub const DOCTOR_HELP: &str = "\
+Usage: morphring doctor [--json]
+
+Shows which engines (ImageMagick, FFmpeg, LibreOffice) are installed, and how to
+install the missing ones.
+
+Options:
+      --json             Print the engine list as JSON
+";
+
+/// The help text for `morphring help [<command>]`. Unknown commands get the
+/// general help, as in Filee.
+pub fn help_text(command: Option<&str>) -> &'static str {
+    match command.map(str::to_ascii_lowercase).as_deref() {
+        Some("convert") => CONVERT_HELP,
+        Some("formats") => FORMATS_HELP,
+        Some("doctor") => DOCTOR_HELP,
+        _ => GENERAL_HELP,
+    }
 }
 
 #[cfg(test)]
