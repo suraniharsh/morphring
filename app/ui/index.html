@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>MorphRing</title>
+    <link rel="stylesheet" href="style.css" />
+    <script src="main.js" defer></script>
+  </head>
+  <body>
+    <main>
+      <h1>MorphRing</h1>
+
+      <section id="drop-zone" class="drop-zone" aria-label="Drop zone" aria-describedby="drop-hint">
+        <div class="drop-icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24" width="28" height="28">
+            <path d="M12 16V4m0 0-5 5m5-5 5 5M5 20h14" fill="none" stroke="currentColor"
+                  stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
+          </svg>
+        </div>
+        <h2>Drop files here</h2>
+        <p id="drop-hint" class="muted">
+          Or use “Convert with MorphRing” in your file manager. The ring opens in the middle of the screen.
+        </p>
+      </section>
+
+      <section id="dropped" class="dropped" hidden aria-live="polite">
+        <h2 id="dropped-title"></h2>
+        <p id="dropped-note" class="muted"></p>
+        <ul id="dropped-list"></ul>
+      </section>
+
+      <p id="no-tauri" class="muted" hidden>Open this page from the MorphRing app to drop files.</p>
+    </main>
+  </body>
+</html>

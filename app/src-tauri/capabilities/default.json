@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "What the main window and the ring may do: core events, window control and opening converted files.",
+  "windows": ["main", "ring"],
+  "permissions": ["core:default", "opener:default"]
+}

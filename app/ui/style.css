@@ -1,0 +1,167 @@
+/* Filee's "Soft" palette (Styles/Soft.axaml), accent #7F77DD with its derived
+   tokens worked out by hand from ThemeService's formulas. */
+:root {
+  color-scheme: light dark;
+  --page: #f6f5f1;
+  --surface: #ffffff;
+  --surface-alt: #efede6;
+  --border-subtle: rgba(0, 0, 0, 0.086);
+  --text: #1f1e1d;
+  --text-secondary: #6b6a66;
+  --danger: #c73a39;
+  --accent: #7f77dd;
+  --accent-soft: rgba(127, 119, 221, 0.18);
+  --accent-faint: rgba(127, 119, 221, 0.09);
+  --accent-strong: #5f59a6;
+  --radius: 16px;
+  --radius-small: 9px;
+  --radius-large: 22px;
+  --shadow: 0 1px 3px rgba(0, 0, 0, 0.07), 0 6px 18px rgba(0, 0, 0, 0.05);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --page: #1b1b19;
+    --surface: #262624;
+    --surface-alt: #31312e;
+    --border-subtle: rgba(255, 255, 255, 0.11);
+    --text: #f1efe8;
+    --text-secondary: #aeaca4;
+    --danger: #f09595;
+    --shadow: 0 1px 3px rgba(0, 0, 0, 0.25), 0 8px 24px rgba(0, 0, 0, 0.2);
+  }
+}
+
+:root[data-theme="dark"] {
+  --page: #1b1b19;
+  --surface: #262624;
+  --surface-alt: #31312e;
+  --border-subtle: rgba(255, 255, 255, 0.11);
+  --text: #f1efe8;
+  --text-secondary: #aeaca4;
+  --danger: #f09595;
+  --shadow: 0 1px 3px rgba(0, 0, 0, 0.25), 0 8px 24px rgba(0, 0, 0, 0.2);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  min-height: 100%;
+  background: var(--page);
+  color: var(--text);
+  font: 14px/1.45 "Noto Sans", "Noto Sans KR", "Noto Sans SC", system-ui, sans-serif;
+}
+
+main {
+  display: flex;
+  flex-direction: column;
+  gap: 22px;
+  max-width: 640px;
+  margin: 0 auto;
+  padding: 28px 16px;
+}
+
+h1 {
+  margin: 0;
+  font-size: 24px;
+  font-weight: 600;
+}
+
+h2 {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.muted {
+  margin: 0;
+  color: var(--text-secondary);
+}
+
+/* The drop zone: big, soft and springy on hover, like Filee's HomePage. */
+.drop-zone {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  min-height: 220px;
+  padding: 24px;
+  text-align: center;
+  background: var(--accent-faint);
+  border: 2px solid var(--accent-soft);
+  border-radius: var(--radius-large);
+  transition:
+    background-color 0.2s ease,
+    border-color 0.2s ease,
+    transform 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+.drop-zone.over {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+  transform: scale(1.015);
+}
+
+.drop-zone .muted {
+  max-width: 460px;
+}
+
+.drop-icon {
+  display: grid;
+  place-items: center;
+  width: 64px;
+  height: 64px;
+  border-radius: 999px;
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+}
+
+.dropped {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 14px 16px;
+  background: var(--surface);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+}
+
+.dropped[hidden],
+#no-tauri[hidden] {
+  display: none;
+}
+
+.dropped ul {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  max-height: 160px;
+  overflow-y: auto;
+}
+
+.dropped li {
+  padding: 4px 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  border-top: 1px solid var(--border-subtle);
+}
+
+.dropped li:first-child {
+  border-top: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .drop-zone {
+    transition: none;
+  }
+  .drop-zone.over {
+    transform: none;
+  }
+}

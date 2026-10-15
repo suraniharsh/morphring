@@ -1,0 +1,46 @@
+[package]
+name = "morphring-app"
+description = "MorphRing desktop app: drop zone, conversion ring and tray"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT"
+repository = "https://github.com/suraniharsh/morphring"
+publish = false
+
+# Its own workspace (PLAN.md D1): the root workspace excludes `app`, so the CLI
+# never builds WebKit and `cargo deny` never walks Tauri's licence tree.
+[workspace]
+
+[lib]
+name = "morphring_app"
+crate-type = ["rlib"]
+
+[[bin]]
+name = "morphring-app"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+morphring-core = { path = "../../crates/core" }
+morphring-engines = { path = "../../crates/engines" }
+tauri = { version = "2", features = ["tray-icon"] }
+tauri-plugin-single-instance = "2"
+tauri-plugin-opener = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints.rust]
+unsafe_code = "deny"
+
+[lints.clippy]
+unwrap_used = "warn"
+expect_used = "warn"
