@@ -379,7 +379,10 @@ fn desktop_value(value: &str) -> String {
         .replace('\t', r"\t")
 }
 
+// These menus only exist on Linux desktops, and the tests poke at Unix file
+// modes and raw byte paths. Windows gets to sit this one out.
 #[cfg(test)]
+#[cfg(unix)]
 mod tests {
     use super::*;
     use tempfile::TempDir;
@@ -660,7 +663,10 @@ mod tests {
             .output()
             .unwrap();
         assert!(out.status.success());
-        let cwd = dir.path().to_str().unwrap();
+        // macOS keeps its temp dir behind a /var -> /private/var symlink and
+        // the shell happily reports the real path, so compare against that.
+        let cwd = dir.path().canonicalize().unwrap();
+        let cwd = cwd.to_str().unwrap();
         assert_eq!(
             String::from_utf8(out.stdout).unwrap(),
             format!("--convert\n{cwd}/a b.png\n/abs/c.png\n")
