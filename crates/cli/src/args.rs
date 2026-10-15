@@ -42,6 +42,9 @@ pub enum Command {
     /// Show which engines are installed.
     #[command(override_help = DOCTOR_HELP)]
     Doctor(DoctorArgs),
+    /// Add or remove the file manager context menu entries.
+    #[command(override_help = INTEGRATE_HELP)]
+    Integrate(IntegrateArgs),
     /// Show help for MorphRing or one command.
     #[command(override_help = GENERAL_HELP)]
     Help(HelpArgs),
@@ -108,6 +111,27 @@ pub struct DoctorArgs {
     pub json: bool,
 }
 
+/// Arguments of `morphring integrate`.
+#[derive(Debug, Args)]
+pub struct IntegrateArgs {
+    /// `install` or `uninstall`. Checked by the command, so a typo gets a
+    /// sentence instead of clap's list of possible values.
+    #[arg(value_name = "ACTION")]
+    pub action: Option<String>,
+
+    /// The program the menus start (default: the MorphRing app).
+    #[arg(long, value_name = "PATH")]
+    pub exe: Option<PathBuf>,
+
+    /// Show what would change without changing anything.
+    #[arg(long)]
+    pub dry_run: bool,
+
+    /// Change the desktop even though this is not a release build.
+    #[arg(long)]
+    pub allow: bool,
+}
+
 /// Arguments of `morphring help`.
 #[derive(Debug, Args)]
 pub struct HelpArgs {
@@ -128,6 +152,7 @@ Usage:
   morphring convert <files or folders...> --to <format> [options]
   morphring formats [<format>]
   morphring doctor [--json]
+  morphring integrate install|uninstall
   morphring help [<command>]
   morphring version
 
@@ -184,6 +209,20 @@ Options:
       --json             Print the engine list as JSON
 ";
 
+/// `morphring help integrate` (and `morphring integrate --help`).
+pub const INTEGRATE_HELP: &str = "\
+Usage: morphring integrate install|uninstall [options]
+
+Adds or removes 'Convert with MorphRing' in the file manager context menu
+(Dolphin, Nautilus, Nemo and Thunar). The entry opens the MorphRing app.
+
+Options:
+      --exe <path>       Program the menu starts (default: morphring-app next to
+                         this program or on PATH)
+      --dry-run          Show what would change without changing anything
+      --allow            Change the desktop from a development build
+";
+
 /// The help text for `morphring help [<command>]`. Unknown commands get the
 /// general help, as in Filee.
 pub fn help_text(command: Option<&str>) -> &'static str {
@@ -191,6 +230,7 @@ pub fn help_text(command: Option<&str>) -> &'static str {
         Some("convert") => CONVERT_HELP,
         Some("formats") => FORMATS_HELP,
         Some("doctor") => DOCTOR_HELP,
+        Some("integrate") => INTEGRATE_HELP,
         _ => GENERAL_HELP,
     }
 }

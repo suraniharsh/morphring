@@ -110,6 +110,9 @@ fn dispatch(command: Command, ctx: &mut Ctx) -> i32 {
         Command::Convert(args) => commands::convert::run(&args, ctx),
         Command::Formats(args) => commands::formats::run(&args, ctx),
         Command::Doctor(args) => commands::doctor::run(&args, ctx),
+        Command::Integrate(args) => {
+            commands::integrate::run(&args, ctx, &commands::integrate::Host::from_process())
+        }
         // parse() already answered these; repeating ourselves is cheaper than
         // a second enum that differs by two variants.
         Command::Help(help) => {

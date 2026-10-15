@@ -558,6 +558,7 @@ dependencies = [
  "indexmap",
  "morphring-core",
  "morphring-engines",
+ "morphring-platform",
  "pathdiff",
  "serde",
  "serde_json",

@@ -3,3 +3,4 @@
 pub mod convert;
 pub mod doctor;
 pub mod formats;
+pub mod integrate;
