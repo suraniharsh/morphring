@@ -8,6 +8,7 @@ pub mod formats;
 pub mod job;
 pub mod output;
 pub mod planner;
+pub mod ring;
 #[cfg(any(test, feature = "test-support"))]
 pub mod testing;
 
