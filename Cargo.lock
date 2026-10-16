@@ -548,7 +548,7 @@ checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 
 [[package]]
 name = "morphring"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -571,7 +571,7 @@ dependencies = [
 
 [[package]]
 name = "morphring-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "chrono",
  "serde",
@@ -583,7 +583,7 @@ dependencies = [
 
 [[package]]
 name = "morphring-engines"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "directories",
  "libc",
@@ -600,7 +600,7 @@ dependencies = [
 
 [[package]]
 name = "morphring-platform"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "tempfile",
  "thiserror",

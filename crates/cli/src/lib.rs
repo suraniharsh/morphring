@@ -248,6 +248,9 @@ mod tests {
 
     #[test]
     fn version_flags_and_command_print_the_version() {
+        // Read from Cargo, so a version bump doesn't need a test edit. I learned
+        // this at 0.1.1, which is about as early as one can learn it.
+        let expected = format!("morphring {}\n", env!("CARGO_PKG_VERSION"));
         for args in [
             &["--version"][..],
             &["-v"],
@@ -257,7 +260,7 @@ mod tests {
         ] {
             assert_eq!(
                 run_args(args),
-                (0, "morphring 0.1.0\n".into(), String::new()),
+                (0, expected.clone(), String::new()),
                 "{args:?}"
             );
         }

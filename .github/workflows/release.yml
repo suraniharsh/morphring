@@ -1,6 +1,7 @@
-# Draft release for v* tags: test, build the Linux x86_64 CLI, smoke-test it, package it with a SHA256SUMS.txt and
-# open a *draft* GitHub release whose notes are the tag's CHANGELOG.md section. A human publishes the draft after a
-# look. A tag push does not wait for ci.yml, so this job runs the tests itself instead of trusting that someone did.
+# Draft release for v* tags: test, build the Linux x86_64 CLI, smoke-test it, bundle the ring app as .deb and
+# .AppImage, package everything with a SHA256SUMS.txt and open a *draft* GitHub release whose notes are the tag's
+# CHANGELOG.md section. A human publishes the draft after a look. A tag push does not wait for ci.yml, so this job
+# runs the tests itself instead of trusting that someone did.
 # One job on purpose: a half-finished multi-job release can leave a draft with half its assets, and nobody wants to
 # explain to a user why the checksum file lists a tarball that isn't there.
 name: Release
@@ -8,17 +9,28 @@ name: Release
 on:
   push:
     tags: ['v*']
+  # A dry run from any branch: `gh workflow run release.yml --ref <branch>`. I am not tagging a release just to find
+  # out that linuxdeploy has opinions about FUSE again. Without a tag the version check and the draft release are
+  # skipped, and dist/ goes up as a plain workflow artifact instead.
+  workflow_dispatch:
 
 permissions:
   contents: write
 
 env:
   CARGO_TERM_COLOR: always
+  # The one Tauri CLI version every bundling step uses (this job now, the Windows and macOS jobs later). Pinned,
+  # because `npx @tauri-apps/cli@2` means "whatever was published five minutes ago", and I'd rather not debug a
+  # release that broke while I was asleep. The CLI's numbers don't track the tauri crate's (CLI 2.12.x drives crate
+  # 2.11.x just fine); the `Check Tauri CLI` step below makes sure the pair still agrees. Pick the newest 2.x that
+  # has been out for at least two weeks.
+  TAURI_CLI_VERSION: "2.12.1"
 
 jobs:
   linux-cli:
     runs-on: ubuntu-22.04
-    timeout-minutes: 30
+    # The CLI alone fits in 30 minutes; WebKit, tao and wry from a cold cache do not.
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
 
@@ -26,7 +38,12 @@ jobs:
       - name: Install Rust toolchain
         run: rustup toolchain install && rustup show active-toolchain
 
+      # Two workspaces (PLAN.md D1), two target folders, one cache.
       - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+            app/src-tauri -> target
 
       # ffmpeg 4.4 on 22.04: old, but it turns wav into mp3 just fine, and the golden tests run against it.
       - name: Install ffmpeg
@@ -40,16 +57,21 @@ jobs:
       - name: Build
         run: cargo build --release --locked -p morphring
 
+      # On a tag the binary must agree with the tag. On a dry run there is no tag to agree with, so the binary's own
+      # version names the assets and the CHANGELOG section instead.
       - name: Smoke test
         run: |
           set -euo pipefail
           bin=target/release/morphring
-          expected="morphring ${GITHUB_REF_NAME#v}"
           actual="$("$bin" --version)"
-          if [ "$actual" != "$expected" ]; then
-            echo "::error::version mismatch: tag says '$expected', binary says '$actual'"
-            exit 1
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            expected="morphring ${GITHUB_REF_NAME#v}"
+            if [ "$actual" != "$expected" ]; then
+              echo "::error::version mismatch: tag says '$expected', binary says '$actual'"
+              exit 1
+            fi
           fi
+          echo "VERSION=${actual#morphring }" >> "$GITHUB_ENV"
           T="$(mktemp -d)"
           "$bin" convert crates/engines/tests/fixtures/sample.wav --to mp3 -o "$T"
           if [ ! -s "$T/sample.mp3" ]; then
@@ -57,34 +79,98 @@ jobs:
             exit 1
           fi
 
+      # libfuse2 so the AppImage tooling can run at all; APPIMAGE_EXTRACT_AND_RUN below so it doesn't need to mount.
+      - name: Install app build dependencies
+        run: |
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf libfuse2
+
+      # A wrong pin should fail here, loudly, not ship a bundle built by a CLI that disagrees with the crate.
+      - name: Check Tauri CLI
+        working-directory: app
+        run: |
+          set -euo pipefail
+          want="$(grep -A1 '^name = "tauri"$' src-tauri/Cargo.lock | sed -nE 's/^version = "([^"]+)"$/\1/p')" || true
+          cli="$(npx --yes "@tauri-apps/cli@$TAURI_CLI_VERSION" --version 2>&1 | head -n1)" || true
+          major="$(printf '%s\n' "$cli" | sed -nE 's/^tauri-cli ([0-9]+)\..*/\1/p')"
+          if [ "$major" != 2 ]; then
+            echo "::error::TAURI_CLI_VERSION=$TAURI_CLI_VERSION is not a 2.x Tauri CLI (it says '$cli')"
+            exit 1
+          fi
+          info="$(npx --yes "@tauri-apps/cli@$TAURI_CLI_VERSION" info 2>&1)" || true
+          got="$(printf '%s\n' "$info" | sed -nE 's/^[[:space:]]*- tauri [^:]*: ([0-9][^,[:space:]]*).*/\1/p' | head -n1)"
+          if [ -z "$want" ] || [ "$got" != "$want" ]; then
+            printf '%s\n' "$info"
+            echo "::error::Tauri CLI $TAURI_CLI_VERSION reports tauri crate '$got', app/src-tauri/Cargo.lock has '$want'"
+            exit 1
+          fi
+          echo "Tauri CLI $TAURI_CLI_VERSION, tauri crate $got"
+
+      - name: Build app bundles
+        working-directory: app
+        env:
+          APPIMAGE_EXTRACT_AND_RUN: "1"
+        run: npx --yes "@tauri-apps/cli@$TAURI_CLI_VERSION" build --bundles deb,appimage --ci
+
       - name: Package
         run: |
           set -euo pipefail
-          name="morphring-${GITHUB_REF_NAME}-x86_64-linux"
+          name="morphring-v${VERSION}-x86_64-linux"
+          deb="morphring-app_${VERSION}_amd64.deb"
+          appimage="MorphRing_${VERSION}_x86_64.AppImage"
           mkdir -p "dist/$name"
           cp target/release/morphring README.md LICENSE THIRD-PARTY-NOTICES.md CHANGELOG.md "dist/$name/"
           # --owner/--group so the tarball doesn't unpack as uid 1001 "runner" on someone's laptop.
           tar -C dist --owner=0 --group=0 -czf "dist/$name.tar.gz" "$name"
-          (cd dist && sha256sum "$name.tar.gz" > SHA256SUMS.txt)
+          bundle=app/src-tauri/target/release/bundle
+          # Exactly one of each, or the rename below would quietly pick a stale one.
+          debs=("$bundle"/deb/*.deb)
+          appimages=("$bundle"/appimage/*.AppImage)
+          if [ "${#debs[@]}" -ne 1 ] || [ "${#appimages[@]}" -ne 1 ]; then
+            echo "::error::expected one .deb and one .AppImage, found: ${debs[*]} ${appimages[*]}"
+            exit 1
+          fi
+          cp "${debs[0]}" "dist/$deb"
+          cp "${appimages[0]}" "dist/$appimage"
+          chmod +x "dist/$appimage"
+          (cd dist && sha256sum "$name.tar.gz" "$deb" "$appimage" > SHA256SUMS.txt)
           cat dist/SHA256SUMS.txt
-          echo "ASSET=dist/$name.tar.gz" >> "$GITHUB_ENV"
+          {
+            echo "ASSET=dist/$name.tar.gz"
+            echo "DEB=dist/$deb"
+            echo "APPIMAGE=dist/$appimage"
+          } >> "$GITHUB_ENV"
+
+      - name: Smoke test app bundles
+        run: |
+          set -euo pipefail
+          dpkg-deb -I "$DEB"
+          if [ ! -x "$APPIMAGE" ]; then
+            echo "::error::$APPIMAGE is not executable"
+            exit 1
+          fi
+          size="$(stat -c %s "$APPIMAGE")"
+          if [ "$size" -le $((10 * 1024 * 1024)) ]; then
+            echo "::error::$APPIMAGE is only $size bytes; a real one bundles WebKit and is far bigger"
+            exit 1
+          fi
 
       # Notes = the lines between '## [x.y.z]' and the next '## [' heading, heading excluded.
       - name: Extract release notes
         run: |
           set -euo pipefail
-          version="${GITHUB_REF_NAME#v}"
-          awk -v ver="$version" '
+          awk -v ver="$VERSION" '
             /^## \[/ { if (found) exit; if (index($0, "## [" ver "]") == 1) { found = 1; next } }
             found { print }
           ' CHANGELOG.md > "$RUNNER_TEMP/notes.md"
           if ! grep -q '[^[:space:]]' "$RUNNER_TEMP/notes.md"; then
-            echo "::error::CHANGELOG.md has no '## [$version]' section"
+            echo "::error::CHANGELOG.md has no '## [$VERSION]' section"
             exit 1
           fi
           cat "$RUNNER_TEMP/notes.md"
 
       - name: Create draft release
+        if: github.ref_type == 'tag'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -93,4 +179,16 @@ jobs:
             --verify-tag \
             --title "MorphRing ${GITHUB_REF_NAME#v}" \
             --notes-file "$RUNNER_TEMP/notes.md" \
-            "$ASSET" dist/SHA256SUMS.txt
+            "$ASSET" "$DEB" "$APPIMAGE" dist/SHA256SUMS.txt
+
+      - name: Upload dry-run artifacts
+        if: github.ref_type != 'tag'
+        uses: actions/upload-artifact@v4
+        with:
+          name: morphring-${{ env.VERSION }}-linux
+          if-no-files-found: error
+          path: |
+            dist/*.tar.gz
+            dist/*.deb
+            dist/*.AppImage
+            dist/SHA256SUMS.txt

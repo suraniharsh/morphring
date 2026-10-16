@@ -1999,7 +1999,7 @@ dependencies = [
 
 [[package]]
 name = "morphring-app"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "morphring-core",
@@ -2017,7 +2017,7 @@ dependencies = [
 
 [[package]]
 name = "morphring-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "chrono",
  "serde",
@@ -2029,7 +2029,7 @@ dependencies = [
 
 [[package]]
 name = "morphring-engines"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "directories",
  "libc",

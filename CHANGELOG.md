@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-10-16
+
+The desktop ring app arrives as a preview, with Linux packages.
+
+### Added
+
+- The MorphRing desktop app (`morphring-app`), as a preview: a drop zone
+  window, a click-mode conversion ring that opens centred on the screen on
+  Wayland, a tray icon, and a single running instance that receives files from
+  later launches.
+- `morphring-app --convert <files>` opens the ring for the given files.
+- The file manager entries added by `morphring integrate` now open the ring.
+- Linux `.deb` and `.AppImage` downloads of the desktop app, next to the CLI
+  tarball, all listed in `SHA256SUMS.txt`.
+
+### Fixed
+
+- The ring no longer closes on its own on focus-follows-mouse compositors such
+  as Hyprland.
+
+### Known issues
+
+- The ring cannot cancel a running job yet.
+- The ring uses the default quality and output naming; there are no settings
+  for them in the app yet.
+- The desktop app is untested on Windows and macOS.
+
 ## [0.1.0] - 2026-10-15
 
 The first release: the `morphring` command line tool, Linux first.
@@ -64,5 +91,6 @@ MorphRing is a Rust re-implementation of
 table, conversion graph and edge costs, output naming rules and CLI contract are
 ported from Filee. See [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).
 
-[Unreleased]: https://github.com/suraniharsh/morphring/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/suraniharsh/morphring/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/suraniharsh/morphring/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/suraniharsh/morphring/releases/tag/v0.1.0
