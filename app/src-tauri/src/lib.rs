@@ -11,7 +11,7 @@ pub mod dropzone;
 #[cfg(target_os = "linux")]
 mod gesture_linux;
 pub mod history;
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 pub mod hyprland;
 pub mod instance;
 pub mod lifecycle;

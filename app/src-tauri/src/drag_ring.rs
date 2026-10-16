@@ -31,6 +31,7 @@ pub const RING_DRAG_DROP: &str = "ring-drag-drop";
 pub const RING_DRAG_DISMISS: &str = "ring-drag-dismiss";
 
 /// The ring window's title, which Hyprland matches when moving it.
+#[cfg(target_os = "linux")]
 const RING_TITLE: &str = "MorphRing ring";
 /// The ring window is this many logical pixels square (see tauri.conf.json).
 const RING_SIZE: i32 = 360;
@@ -83,12 +84,34 @@ pub fn arm<R: Runtime>(app: &AppHandle<R>, cursor: Option<(i32, i32)>) {
         return;
     }
     if let Some((x, y)) = cursor {
-        // A window can only be moved once it is mapped, so give the compositor
-        // a moment to map it, then put the hole right under the cursor.
-        std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_millis(30));
-            crate::hyprland::move_window(RING_TITLE, x - RING_SIZE / 2, y - RING_SIZE / 2);
-        });
+        // Put the hole right under the cursor.
+        place(&ring, x - RING_SIZE / 2, y - RING_SIZE / 2);
+    }
+}
+
+/// Puts the ring's top-left corner at `x`, `y` (global layout coordinates).
+///
+/// On Linux, Wayland won't let a window place itself, so we ask Hyprland to do
+/// it; a window can only be moved once it is mapped, so the compositor gets a
+/// moment to map it first.
+#[cfg(target_os = "linux")]
+fn place<R: Runtime>(_ring: &tauri::WebviewWindow<R>, x: i32, y: i32) {
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(30));
+        crate::hyprland::move_window(RING_TITLE, x, y);
+    });
+}
+
+/// Puts the ring's top-left corner at `x`, `y` (logical screen coordinates).
+///
+/// Windows and macOS let a window move itself, no compositor diplomacy needed.
+/// Nothing calls this today (the gesture watcher is Linux-only), but the day a
+/// Windows hook or a macOS event tap arms the ring, it already lands right.
+#[cfg(not(target_os = "linux"))]
+fn place<R: Runtime>(ring: &tauri::WebviewWindow<R>, x: i32, y: i32) {
+    if let Err(e) = ring.set_position(tauri::LogicalPosition::new(x, y)) {
+        tracing::debug!("could not move the ring, centring it: {e}");
+        let _ = ring.center();
     }
 }
 

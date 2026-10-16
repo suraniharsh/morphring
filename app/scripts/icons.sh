@@ -31,13 +31,14 @@ for tag, size in ((b"ic07", 128), (b"ic08", 256), (b"ic09", 512)):
 open(os.path.join(d, "icon.icns"), "wb").write(b"icns" + struct.pack(">I", len(chunks) + 8) + chunks)
 PY
 # The macOS menu bar wants a template image: black plus alpha, nothing else,
-# and macOS repaints it for light and dark bars. So: drop the purple tile and
-# the shading arc, paint the ring black and zoom the viewBox onto the ring,
-# because an 18-point menu bar has no pixels to spare on padding.
+# and macOS repaints it for light and dark bars. So: drop the ink tile, paint
+# the cream ring and its tomato slice black (the gaps between slices survive,
+# which is the whole charm) and zoom the viewBox onto the ring, because an
+# 18-point menu bar has no pixels to spare on padding.
 template() {
     sed -e '/<rect /d' \
-        -e '/stroke="#5F59A6"/,/\/>/d' \
-        -e 's/#FFFFFF/#000000/g' \
+        -e 's/#F1ECDF/#000000/g' \
+        -e 's/#F04A35/#000000/g' \
         -e 's/viewBox="0 0 512 512" width="512" height="512"/viewBox="72 72 368 368" width="368" height="368"/' \
         "$svg" |
         magick -background none -density 384 svg:- -resize "$1x$1" -channel RGB -evaluate set 0 +channel "PNG32:$2"
