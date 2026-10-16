@@ -90,11 +90,11 @@ mod tests {
     use crate::parts::test_support::{NoOutputs, step};
 
     #[test]
-    fn the_skeleton_has_an_id_and_no_edges() {
+    fn the_engine_has_an_id_and_image_edges() {
         let engine = PdfEngine::new();
         assert_eq!(engine.id(), "pdf");
         assert_eq!(engine.display_name(), "Built-in PDF");
-        assert!(engine.edges().is_empty());
+        assert!(engine.edges().iter().any(|e| e.from.as_str() == "png"));
     }
 
     #[test]
@@ -112,8 +112,7 @@ mod tests {
 
     #[test]
     fn every_part_is_a_stub_for_now() {
-        let parts: [crate::parts::ConvertFn; 3] =
-            [image_to_pdf::convert, pages::convert, svg_pdf::convert];
+        let parts: [crate::parts::ConvertFn; 2] = [pages::convert, svg_pdf::convert];
         for convert in parts {
             let err = convert(
                 &step("pdf", "png"),
