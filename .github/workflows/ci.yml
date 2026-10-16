@@ -1,9 +1,11 @@
-# CI for the root workspace (core, engines, cli, platform). The Tauri app is
-# its own workspace (PLAN.md D1), so nothing here builds WebKit except the
-# optional `app` job at the bottom.
+# CI for the root workspace (core, engines, cli, platform) and the Tauri app,
+# which is its own workspace (PLAN.md D1) and gets its own matrix at the bottom.
 #
-# Linux blocks, other OSes inform (D11). Every cargo call uses --locked (D12):
-# if Cargo.lock is stale, CI should say so instead of quietly rewriting it.
+# Both `test` and `app` run on Linux, Windows and macOS with real engines
+# installed, so every later XP task gets an honest cross-OS signal instead of
+# a shrug. Linux blocks, Windows and macOS inform (D11) until XP-14 promotes
+# them. Every cargo call uses --locked (D12): if Cargo.lock is stale, CI should
+# say so instead of quietly rewriting it.
 name: CI
 
 on:
@@ -50,25 +52,134 @@ jobs:
   test:
     name: test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 15
-    # Only Linux gates v0.1.0; Windows and macOS are here to tattle, not to block (D11).
+    timeout-minutes: ${{ matrix.timeout }}
+    # Only Linux gates; Windows and macOS are here to tattle, not to block
+    # (D11), right up until XP-14 hands them a badge.
     continue-on-error: ${{ matrix.os != 'ubuntu-latest' }}
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
+        include:
+          - os: ubuntu-latest
+            timeout: 15
+          - os: macos-latest
+            timeout: 15
+          # Windows compiles like it is paid by the hour, so it gets ten more minutes.
+          - os: windows-latest
+            timeout: 25
     steps:
       - uses: actions/checkout@v4
+
+      # Runner images move under our feet; the log should say which one we got.
+      - name: Runner info (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          lsb_release -a
+          uname -m
+      - name: Runner info (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          sw_vers
+          uname -m
+      - name: Runner info (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          [Environment]::OSVersion
+          $env:PROCESSOR_ARCHITECTURE
+
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      # ffmpeg on Ubuntu so the ffmpeg golden tests actually run somewhere.
-      # magick and soffice goldens skip in CI and run on the dev box before a tag (D7).
-      - name: Install ffmpeg
-        if: matrix.os == 'ubuntu-latest'
+
+      # Engines, one OS at a time. Every version gets printed so a red test can
+      # be blamed on the right binary. No LibreOffice anywhere: it would eat
+      # the whole time budget for breakfast (D7). ImageMagick 7 on Ubuntu
+      # arrives with P2-61; apt only has 6.x, which has no `magick` at all.
+      - name: Install engines (Linux)
+        if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends ffmpeg
-      - run: cargo test --workspace --locked
+          sudo apt-get install -y --no-install-recommends ffmpeg poppler-utils ghostscript pandoc
+          ffmpeg -hide_banner -version | head -n 1
+          pdftoppm -v 2>&1 | head -n 1
+          gs --version
+          pandoc --version | head -n 1
+
+      - name: Install engines (macOS)
+        if: runner.os == 'macOS'
+        env:
+          # Homebrew loves to tidy the whole house when asked to fetch one thing.
+          HOMEBREW_NO_AUTO_UPDATE: "1"
+          HOMEBREW_NO_INSTALL_CLEANUP: "1"
+          HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK: "1"
+        run: |
+          brew install ffmpeg imagemagick poppler ghostscript pandoc
+          ffmpeg -hide_banner -version | head -n 1
+          magick -version | head -n 1
+          pdftoppm -v 2>&1 | head -n 1
+          gs --version
+          pandoc --version | head -n 1
+
+      - name: Install engines (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        # A hung installer should cost us ten minutes, not the whole job.
+        timeout-minutes: 10
+        env:
+          GS_TAG: gs10080
+        run: |
+          choco install ffmpeg pandoc -y --no-progress
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          # Ghostscript refuses to be installed quietly on a runner: choco's
+          # package sat for 24 minutes, and Artifex's own installer with /S
+          # sat for 10 more. So we skip installing altogether and let 7-Zip
+          # (preinstalled) unpack the NSIS payload. Nobody can hang on a dialog
+          # that never opens.
+          $exe = Join-Path $env:RUNNER_TEMP "$env:GS_TAG-w64.exe"
+          $dir = Join-Path $env:RUNNER_TEMP "ghostscript"
+          Invoke-WebRequest "https://github.com/ArtifexSoftware/ghostpdl-downloads/releases/download/$env:GS_TAG/${env:GS_TAG}w64.exe" -OutFile $exe
+          7z x $exe "-o$dir" -y | Out-Null
+          if ($LASTEXITCODE -ne 0) { Write-Host "Could not unpack Ghostscript"; exit 1 }
+          $gsBin = (Get-ChildItem $dir -Recurse -Filter gswin64c.exe | Select-Object -First 1).DirectoryName
+          if (-not $gsBin) { Write-Host "gswin64c.exe not found in the Ghostscript payload"; exit 1 }
+          # Chocolatey shims and gs land here; later steps only see them via GITHUB_PATH.
+          echo "C:\ProgramData\chocolatey\bin" >> $env:GITHUB_PATH
+          echo "$gsBin" >> $env:GITHUB_PATH
+          $env:Path = "C:\ProgramData\chocolatey\bin;$gsBin;$env:Path"
+          # ImageMagick 7 ships with the image, so we only say hello.
+          magick -version
+          ffmpeg -hide_banner -version | Select-Object -First 1
+          pandoc --version | Select-Object -First 1
+          gswin64c --version
+
+      # --no-fail-fast so one broken crate does not hide the others' failures.
+      - run: cargo test --workspace --locked --no-fail-fast
+
+  msrv:
+    name: msrv
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # Expected red for now: the let-chains in cli/src/inputs.rs need 1.88+,
+    # while Cargo.toml still promises 1.85. P2-01 bumps the MSRV to 1.92 and
+    # XP-14 makes this job blocking. Until then it is a reminder, not a gate.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - name: Read rust-version
+        id: msrv
+        run: |
+          ver=$(grep -m1 -E '^rust-version *= *"' Cargo.toml | sed -E 's/.*"([^"]+)".*/\1/')
+          if [ -z "$ver" ]; then echo "rust-version not found in Cargo.toml"; exit 1; fi
+          echo "MSRV: $ver"
+          echo "version=$ver" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.msrv.outputs.version }}
+      - uses: Swatinem/rust-cache@v2
+      # The explicit +<ver> outranks rust-toolchain.toml, which would
+      # otherwise drag us straight back to stable.
+      - run: cargo +${{ steps.msrv.outputs.version }} check --workspace --locked --all-targets
 
   deny-licenses:
     name: deny-licenses
@@ -94,27 +205,65 @@ jobs:
           command: check advisories
 
   app:
-    name: app
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    continue-on-error: true
-    # hashFiles() is not available in a job-level `if` (and the repo isn't
-    # checked out yet there), so the guard lives on every step after checkout.
-    # Until app/src-tauri/Cargo.toml exists this job is a polite no-op; once
-    # v0.1.1 lands it starts working without anyone touching this file.
+    name: app (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: ${{ matrix.timeout }}
+    # Ubuntu blocks; Windows and macOS report in until XP-14.
+    continue-on-error: ${{ matrix.os != 'ubuntu-latest' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        include:
+          - os: ubuntu-latest
+            timeout: 15
+          - os: macos-latest
+            timeout: 15
+          - os: windows-latest
+            timeout: 25
     steps:
       - uses: actions/checkout@v4
+
+      - name: Runner info (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          lsb_release -a
+          uname -m
+      - name: Runner info (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          sw_vers
+          uname -m
+      - name: Runner info (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          [Environment]::OSVersion
+          $env:PROCESSOR_ARCHITECTURE
+
+      # Windows brings WebView2 and macOS brings WKWebView; only Linux has to
+      # assemble its own webview from parts.
       - name: Install WebKitGTK
-        if: hashFiles('app/src-tauri/Cargo.toml') != ''
+        if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.1-dev
+          sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
       - uses: dtolnay/rust-toolchain@stable
-        if: hashFiles('app/src-tauri/Cargo.toml') != ''
+        with:
+          components: clippy
       - uses: Swatinem/rust-cache@v2
-        if: hashFiles('app/src-tauri/Cargo.toml') != ''
         with:
           workspaces: app/src-tauri
-      - name: cargo check (app)
-        if: hashFiles('app/src-tauri/Cargo.toml') != ''
-        run: cargo check --locked --manifest-path app/src-tauri/Cargo.toml
+
+      - name: clippy (app)
+        run: cargo clippy --locked --manifest-path app/src-tauri/Cargo.toml --all-targets -- -D warnings
+      - name: test (app)
+        run: cargo test --locked --manifest-path app/src-tauri/Cargo.toml
+      # Node 24 treats a bare directory as a file to run (and fails), so we
+      # hand it a glob instead; node expands it itself, quotes keep every shell out of it.
+      - name: test (ring UI)
+        run: node --test "app/ui/*.test.mjs"
