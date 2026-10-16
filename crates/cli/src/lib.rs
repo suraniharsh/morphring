@@ -436,7 +436,7 @@ mod tests {
     }
 
     #[test]
-    fn watch_and_presets_reach_their_stubs() {
+    fn watch_reaches_its_stub_and_presets_lists() {
         assert_eq!(
             run_args(&["watch", "inbox", "--to", "pdf"]),
             (
@@ -445,7 +445,10 @@ mod tests {
                 "morphring: watch is not available yet\n".into()
             )
         );
-        assert_eq!(run_args(&["presets"]), (0, String::new(), String::new()));
+        // No config dir here, so it is the built-ins and a clean exit.
+        let (code, out, err) = run_args(&["presets"]);
+        assert_eq!((code, err.as_str()), (0, ""));
+        assert!(out.contains("to-png"), "{out}");
     }
 
     #[test]
