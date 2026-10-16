@@ -6,7 +6,7 @@
 //! probe in `src/Filee.Engines/Media/FfmpegConverter.cs`.
 
 use std::collections::HashMap;
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -38,6 +38,39 @@ pub enum Tool {
 // Ghostscript on Windows ships as gswin64c (console, 64-bit) or gswin32c, and a
 // plain `gs` only shows up when someone brought their own MSYS habits along.
 const GS_WINDOWS: &[&[&str]] = &[&["gswin64c"], &["gswin32c"], &["gs"]];
+
+// LibreOffice on Windows installs soffice.exe (the GUI launcher, which detaches
+// and takes the exit code with it) and soffice.com (the console wrapper that
+// actually tells us how it went). We want the chatty one.
+const SOFFICE_WINDOWS: &[&[&str]] = &[&["soffice.com"], &["soffice"]];
+
+/// An operating system family, for the parts of discovery that differ per OS:
+/// program names, the fixed folders searched after `PATH`, and install hints.
+///
+/// Every function that takes an `Os` is pure with respect to it, so the
+/// Windows and macOS rules can be checked on any machine.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Os {
+    /// Linux and the other Unix-likes that are not macOS.
+    Linux,
+    /// Windows.
+    Windows,
+    /// macOS.
+    MacOs,
+}
+
+impl Os {
+    /// The OS this build targets.
+    pub const fn current() -> Os {
+        if cfg!(windows) {
+            Os::Windows
+        } else if cfg!(target_os = "macos") {
+            Os::MacOs
+        } else {
+            Os::Linux
+        }
+    }
+}
 
 impl Tool {
     /// Every tool, in a stable order.
@@ -86,14 +119,24 @@ impl Tool {
     /// Each set follows the [`programs`](Self::programs) rule; most tools
     /// have exactly one.
     pub const fn program_sets(self) -> &'static [&'static [&'static str]] {
-        match self {
-            Tool::Magick => &[&["magick"]],
-            Tool::Ffmpeg => &[&["ffmpeg", "ffprobe"]],
-            Tool::Soffice => &[&["soffice"]],
-            Tool::Pdftoppm => &[&["pdftoppm", "pdftotext", "pdfinfo"]],
-            Tool::Ghostscript if cfg!(windows) => GS_WINDOWS,
-            Tool::Ghostscript => &[&["gs"]],
-            Tool::Pandoc => &[&["pandoc"]],
+        self.program_sets_on(Os::current())
+    }
+
+    /// [`program_sets`](Self::program_sets) for `os` instead of the machine we
+    /// run on.
+    pub const fn program_sets_on(self, os: Os) -> &'static [&'static [&'static str]] {
+        match (self, os) {
+            // Only ever magick. Windows keeps a `convert.exe` in System32 that
+            // converts FAT volumes to NTFS, and "I asked for a PNG and got a
+            // reformatted drive" is not a bug report anyone wants to read.
+            (Tool::Magick, _) => &[&["magick"]],
+            (Tool::Ffmpeg, _) => &[&["ffmpeg", "ffprobe"]],
+            (Tool::Soffice, Os::Windows) => SOFFICE_WINDOWS,
+            (Tool::Soffice, _) => &[&["soffice"]],
+            (Tool::Pdftoppm, _) => &[&["pdftoppm", "pdftotext", "pdfinfo"]],
+            (Tool::Ghostscript, Os::Windows) => GS_WINDOWS,
+            (Tool::Ghostscript, _) => &[&["gs"]],
+            (Tool::Pandoc, _) => &[&["pandoc"]],
         }
     }
 
@@ -221,7 +264,12 @@ pub fn forget() {
 
 fn discover(tool: Tool) -> Option<Found> {
     let path_var = std::env::var_os("PATH");
-    let program = locate_in(tool, path_var.as_deref(), &system_folders(tool))?;
+    let program = locate_in(
+        tool,
+        Os::current(),
+        path_var.as_deref(),
+        &system_folders(tool),
+    )?;
     let version = probe_version(tool, &program).unwrap_or_else(|| UNKNOWN_VERSION.to_owned());
     tracing::debug!(tool = tool.id(), program = %program.display(), %version, "found tool");
     Some(Found { program, version })
@@ -229,12 +277,26 @@ fn discover(tool: Tool) -> Option<Found> {
 
 /// Searches the folders of `path_var` (a `PATH`-style list), then `extra`, and
 /// returns the main program from the first folder that holds **all** of the
-/// tool's programs. Tools with several [`Tool::program_sets`] try each set in
-/// turn, best first. Nothing is cached and `PATH` is not read from the environment.
-pub fn locate_in(tool: Tool, path_var: Option<&OsStr>, extra: &[PathBuf]) -> Option<PathBuf> {
-    tool.program_sets()
+/// tool's programs on `os` (see [`Tool::program_sets_on`]). Tools with several
+/// sets try each set in turn, best first. Nothing is cached and `PATH` is not
+/// read from the environment.
+///
+/// The file checks themselves (the executable bit, `PATHEXT`) follow the
+/// machine we run on, so on Linux a Windows lookup finds files literally named
+/// `gswin64c` or `soffice.com`.
+///
+/// The result never carries a `\\?\` verbatim prefix, which ImageMagick,
+/// soffice and older FFmpeg builds refuse in an argv.
+pub fn locate_in(
+    tool: Tool,
+    os: Os,
+    path_var: Option<&OsStr>,
+    extra: &[PathBuf],
+) -> Option<PathBuf> {
+    tool.program_sets_on(os)
         .iter()
         .find_map(|programs| locate_set(programs, path_var, extra))
+        .map(|program| dunce::simplified(&program).to_path_buf())
 }
 
 /// [`locate_in`] for one set of programs.
@@ -275,69 +337,137 @@ fn programs_in(programs: &[&str], folder: &Path) -> Option<PathBuf> {
     main
 }
 
-/// The fixed folders searched after `PATH`, in Filee's order.
+/// The fixed folders searched after `PATH` on this machine, in Filee's order.
 pub fn system_folders(tool: Tool) -> Vec<PathBuf> {
-    let mut folders: Vec<PathBuf> = Vec::new();
-    if cfg!(unix) {
-        folders.extend(
-            [
-                "/opt/homebrew/bin",
-                "/usr/local/bin",
-                "/usr/bin",
-                "/bin",
-                "/opt/local/bin",
-            ]
-            .map(PathBuf::from),
-        );
+    system_folders_in(tool, Os::current(), |name| std::env::var_os(name))
+}
+
+/// The fixed folders searched after `PATH` for `tool` on `os`, best first.
+///
+/// `env` answers environment lookups (`ProgramFiles`, `HOME`, ...), so tests can
+/// hand in a pretend Windows box. Folders with a version in their name, such as
+/// `gs\gs10.08.0\bin` or `ImageMagick-7.1.2-Q16-HDRI`, are listed from disk
+/// with the newest version first.
+pub fn system_folders_in<F>(tool: Tool, os: Os, env: F) -> Vec<PathBuf>
+where
+    F: Fn(&str) -> Option<OsString>,
+{
+    match os {
+        Os::Linux | Os::MacOs => unix_folders(tool, os, &env),
+        Os::Windows => windows_folders(tool, &env),
     }
-    if tool == Tool::Soffice {
-        folders.extend(libreoffice_folders());
+}
+
+fn unix_folders(tool: Tool, os: Os, env: &dyn Fn(&str) -> Option<OsString>) -> Vec<PathBuf> {
+    // A Finder-launched app gets PATH=/usr/bin:/bin:/usr/sbin:/sbin and not a
+    // byte more, so Homebrew's folders have to be on this list or a Mac user
+    // with every tool installed would be told to install every tool.
+    let mut folders: Vec<PathBuf> = [
+        "/opt/homebrew/bin",
+        "/usr/local/bin",
+        "/usr/bin",
+        "/bin",
+        "/opt/local/bin",
+    ]
+    .map(PathBuf::from)
+    .into();
+    if tool != Tool::Soffice {
+        return folders;
+    }
+    if os == Os::MacOs {
+        folders.push(PathBuf::from(
+            "/Applications/LibreOffice.app/Contents/MacOS",
+        ));
+        if let Some(home) = env("HOME").filter(|h| !h.is_empty()) {
+            folders.push(PathBuf::from(home).join("Applications/LibreOffice.app/Contents/MacOS"));
+        }
+        return folders;
+    }
+    folders.push(PathBuf::from("/usr/lib/libreoffice/program"));
+    folders.push(PathBuf::from("/usr/lib64/libreoffice/program"));
+    // The tarballs from libreoffice.org unpack to /opt/libreoffice26.2 and
+    // friends. Newest first, so the one you installed last wins, which is
+    // usually the one you meant.
+    folders.extend(
+        versioned_children(Path::new("/opt"), "libreoffice")
+            .into_iter()
+            .map(|dir| dir.join("program")),
+    );
+    folders
+}
+
+fn windows_folders(tool: Tool, env: &dyn Fn(&str) -> Option<OsString>) -> Vec<PathBuf> {
+    let var = |name: &str| env(name).filter(|v| !v.is_empty()).map(PathBuf::from);
+    // Both Program Files, 64-bit first. On a 32-bit Windows (do those still
+    // exist?) the two variables point at the same place, which dedup handles.
+    let mut program_files: Vec<PathBuf> = ["ProgramFiles", "ProgramFiles(x86)"]
+        .into_iter()
+        .filter_map(var)
+        .collect();
+    program_files.dedup();
+
+    let mut folders = Vec::new();
+    for root in &program_files {
+        match tool {
+            Tool::Soffice => folders.push(root.join("LibreOffice").join("program")),
+            Tool::Ghostscript => folders.extend(
+                versioned_children(&root.join("gs"), "gs")
+                    .into_iter()
+                    .map(|dir| dir.join("bin")),
+            ),
+            Tool::Magick => folders.extend(versioned_children(root, "ImageMagick-")),
+            Tool::Pandoc => folders.push(root.join("Pandoc")),
+            Tool::Ffmpeg | Tool::Pdftoppm => {}
+        }
+    }
+    // The pandoc MSI installs per user by default, into LOCALAPPDATA.
+    if tool == Tool::Pandoc
+        && let Some(local) = var("LOCALAPPDATA")
+    {
+        folders.push(local.join("Pandoc"));
+    }
+    // The package managers' shim folders. They are on PATH for a fresh shell,
+    // but an app started before the install still has yesterday's PATH.
+    if let Some(local) = var("LOCALAPPDATA") {
+        folders.push(local.join("Microsoft").join("WinGet").join("Links"));
+    }
+    if let Some(profile) = var("USERPROFILE") {
+        folders.push(profile.join("scoop").join("shims"));
+    }
+    if let Some(data) = var("ProgramData") {
+        folders.push(data.join("chocolatey").join("bin"));
     }
     folders
 }
 
-fn libreoffice_folders() -> Vec<PathBuf> {
-    let mut folders = Vec::new();
-    if cfg!(target_os = "macos") {
-        folders.push(PathBuf::from(
-            "/Applications/LibreOffice.app/Contents/MacOS",
-        ));
-        if let Some(home) = directories::BaseDirs::new() {
-            folders.push(
-                home.home_dir()
-                    .join("Applications/LibreOffice.app/Contents/MacOS"),
-            );
-        }
-    }
-    if cfg!(unix) {
-        folders.push(PathBuf::from("/usr/lib/libreoffice/program"));
-        folders.push(PathBuf::from("/usr/lib64/libreoffice/program"));
-        // The tarballs from libreoffice.org unpack to /opt/libreoffice26.2 and
-        // friends. Newest first, so the one you installed last wins, which is
-        // usually the one you meant.
-        let mut opt: Vec<PathBuf> = std::fs::read_dir("/opt")
-            .into_iter()
-            .flatten()
-            .flatten()
-            .filter(|entry| {
-                entry
-                    .file_name()
-                    .to_string_lossy()
-                    .starts_with("libreoffice")
-            })
-            .map(|entry| entry.path().join("program"))
-            .collect();
-        opt.sort_by(|a, b| b.cmp(a));
-        folders.extend(opt);
-    }
-    if cfg!(windows) {
-        for var in ["ProgramFiles", "ProgramFiles(x86)"] {
-            if let Some(root) = std::env::var_os(var) {
-                folders.push(PathBuf::from(root).join("LibreOffice").join("program"));
-            }
-        }
-    }
-    folders
+/// The subfolders of `root` whose name starts with `prefix` (ASCII case
+/// ignored), newest version first.
+fn versioned_children(root: &Path, prefix: &str) -> Vec<PathBuf> {
+    let mut found: Vec<(Vec<u64>, PathBuf)> = std::fs::read_dir(root)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|entry| entry.file_type().is_ok_and(|t| t.is_dir()))
+        .filter_map(|entry| {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let head = name.get(..prefix.len())?;
+            head.eq_ignore_ascii_case(prefix)
+                .then(|| (version_key(&name[prefix.len()..]), entry.path()))
+        })
+        .collect();
+    // Numbers compare as numbers: plain string order would crown gs9.56 over
+    // gs10.08, and Ghostscript 9 has had quite enough time on the throne.
+    found.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| b.1.cmp(&a.1)));
+    found.into_iter().map(|(_, path)| path).collect()
+}
+
+/// The digit runs in `text` as numbers, for example `[7, 1, 2, 33, 16]` from
+/// `7.1.2-33-Q16-HDRI`.
+fn version_key(text: &str) -> Vec<u64> {
+    text.split(|c: char| !c.is_ascii_digit())
+        .filter(|run| !run.is_empty())
+        .map(|run| run.parse().unwrap_or(u64::MAX))
+        .collect()
 }
 
 /// Compiles a pattern written in this file.
@@ -544,12 +674,40 @@ fn download_hint(tool: Tool) -> String {
     format!("download it from {url}")
 }
 
-/// [`install_hint`] for the machine we are running on: Homebrew on macOS,
-/// the distribution's package manager on Linux (from `/etc/os-release`), and
-/// the download page anywhere else.
+/// The Windows install command for `tool`: winget where the package exists,
+/// Scoop where it does not (Poppler and Ghostscript have no winget package).
+pub fn winget_hint(tool: Tool) -> String {
+    let id = match tool {
+        Tool::Magick => "ImageMagick.ImageMagick",
+        Tool::Ffmpeg => "Gyan.FFmpeg",
+        Tool::Soffice => "TheDocumentFoundation.LibreOffice",
+        Tool::Pandoc => "JohnMacFarlane.Pandoc",
+        // Artifex publishes mutool on winget and not Ghostscript, and a winget
+        // id that does not exist is worse than no hint at all.
+        Tool::Pdftoppm => return "scoop install poppler".to_owned(),
+        Tool::Ghostscript => return "scoop install ghostscript".to_owned(),
+    };
+    format!("winget install -e --id {id}")
+}
+
+/// How to install `tool` on `os`. `os_release` (the contents of
+/// `/etc/os-release`) picks the package manager on Linux and is ignored
+/// elsewhere.
+pub fn install_hint_for(tool: Tool, os: Os, os_release: &str) -> String {
+    match os {
+        Os::Windows => winget_hint(tool),
+        Os::MacOs => brew_hint(tool),
+        Os::Linux => install_hint(tool, os_release),
+    }
+}
+
+/// [`install_hint_for`] the machine we are running on: winget (or Scoop) on
+/// Windows, Homebrew on macOS, the distribution's package manager on Linux
+/// (from `/etc/os-release`), and the download page anywhere else.
 pub fn install_hint_here(tool: Tool) -> String {
-    if cfg!(target_os = "macos") {
-        return brew_hint(tool);
+    let os = Os::current();
+    if os != Os::Linux {
+        return install_hint_for(tool, os, "");
     }
     // /usr/lib/os-release is the fallback the os-release spec itself blesses,
     // for distros that keep /etc minimal.
@@ -564,6 +722,7 @@ mod tests {
     use super::*;
     use std::ffi::OsString;
 
+    #[cfg(unix)]
     fn join_path<I, P>(folders: I) -> Option<OsString>
     where
         I: IntoIterator<Item = P>,
@@ -814,6 +973,201 @@ mod tests {
         }
     }
 
+    #[test]
+    fn windows_hints_use_winget_and_scoop() {
+        let hint = |tool| install_hint_for(tool, Os::Windows, "ID=arch");
+        assert_eq!(
+            hint(Tool::Magick),
+            "winget install -e --id ImageMagick.ImageMagick"
+        );
+        assert_eq!(hint(Tool::Ffmpeg), "winget install -e --id Gyan.FFmpeg");
+        assert_eq!(
+            hint(Tool::Soffice),
+            "winget install -e --id TheDocumentFoundation.LibreOffice"
+        );
+        assert_eq!(
+            hint(Tool::Pandoc),
+            "winget install -e --id JohnMacFarlane.Pandoc"
+        );
+        assert_eq!(hint(Tool::Pdftoppm), "scoop install poppler");
+        assert_eq!(hint(Tool::Ghostscript), "scoop install ghostscript");
+    }
+
+    #[test]
+    fn macos_hints_use_brew_for_everything() {
+        for tool in Tool::ALL {
+            let hint = install_hint_for(tool, Os::MacOs, "ID=debian");
+            assert!(hint.starts_with("brew install "), "{tool:?}: {hint}");
+            assert_eq!(hint, brew_hint(tool));
+        }
+        assert_eq!(
+            install_hint_for(Tool::Soffice, Os::MacOs, ""),
+            "brew install --cask libreoffice"
+        );
+        assert_eq!(
+            install_hint_for(Tool::Ffmpeg, Os::Linux, "ID=arch"),
+            "pacman -S ffmpeg"
+        );
+    }
+
+    #[test]
+    fn magick_is_never_convert_on_any_os() {
+        for os in [Os::Linux, Os::Windows, Os::MacOs] {
+            assert_eq!(Tool::Magick.program_sets_on(os), [["magick"]], "{os:?}");
+            for tool in Tool::ALL {
+                assert!(
+                    tool.program_sets_on(os)
+                        .iter()
+                        .flat_map(|set| set.iter())
+                        .all(|name| !name.starts_with("convert")),
+                    "{tool:?} on {os:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn windows_program_names_differ_where_they_should() {
+        assert_eq!(
+            Tool::Soffice.program_sets_on(Os::Windows),
+            [["soffice.com"], ["soffice"]]
+        );
+        assert_eq!(Tool::Soffice.program_sets_on(Os::MacOs), [["soffice"]]);
+        assert_eq!(
+            Tool::Ghostscript.program_sets_on(Os::Windows)[0],
+            ["gswin64c"]
+        );
+        assert_eq!(Tool::Ghostscript.program_sets_on(Os::Linux), [["gs"]]);
+        assert_eq!(
+            Tool::ALL.map(|t| t.program_sets()),
+            Tool::ALL.map(|t| t.program_sets_on(Os::current()))
+        );
+    }
+
+    fn fake_env(vars: &[(&str, &Path)]) -> impl Fn(&str) -> Option<OsString> + use<> {
+        let vars: Vec<(String, OsString)> = vars
+            .iter()
+            .map(|(k, v)| ((*k).to_owned(), v.as_os_str().to_owned()))
+            .collect();
+        move |name| vars.iter().find(|(k, _)| k == name).map(|(_, v)| v.clone())
+    }
+
+    #[test]
+    fn windows_folders_cover_program_files_newest_first() {
+        let pf = tempfile::TempDir::new().unwrap();
+        let x86 = tempfile::TempDir::new().unwrap();
+        for dir in [
+            "gs/gs9.56.1/bin",
+            "gs/gs10.08.0/bin",
+            "ImageMagick-7.0.10-Q16",
+            "ImageMagick-7.1.2-Q16-HDRI",
+            "LibreOffice/program",
+        ] {
+            std::fs::create_dir_all(pf.path().join(dir)).unwrap();
+        }
+        let local = Path::new("C:\\Users\\u\\AppData\\Local");
+        let env = fake_env(&[
+            ("ProgramFiles", pf.path()),
+            ("ProgramFiles(x86)", x86.path()),
+            ("LOCALAPPDATA", local),
+        ]);
+
+        let soffice = system_folders_in(Tool::Soffice, Os::Windows, &env);
+        assert_eq!(soffice[0], pf.path().join("LibreOffice").join("program"));
+        assert_eq!(soffice[1], x86.path().join("LibreOffice").join("program"));
+
+        let gs = system_folders_in(Tool::Ghostscript, Os::Windows, &env);
+        assert_eq!(
+            gs[..2],
+            [
+                pf.path().join("gs").join("gs10.08.0").join("bin"),
+                pf.path().join("gs").join("gs9.56.1").join("bin"),
+            ]
+        );
+
+        let magick = system_folders_in(Tool::Magick, Os::Windows, &env);
+        assert_eq!(
+            magick[..2],
+            [
+                pf.path().join("ImageMagick-7.1.2-Q16-HDRI"),
+                pf.path().join("ImageMagick-7.0.10-Q16"),
+            ]
+        );
+        assert!(magick.contains(&local.join("Microsoft").join("WinGet").join("Links")));
+
+        // No Unix folders on Windows, and no LibreOffice folder for FFmpeg.
+        let ffmpeg = system_folders_in(Tool::Ffmpeg, Os::Windows, &env);
+        assert!(!ffmpeg.contains(&PathBuf::from("/usr/bin")));
+        assert!(!ffmpeg.iter().any(|f| f.ends_with("program")));
+        // An empty environment just means fewer places to look, not a panic.
+        assert!(system_folders_in(Tool::Soffice, Os::Windows, |_| None).is_empty());
+    }
+
+    #[test]
+    fn macos_folders_include_homebrew_and_the_libreoffice_bundle() {
+        let env = fake_env(&[("HOME", Path::new("/Users/u"))]);
+        for tool in Tool::ALL {
+            let folders = system_folders_in(tool, Os::MacOs, &env);
+            assert_eq!(folders[0], PathBuf::from("/opt/homebrew/bin"), "{tool:?}");
+            assert!(
+                folders.contains(&PathBuf::from("/usr/local/bin")),
+                "{tool:?}"
+            );
+        }
+        let soffice = system_folders_in(Tool::Soffice, Os::MacOs, &env);
+        assert!(soffice.contains(&PathBuf::from(
+            "/Applications/LibreOffice.app/Contents/MacOS"
+        )));
+        assert!(soffice.contains(&PathBuf::from(
+            "/Users/u/Applications/LibreOffice.app/Contents/MacOS"
+        )));
+        assert!(!soffice.iter().any(|f| f.starts_with("/usr/lib")));
+        let linux = system_folders_in(Tool::Soffice, Os::Linux, &env);
+        assert!(linux.contains(&PathBuf::from("/usr/lib/libreoffice/program")));
+        assert!(!linux.iter().any(|f| f.starts_with("/Applications")));
+    }
+
+    #[test]
+    fn version_key_orders_numbers_as_numbers() {
+        assert_eq!(version_key("7.1.2-33-Q16-HDRI"), [7, 1, 2, 33, 16]);
+        assert!(version_key("10.08.0") > version_key("9.56.1"));
+        assert!(version_key("26.2") > version_key("7.6"));
+        assert_eq!(version_key("-dev"), Vec::<u64>::new());
+    }
+
+    /// CI installs the engines on Windows and macOS; this proves discovery
+    /// finds them there (and prints a doctor-style line for the log).
+    #[cfg(any(windows, target_os = "macos"))]
+    #[test]
+    fn installed_engines_are_found_on_this_os() {
+        let mut wanted = vec![Tool::Magick, Tool::Ffmpeg];
+        if cfg!(target_os = "macos") {
+            wanted.extend([Tool::Pdftoppm, Tool::Ghostscript, Tool::Pandoc]);
+        }
+        let on_ci = std::env::var_os("CI").is_some();
+        for tool in wanted {
+            match status(tool) {
+                EngineStatus::Available { path, version } => {
+                    eprintln!("{}: {} ({version})", tool.id(), path.display());
+                    assert!(
+                        !path.to_string_lossy().starts_with(r"\\?\"),
+                        "{}",
+                        path.display()
+                    );
+                    if tool == Tool::Magick {
+                        assert_eq!(path.file_stem().and_then(OsStr::to_str), Some("magick"));
+                    }
+                }
+                EngineStatus::Missing { hint } if on_ci => {
+                    panic!("{} not found on CI; hint: {hint}", tool.id())
+                }
+                EngineStatus::Missing { hint } => {
+                    eprintln!("SKIP: {} not installed ({hint})", tool.id())
+                }
+            }
+        }
+    }
+
     #[cfg(unix)]
     mod fake_tools {
         use super::*;
@@ -835,7 +1189,10 @@ mod tests {
             script(full.path(), "ffprobe", "exit 0");
 
             let path = join_path([half.path(), full.path()]);
-            assert_eq!(locate_in(Tool::Ffmpeg, path.as_deref(), &[]), Some(ffmpeg));
+            assert_eq!(
+                locate_in(Tool::Ffmpeg, Os::Linux, path.as_deref(), &[]),
+                Some(ffmpeg)
+            );
         }
 
         #[test]
@@ -848,12 +1205,13 @@ mod tests {
             assert_eq!(
                 locate_in(
                     Tool::Soffice,
+                    Os::Linux,
                     path.as_deref(),
                     &[fixed.path().to_path_buf()]
                 ),
                 Some(soffice)
             );
-            assert_eq!(locate_in(Tool::Soffice, None, &[]), None);
+            assert_eq!(locate_in(Tool::Soffice, Os::Linux, None, &[]), None);
         }
 
         #[test]
@@ -868,7 +1226,7 @@ mod tests {
 
             let path = join_path([half.path(), full.path()]);
             assert_eq!(
-                locate_in(Tool::Pdftoppm, path.as_deref(), &[]),
+                locate_in(Tool::Pdftoppm, Os::Linux, path.as_deref(), &[]),
                 Some(pdftoppm.clone())
             );
             let found = Found {
@@ -893,11 +1251,81 @@ mod tests {
         }
 
         #[test]
+        fn magick_lookup_ignores_a_convert_on_path() {
+            // Stand-in for C:\\Windows\\System32, home of the FAT-to-NTFS convert.exe.
+            let system32 = tempfile::TempDir::new().unwrap();
+            script(system32.path(), "convert", "exit 0");
+            script(system32.path(), "convert.exe", "exit 0");
+            let path = join_path([system32.path()]);
+            for os in [Os::Windows, Os::Linux, Os::MacOs] {
+                assert_eq!(
+                    locate_in(
+                        Tool::Magick,
+                        os,
+                        path.as_deref(),
+                        &[system32.path().to_path_buf()]
+                    ),
+                    None,
+                    "{os:?}"
+                );
+            }
+            let magick = script(system32.path(), "magick", "exit 0");
+            assert_eq!(
+                locate_in(Tool::Magick, Os::Windows, path.as_deref(), &[]),
+                Some(magick)
+            );
+        }
+
+        #[test]
+        fn windows_lookup_prefers_soffice_com_and_gswin64c() {
+            let program = tempfile::TempDir::new().unwrap();
+            script(program.path(), "soffice", "exit 0");
+            let com = script(program.path(), "soffice.com", "exit 0");
+            let extra = [program.path().to_path_buf()];
+            assert_eq!(
+                locate_in(Tool::Soffice, Os::Windows, None, &extra),
+                Some(com)
+            );
+
+            let gui_only = tempfile::TempDir::new().unwrap();
+            let exe = script(gui_only.path(), "soffice", "exit 0");
+            assert_eq!(
+                locate_in(
+                    Tool::Soffice,
+                    Os::Windows,
+                    None,
+                    &[gui_only.path().to_path_buf()]
+                ),
+                Some(exe)
+            );
+
+            // A gs on PATH loses to a gswin64c in Program Files on Windows,
+            // and wins everywhere else.
+            let msys = tempfile::TempDir::new().unwrap();
+            let gs = script(msys.path(), "gs", "exit 0");
+            let gs_bin = tempfile::TempDir::new().unwrap();
+            let gswin = script(gs_bin.path(), "gswin64c", "exit 0");
+            let path = join_path([msys.path()]);
+            let extra = [gs_bin.path().to_path_buf()];
+            assert_eq!(
+                locate_in(Tool::Ghostscript, Os::Windows, path.as_deref(), &extra),
+                Some(gswin)
+            );
+            assert_eq!(
+                locate_in(Tool::Ghostscript, Os::Linux, path.as_deref(), &extra),
+                Some(gs)
+            );
+        }
+
+        #[test]
         fn locate_in_ignores_files_that_are_not_executable() {
             let dir = tempfile::TempDir::new().unwrap();
             std::fs::write(dir.path().join("magick"), "not a program").unwrap();
             let path = join_path([dir.path()]);
-            assert_eq!(locate_in(Tool::Magick, path.as_deref(), &[]), None);
+            assert_eq!(
+                locate_in(Tool::Magick, Os::Linux, path.as_deref(), &[]),
+                None
+            );
         }
 
         #[test]
