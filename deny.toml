@@ -20,7 +20,14 @@ version = 2
 # Unmaintained crates get flagged for the whole tree; yanked ones too.
 unmaintained = "all"
 yanked = "deny"
-ignore = []
+ignore = [
+    # rustybuzz and ttf-parser are marked unmaintained (their authors moved on to
+    # harfrust and skrifa). We only reach them through krilla, usvg and fontdb,
+    # with no direct dependency, so the fix is for those crates to migrate, and
+    # they are on it. Not a vulnerability; drop these once krilla/usvg ship it.
+    { id = "RUSTSEC-2026-0206", reason = "rustybuzz unmaintained; transitive via krilla/usvg, awaiting upstream migration" },
+    { id = "RUSTSEC-2026-0192", reason = "ttf-parser unmaintained; transitive via fontdb/usvg, awaiting upstream migration" },
+]
 
 [licenses]
 version = 2
