@@ -26,6 +26,9 @@ pub enum Category {
     Vector,
     Cad,
     Font,
+    Subtitle,
+    Data,
+    Model3D,
 }
 
 impl Category {
@@ -46,6 +49,9 @@ impl Category {
             Self::Vector => "Vector",
             Self::Cad => "Cad",
             Self::Font => "Font",
+            Self::Subtitle => "Subtitles",
+            Self::Data => "Data",
+            Self::Model3D => "3D models",
         }
     }
 }
@@ -112,10 +118,10 @@ const fn ro(
 
 use Category::*;
 
-// Copied line for line from FormatRegistry.cs. The order is the order users
+// Copied line for line from FormatRegistry.cs, later schema versions included. The order is the order users
 // see in listings, so resist the urge to alphabetise it; I already resisted for you.
 // To add a format: one line here, plus an edge in at least one engine.
-static FORMATS: [Format; 173] = [
+static FORMATS: [Format; 245] = [
     // Raster images
     rw("png", "PNG", Image, &["png"]),
     rw("jpg", "JPG", Image, &["jpg", "jpeg", "jpe", "jfif"]),
@@ -125,18 +131,37 @@ static FORMATS: [Format; 173] = [
     rw("gif", "GIF", Image, &["gif"]),
     rw("ico", "ICO", Image, &["ico"]),
     rw("avif", "AVIF", Image, &["avif"]),
-    rw("heic", "HEIC", Image, &["heic", "heif"]),
+    rw("heic", "HEIC", Image, &["heic", "heif", "hif"]),
     rw("jxl", "JPEG XL", Image, &["jxl"]),
     rw("jp2", "JPEG 2000", Image, &["jp2", "j2k", "jpf", "jpx"]),
     rw("psd", "PSD", Image, &["psd"]),
     rw("psb", "PSB", Image, &["psb"]),
     rw("tga", "TGA", Image, &["tga", "icb", "vda", "vst"]),
-    rw("qoi", "QOI", Image, &["qoi"]),
     // One id for the whole Netpbm family: pgm, pbm and pnm are extension
     // aliases of ppm, since one PNM encoder writes them all. Splitting it would
     // be four ids doing one job.
     rw("ppm", "PPM", Image, &["ppm", "pgm", "pbm", "pnm"]),
     rw("icns", "ICNS", Image, &["icns"]),
+    // APNG gets its own id even though half the world ships it as .png;
+    // telling those apart by content is PX-37's job, not the extension table's.
+    rw("apng", "APNG", Image, &["apng"]),
+    rw("mng", "MNG", Image, &["mng"]),
+    rw("qoi", "QOI", Image, &["qoi"]),
+    rw("dds", "DDS", Image, &["dds"]),
+    rw("pcx", "PCX", Image, &["pcx"]),
+    rw("cur", "CUR", Image, &["cur"]),
+    rw("xpm", "XPM", Image, &["xpm"]),
+    rw("xbm", "XBM", Image, &["xbm"]),
+    rw("wbmp", "WBMP", Image, &["wbmp"]),
+    rw("pam", "PAM", Image, &["pam"]),
+    rw("pfm", "PFM", Image, &["pfm"]),
+    rw("sgi", "SGI", Image, &["sgi", "rgb", "rgba", "bw"]),
+    rw("ras", "Sun Raster", Image, &["ras", "sun"]),
+    rw("miff", "MIFF", Image, &["miff"]),
+    ro("dcm", "DICOM", Image, &["dcm", "dicom"]),
+    ro("pcd", "Photo CD", Image, &["pcd"]),
+    ro("exr", "OpenEXR", Image, &["exr"]),
+    ro("hdr", "Radiance HDR", Image, &["hdr"]),
     ro("xcf", "XCF", Image, &["xcf"]),
     ro(
         "raw",
@@ -160,6 +185,7 @@ static FORMATS: [Format; 173] = [
     ro("cgm", "CGM", Vector, &["cgm"]),
     ro("vsd", "VSD", Vector, &["vsd", "vsdx"]),
     rw("odg", "ODG", Vector, &["odg"]),
+    ro("fodg", "FODG", Vector, &["fodg"]),
     // PDF
     rw("pdf", "PDF", Pdf, &["pdf"]),
     // Word processing
@@ -170,6 +196,8 @@ static FORMATS: [Format; 173] = [
     rw("doc", "DOC", Document, &["doc"]),
     ro("dot", "DOT", Document, &["dot"]),
     rw("odt", "ODT", Document, &["odt"]),
+    rw("fodt", "FODT", Document, &["fodt"]),
+    rw("ott", "OTT", Document, &["ott"]),
     rw("rtf", "RTF", Document, &["rtf"]),
     ro("wps", "WPS", Document, &["wps"]),
     ro("wpd", "WPD", Document, &["wpd"]),
@@ -177,8 +205,14 @@ static FORMATS: [Format; 173] = [
     ro("abw", "ABW", Document, &["abw", "zabw"]),
     ro("pages", "Pages", Document, &["pages"]),
     ro("sdw", "SDW", Document, &["sdw"]),
+    ro("cwk", "ClarisWorks", Document, &["cwk"]),
+    ro("mcw", "MacWrite", Document, &["mcw"]),
+    ro("602", "T602", Document, &["602"]),
+    ro("psw", "Pocket Word", Document, &["psw"]),
     ro("pub", "PUB", Document, &["pub"]),
     ro("eml", "EML", Document, &["eml"]),
+    // Filee files Outlook mail under documents, next to its .eml cousin.
+    ro("msg", "MSG", Document, &["msg"]),
     // Korean word processor (Hancom)
     rw("hwpx", "HWPX", Hwp, &["hwpx"]),
     rw("hwp", "HWP", Hwp, &["hwp"]),
@@ -186,8 +220,11 @@ static FORMATS: [Format; 173] = [
     rw("xlsx", "XLSX", Spreadsheet, &["xlsx"]),
     rw("xlsm", "XLSM", Spreadsheet, &["xlsm"]),
     rw("xltx", "XLTX", Spreadsheet, &["xltx"]),
-    rw("xls", "XLS", Spreadsheet, &["xls", "xlt"]),
+    rw("xls", "XLS", Spreadsheet, &["xls"]),
+    rw("xlt", "XLT", Spreadsheet, &["xlt"]),
     rw("ods", "ODS", Spreadsheet, &["ods"]),
+    rw("ots", "OTS", Spreadsheet, &["ots"]),
+    ro("fods", "FODS", Spreadsheet, &["fods"]),
     rw("csv", "CSV", Spreadsheet, &["csv"]),
     rw("tsv", "TSV", Spreadsheet, &["tsv", "tab"]),
     ro("et", "ET", Spreadsheet, &["et"]),
@@ -200,6 +237,8 @@ static FORMATS: [Format; 173] = [
     rw("ppsx", "PPSX", Presentation, &["ppsx"]),
     rw("ppt", "PPT", Presentation, &["ppt", "pps", "pot"]),
     rw("odp", "ODP", Presentation, &["odp"]),
+    rw("otp", "OTP", Presentation, &["otp"]),
+    ro("fodp", "FODP", Presentation, &["fodp"]),
     ro("key", "Keynote", Presentation, &["key"]),
     ro("dps", "DPS", Presentation, &["dps"]),
     ro("sda", "SDA", Presentation, &["sda", "sdd"]),
@@ -209,8 +248,33 @@ static FORMATS: [Format; 173] = [
     rw("html", "HTML", Text, &["html", "htm", "xhtml"]),
     rw("rst", "reStructuredText", Text, &["rst"]),
     rw("tex", "LaTeX", Text, &["tex", "latex"]),
+    // Pandoc reads these (PX-54); MorphRing never writes them, so they stay
+    // read-only. Man pages claim only ".man": ".1" to ".9" are also what
+    // logrotate leaves behind, and nobody wants app.log.1 typeset. DocBook
+    // claims ".dbk", not every ".xml" in the building.
+    ro("org", "Org", Text, &["org"]),
+    ro("adoc", "AsciiDoc", Text, &["adoc", "asciidoc"]),
+    ro("typ", "Typst", Text, &["typ"]),
+    ro("mediawiki", "MediaWiki", Text, &["mediawiki", "wiki"]),
+    ro("dbk", "DocBook", Text, &["dbk", "docbook"]),
+    ro("ipynb", "Jupyter", Text, &["ipynb"]),
+    ro("textile", "Textile", Text, &["textile"]),
+    ro("man", "Man page", Text, &["man"]),
+    ro("opml", "OPML", Text, &["opml"]),
+    // Structured data. CSV stays a spreadsheet; the data engine adds the
+    // CSV <-> JSON / YAML / TOML / XML edges. ".xml" means a data document
+    // here: the XML formats we convert properly have their own extensions.
+    rw("json", "JSON", Data, &["json"]),
+    rw("jsonl", "JSON Lines", Data, &["jsonl", "ndjson"]),
+    rw("yaml", "YAML", Data, &["yaml", "yml"]),
+    rw("toml", "TOML", Data, &["toml"]),
+    rw("xml", "XML", Data, &["xml"]),
+    rw("vcf", "vCard", Data, &["vcf", "vcard"]),
     // E-books
     rw("epub", "EPUB", Ebook, &["epub"]),
+    // Kobo's flavour. "kepub.epub" is two-part, so extension_of picks it
+    // over the plain "epub" it ends with, same trick as tar.gz.
+    rw("kepub", "KEPUB", Ebook, &["kepub.epub", "kepub"]),
     rw("mobi", "MOBI", Ebook, &["mobi"]),
     rw("azw3", "AZW3", Ebook, &["azw3"]),
     ro("azw", "AZW", Ebook, &["azw"]),
@@ -276,6 +340,17 @@ static FORMATS: [Format; 173] = [
     rw("mp2", "MP2", Audio, &["mp2", "mpa"]),
     ro("dss", "DSS", Audio, &["dss"]),
     rw("voc", "VOC", Audio, &["voc"]),
+    rw("wv", "WavPack", Audio, &["wv"]),
+    rw("tta", "TTA", Audio, &["tta"]),
+    rw("w64", "W64", Audio, &["w64"]),
+    rw("eac3", "E-AC3", Audio, &["eac3", "ec3"]),
+    ro("ape", "APE", Audio, &["ape"]),
+    ro("mpc", "Musepack", Audio, &["mpc", "mpp", "mp+"]),
+    ro("tak", "TAK", Audio, &["tak"]),
+    ro("dsf", "DSF", Audio, &["dsf"]),
+    ro("dff", "DFF", Audio, &["dff"]),
+    ro("dts", "DTS", Audio, &["dts"]),
+    ro("spx", "Speex", Audio, &["spx"]),
     // Archives
     rw("zip", "ZIP", Archive, &["zip"]),
     rw("7z", "7Z", Archive, &["7z"]),
@@ -320,6 +395,23 @@ static FORMATS: [Format; 173] = [
     rw("woff", "WOFF", Font, &["woff"]),
     rw("woff2", "WOFF2", Font, &["woff2"]),
     rw("eot", "EOT", Font, &["eot"]),
+    // Subtitles (text)
+    rw("srt", "SRT", Subtitle, &["srt"]),
+    rw("ass", "ASS", Subtitle, &["ass"]),
+    ro("ssa", "SSA", Subtitle, &["ssa"]),
+    rw("vtt", "WebVTT", Subtitle, &["vtt"]),
+    rw("smi", "SAMI", Subtitle, &["smi", "sami"]),
+    rw("lrc", "LRC", Subtitle, &["lrc"]),
+    rw("ttml", "TTML", Subtitle, &["ttml", "dfxp"]),
+    rw("sub", "MicroDVD", Subtitle, &["sub"]),
+    ro("scc", "SCC", Subtitle, &["scc"]),
+    // 3D models
+    rw("glb", "GLB", Model3D, &["glb"]),
+    rw("gltf", "glTF", Model3D, &["gltf"]),
+    rw("stl", "STL", Model3D, &["stl"]),
+    rw("obj", "OBJ", Model3D, &["obj"]),
+    rw("3mf", "3MF", Model3D, &["3mf"]),
+    rw("ply", "PLY", Model3D, &["ply"]),
 ];
 
 /// Every known format, in display order. Includes the folder pseudo-format.
@@ -476,14 +568,136 @@ mod tests {
 
     #[test]
     fn table_matches_filee() {
-        // PLAN.md and docs/reverse-engineering/07 say 171 and 56, but counting
-        // FormatRegistry.cs itself (and doc 07's own table) gives 171 real
-        // formats plus folder, 57 of them read-only. The source wins. MorphRing
-        // adds one of its own on top (qoi), hence 173.
-        assert_eq!(all().len(), 173);
-        assert_eq!(all().iter().filter(|f| !f.writable).count(), 57);
+        // Filee's FormatRegistry.cs, line for line: 244 real formats plus
+        // folder. The read-only count differs on purpose: emf, wmf and eml
+        // stay read-only until an engine can write them, and the Pandoc-only
+        // markups (org ... opml) are inputs here, not targets.
+        assert_eq!(all().len(), 245);
+        assert_eq!(all().iter().filter(|f| !f.writable).count(), 87);
         assert_eq!(all()[0].id.as_str(), "png");
-        assert_eq!(all().last().map(|f| f.id.as_str()), Some("eot"));
+        assert_eq!(all().last().map(|f| f.id.as_str()), Some("ply"));
+    }
+
+    #[test]
+    fn filee_later_schema_formats_resolve() {
+        use Category::*;
+        // (file name, id, category, writable). One row per id PX-01 added,
+        // so a fat-fingered extension or flipped flag fails by name.
+        let table: &[(&str, &str, Category, bool)] = &[
+            ("a.srt", "srt", Subtitle, true),
+            ("a.vtt", "vtt", Subtitle, true),
+            ("a.ass", "ass", Subtitle, true),
+            ("a.ssa", "ssa", Subtitle, false),
+            ("a.smi", "smi", Subtitle, true),
+            ("a.sami", "smi", Subtitle, true),
+            ("a.lrc", "lrc", Subtitle, true),
+            ("a.ttml", "ttml", Subtitle, true),
+            ("a.dfxp", "ttml", Subtitle, true),
+            ("a.sub", "sub", Subtitle, true),
+            ("a.scc", "scc", Subtitle, false),
+            ("a.json", "json", Data, true),
+            ("a.jsonl", "jsonl", Data, true),
+            ("a.ndjson", "jsonl", Data, true),
+            ("a.yaml", "yaml", Data, true),
+            ("a.yml", "yaml", Data, true),
+            ("a.toml", "toml", Data, true),
+            ("a.xml", "xml", Data, true),
+            ("a.vcf", "vcf", Data, true),
+            ("a.vcard", "vcf", Data, true),
+            ("a.msg", "msg", Document, false),
+            ("a.glb", "glb", Model3D, true),
+            ("a.gltf", "gltf", Model3D, true),
+            ("a.stl", "stl", Model3D, true),
+            ("a.obj", "obj", Model3D, true),
+            ("a.3mf", "3mf", Model3D, true),
+            ("a.ply", "ply", Model3D, true),
+            ("a.apng", "apng", Image, true),
+            ("a.mng", "mng", Image, true),
+            ("a.dds", "dds", Image, true),
+            ("a.dcm", "dcm", Image, false),
+            ("a.dicom", "dcm", Image, false),
+            ("a.exr", "exr", Image, false),
+            ("a.hdr", "hdr", Image, false),
+            ("a.pcx", "pcx", Image, true),
+            ("a.sgi", "sgi", Image, true),
+            ("a.rgb", "sgi", Image, true),
+            ("a.xbm", "xbm", Image, true),
+            ("a.xpm", "xpm", Image, true),
+            ("a.wbmp", "wbmp", Image, true),
+            ("a.pam", "pam", Image, true),
+            ("a.pfm", "pfm", Image, true),
+            ("a.miff", "miff", Image, true),
+            ("a.ras", "ras", Image, true),
+            ("a.sun", "ras", Image, true),
+            ("a.cur", "cur", Image, true),
+            ("a.pcd", "pcd", Image, false),
+            ("a.hif", "heic", Image, true),
+            ("a.kepub", "kepub", Ebook, true),
+            ("a.org", "org", Text, false),
+            ("a.adoc", "adoc", Text, false),
+            ("a.asciidoc", "adoc", Text, false),
+            ("a.typ", "typ", Text, false),
+            ("a.textile", "textile", Text, false),
+            ("a.mediawiki", "mediawiki", Text, false),
+            ("a.wiki", "mediawiki", Text, false),
+            ("a.man", "man", Text, false),
+            ("a.dbk", "dbk", Text, false),
+            ("a.opml", "opml", Text, false),
+            ("a.ipynb", "ipynb", Text, false),
+            ("a.fodt", "fodt", Document, true),
+            ("a.ott", "ott", Document, true),
+            ("a.cwk", "cwk", Document, false),
+            ("a.mcw", "mcw", Document, false),
+            ("a.psw", "psw", Document, false),
+            ("a.602", "602", Document, false),
+            ("a.xlt", "xlt", Spreadsheet, true),
+            ("a.ots", "ots", Spreadsheet, true),
+            ("a.fods", "fods", Spreadsheet, false),
+            ("a.otp", "otp", Presentation, true),
+            ("a.fodp", "fodp", Presentation, false),
+            ("a.fodg", "fodg", Vector, false),
+            ("a.ape", "ape", Audio, false),
+            ("a.tta", "tta", Audio, true),
+            ("a.wv", "wv", Audio, true),
+            ("a.tak", "tak", Audio, false),
+            ("a.mpc", "mpc", Audio, false),
+            ("a.mp+", "mpc", Audio, false),
+            ("a.dsf", "dsf", Audio, false),
+            ("a.dff", "dff", Audio, false),
+            ("a.dts", "dts", Audio, false),
+            ("a.eac3", "eac3", Audio, true),
+            ("a.ec3", "eac3", Audio, true),
+            ("a.spx", "spx", Audio, false),
+            ("a.w64", "w64", Audio, true),
+            ("a.tbz2", "tbz2", Archive, true),
+        ];
+        for &(name, want, category, writable) in table {
+            let format = detect(name).unwrap_or_else(|| panic!("{name} detects nothing"));
+            assert_eq!(format.id.as_str(), want, "{name}");
+            assert_eq!(format.category, category, "{name}");
+            assert_eq!(format.writable, writable, "{name}");
+            assert_eq!(id(find_by_id(want)), Some(want), "{want} by id");
+        }
+    }
+
+    #[test]
+    fn two_part_extensions_beat_their_last_part() {
+        assert_eq!(id(detect("book.kepub.epub")), Some("kepub"));
+        assert_eq!(id(detect("Book.KEPUB.EPUB")), Some("kepub"));
+        assert_eq!(extension_of("book.kepub.epub"), "kepub.epub");
+        assert_eq!(name_without_extension("book.kepub.epub"), "book");
+        assert_eq!(id(detect("book.epub")), Some("epub"));
+        assert_eq!(
+            find_by_id("kepub").unwrap().primary_extension(),
+            "kepub.epub"
+        );
+        assert_eq!(id(detect("x.yml")), Some("yaml"));
+        // .apng and .png are different ids; sniffing APNG inside a .png is PX-37's.
+        assert_eq!(id(detect("x.apng")), Some("apng"));
+        assert_eq!(id(detect("x.png")), Some("png"));
+        // xlt used to ride along with xls; Filee gives it its own id.
+        assert_eq!(id(detect("x.xls")), Some("xls"));
+        assert_eq!(id(detect("x.xlt")), Some("xlt"));
     }
 
     #[test]
@@ -658,12 +872,15 @@ mod tests {
                 "Spreadsheet",
                 "Presentation",
                 "Text",
+                "Data",
                 "Ebook",
                 "Video",
                 "Audio",
                 "Archive",
                 "Cad",
-                "Font"
+                "Font",
+                "Subtitles",
+                "3D models"
             ]
         );
     }
