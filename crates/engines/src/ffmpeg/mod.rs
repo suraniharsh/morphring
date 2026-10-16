@@ -176,12 +176,14 @@ fn source_of(info: &MediaInfo) -> Source<'_> {
         video: info.video.as_ref().map(|v| VideoSource {
             codec: v.codec.as_deref(),
             pix_fmt: v.pix_fmt.as_deref(),
+            codec_tag: v.codec_tag.as_deref(),
             width: v.width,
             height: v.height,
             fps: (v.frame_rate > 0.0).then_some(v.frame_rate),
         }),
         audio: info.audio.as_ref().map(|a| AudioSource {
             codec: a.codec.as_deref(),
+            codec_tag: a.codec_tag.as_deref(),
             channels: a.channels,
         }),
         duration: info.duration,

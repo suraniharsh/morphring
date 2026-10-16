@@ -1,6 +1,6 @@
 //! Which container and codecs MorphRing writes for each video and audio format,
 //! and the ffmpeg command lines that do it. Ported from Filee's
-//! `src/Filee.Engines/Media/MediaEncoding.cs` (the v0.1.0 subset).
+//! `src/Filee.Engines/Media/MediaEncoding.cs`, remux matrix included.
 //!
 //! Everything here is pure: no processes, no file system. The engine (T24)
 //! probes the input, hands the facts in as a [`Source`] and runs the passes.
@@ -98,6 +98,8 @@ pub struct VideoSource<'a> {
     pub codec: Option<&'a str>,
     /// ffprobe `pix_fmt`, such as `yuv420p`.
     pub pix_fmt: Option<&'a str>,
+    /// ffprobe `codec_tag_string`, the FourCC such as `hev1` or `XVID`.
+    pub codec_tag: Option<&'a str>,
     /// Stored width in pixels (before rotation), 0 when unknown.
     pub width: u32,
     /// Stored height in pixels (before rotation), 0 when unknown.
@@ -111,6 +113,8 @@ pub struct VideoSource<'a> {
 pub struct AudioSource<'a> {
     /// ffprobe `codec_name`, such as `aac`.
     pub codec: Option<&'a str>,
+    /// ffprobe `codec_tag_string`, such as `mp4a`.
+    pub codec_tag: Option<&'a str>,
     /// Channel count, 0 when unknown.
     pub channels: u32,
 }
@@ -266,6 +270,7 @@ pub fn video_args(
 
     if can_copy_video(to, video, quality) {
         a.extend(["-c:v", "copy"]);
+        a.extend(copy_tag(to, video));
     } else {
         a.push("-vf").push(scale_filter());
         a.extend(video_codec_args(video_codec, quality, video));
@@ -275,7 +280,9 @@ pub fn video_args(
         None => {
             a.push("-an");
         }
-        Some(audio) if can_copy_video(to, video, quality) && can_copy_audio(to, audio) => {
+        // Not wired to the user's bitrate and channel settings yet, so no overrides:
+        // the soundtrack is copied whenever the container takes it as it is.
+        Some(audio) if can_copy_audio(to, audio, quality, AudioOverrides::default()) => {
             a.extend(["-c:a", "copy"]);
         }
         Some(audio) => {
@@ -292,23 +299,41 @@ pub fn video_args(
     Ok(a.finish())
 }
 
-/// True when the video stream is rewrapped as is instead of re-encoded.
+/// Video codecs each container takes as they are.
 ///
-/// v0.1.0 keeps Filee's remux idea but only its most common case: h264 in
-/// yuv420p going into mp4, mkv or mov, and never at `Small` quality (Small
-/// always re-encodes; High and Normal only say how to encode when we must).
-pub fn can_copy_video(to: &str, video: &VideoSource<'_>, quality: QualityLevel) -> bool {
-    quality != QualityLevel::Small
-        && matches!(to, "mp4" | "mkv" | "mov")
-        && video.codec == Some("h264")
-        && video.pix_fmt == Some("yuv420p")
+/// A video whose codec is listed for the target is only rewrapped: no quality
+/// loss, HDR and 10-bit kept, seconds instead of minutes. iPhone clips (HEVC or
+/// H.264 in MOV) become MP4 this way. MP4 and MOV keep to what Apple devices and
+/// browsers play, WebM to what its specification allows, AVI to what the old
+/// DivX/Xvid players read. Matroska takes nearly anything.
+fn remuxable_video(to: &str) -> &'static [&'static str] {
+    match to {
+        "mp4" | "m4v" => &["h264", "hevc", "av1", "mpeg4"],
+        // No AV1 here: ffmpeg's mov muxer refuses it ("only supported in MP4 and AVIF").
+        "mov" => &["h264", "hevc", "prores", "mpeg4"],
+        "mkv" => &[
+            "h264",
+            "hevc",
+            "av1",
+            "vp8",
+            "vp9",
+            "mpeg4",
+            "mpeg2video",
+            "prores",
+            "theora",
+        ],
+        "webm" => &["vp8", "vp9", "av1"],
+        "avi" => &["mpeg4", "msmpeg4v3"],
+        "ts" | "m2ts" => &["h264", "hevc"],
+        _ => &[],
+    }
 }
 
-/// Audio codecs the remux targets take as they are (Filee's table, trimmed to
-/// the three containers v0.1.0 remuxes into).
-fn can_copy_audio(to: &str, audio: &AudioSource<'_>) -> bool {
-    let allowed: &[&str] = match to {
-        "mp4" => &["aac", "alac", "ac3", "eac3", "mp3"],
+/// Audio codecs each container takes as they are (Filee's table, plus the
+/// handful of extras Matroska and AVI are known to swallow).
+fn remuxable_audio(to: &str) -> &'static [&'static str] {
+    match to {
+        "mp4" | "m4v" => &["aac", "alac", "ac3", "eac3", "mp3"],
         "mov" => &[
             "aac",
             "alac",
@@ -319,11 +344,97 @@ fn can_copy_audio(to: &str, audio: &AudioSource<'_>) -> bool {
             "pcm_s24le",
         ],
         "mkv" => &[
-            "aac", "alac", "ac3", "eac3", "mp3", "opus", "vorbis", "flac",
+            "aac",
+            "alac",
+            "ac3",
+            "eac3",
+            "mp3",
+            "mp2",
+            "opus",
+            "vorbis",
+            "flac",
+            "dts",
+            "truehd",
+            "pcm_s16le",
+            "pcm_s24le",
         ],
+        "webm" => &["opus", "vorbis"],
+        "avi" => &["mp3", "mp2", "ac3", "pcm_s16le"],
+        "ts" => &["aac", "ac3", "eac3", "mp3"],
+        "m2ts" => &["aac", "ac3", "eac3"],
         _ => &[],
+    }
+}
+
+/// Pixel formats players decode in hardware: 4:2:0 at 8 or 10 bits (phones
+/// record HDR as 10-bit, and we would like to keep it that way).
+const PLAYABLE_PIX_FMTS: [&str; 3] = ["yuv420p", "yuvj420p", "yuv420p10le"];
+
+/// True when the video stream is rewrapped as is instead of re-encoded.
+///
+/// The target container must take the codec, the pixel format must be one
+/// players decode (ProRes is exempt, it lives in editing suites, not phones),
+/// and the quality must not be `Small`: Small always re-encodes, while High
+/// and Normal only say how to encode when we have to.
+pub fn can_copy_video(to: &str, video: &VideoSource<'_>, quality: QualityLevel) -> bool {
+    let Some(codec) = video.codec else {
+        return false;
     };
-    audio.codec.is_some_and(|c| allowed.contains(&c))
+    quality != QualityLevel::Small
+        && remuxable_video(to).contains(&codec)
+        && (codec == "prores"
+            || video
+                .pix_fmt
+                .is_some_and(|f| PLAYABLE_PIX_FMTS.contains(&f)))
+}
+
+/// Audio settings the user asked for that a stream copy cannot honour.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct AudioOverrides {
+    /// Requested bitrate in kbit/s; 0 keeps the default.
+    pub bitrate_kbps: u32,
+    /// Requested channel count: 1 is mono, 2 stereo, anything else keeps the source.
+    pub channels: u32,
+}
+
+/// True when the audio stream is copied as is: the quality is not `Small`, no
+/// bitrate is forced, the channel count stays what it is, and the target
+/// container takes the codec.
+pub fn can_copy_audio(
+    to: &str,
+    audio: &AudioSource<'_>,
+    quality: QualityLevel,
+    overrides: AudioOverrides,
+) -> bool {
+    quality != QualityLevel::Small
+        && overrides.bitrate_kbps == 0
+        && (!matches!(overrides.channels, 1 | 2) || overrides.channels == audio.channels)
+        && audio
+            .codec
+            .is_some_and(|c| remuxable_audio(to).contains(&c))
+}
+
+/// FourCCs AVI players recognise for MPEG-4 part 2 video.
+const AVI_MPEG4_TAGS: [&str; 4] = ["XVID", "DIVX", "DX50", "FMP4"];
+
+/// The `-tag:v` a copied video stream needs to be playable where it lands.
+///
+/// Apple only plays HEVC in MP4/MOV under the `hvc1` tag, and ffmpeg keeps
+/// `hev1` from some sources, so HEVC is always retagged. MPEG-4 part 2 out of
+/// an MP4 arrives as `mp4v`, which AVI players have never heard of; it becomes
+/// `XVID` unless it already wears a FourCC they know.
+fn copy_tag(to: &str, video: &VideoSource<'_>) -> &'static [&'static str] {
+    match (video.codec, to) {
+        (Some("hevc"), "mp4" | "m4v" | "mov") => &["-tag:v", "hvc1"],
+        (Some("mpeg4"), "avi")
+            if !video
+                .codec_tag
+                .is_some_and(|t| AVI_MPEG4_TAGS.iter().any(|k| k.eq_ignore_ascii_case(t))) =>
+        {
+            &["-tag:v", "XVID"]
+        }
+        _ => &[],
+    }
 }
 
 /// Makes both sides even, which 4:2:0 encoders insist on (an odd-sized phone
@@ -692,12 +803,14 @@ mod tests {
             video: Some(VideoSource {
                 codec: Some("h264"),
                 pix_fmt: Some("yuv420p"),
+                codec_tag: None,
                 width: 1920,
                 height: 1080,
                 fps: Some(30.0),
             }),
             audio: Some(AudioSource {
                 codec: Some("aac"),
+                codec_tag: None,
                 channels: 2,
             }),
             duration: Some(12.5),
@@ -709,6 +822,7 @@ mod tests {
             video: None,
             audio: Some(AudioSource {
                 codec: Some("pcm_s16le"),
+                codec_tag: None,
                 channels: 2,
             }),
             duration: Some(3.0),
@@ -794,27 +908,274 @@ mod tests {
         assert!(has_pair(&args, "-b:a", "128k"));
     }
 
-    #[test]
-    fn hevc_into_mp4_re_encodes() {
+    fn clip(
+        codec: &'static str,
+        pix_fmt: &'static str,
+        tag: Option<&'static str>,
+    ) -> Source<'static> {
         let mut source = h264_mp4();
-        if let Some(v) = source.video.as_mut() {
-            v.codec = Some("hevc");
-        }
-        let args = video("mp4", QualityLevel::High, &source);
-        assert!(!strs(&args).contains(&"copy"));
-        assert!(has_pair(&args, "-c:v", "libx264"));
-        assert!(has_pair(&args, "-crf", "18"));
-        assert!(has_pair(&args, "-movflags", "+faststart"));
-        assert!(has_pair(&args, "-f", "mp4"));
+        source.video = Some(VideoSource {
+            codec: Some(codec),
+            pix_fmt: Some(pix_fmt),
+            codec_tag: tag,
+            width: 1920,
+            height: 1080,
+            fps: Some(30.0),
+        });
+        source
+    }
+
+    /// Everything between the `-map`s and the metadata flags: the codec choices.
+    fn codec_part(args: &[OsString]) -> Vec<&str> {
+        let all = strs(args);
+        let start = all.iter().rposition(|a| a.starts_with("0:")).unwrap() + 1;
+        let end = all.iter().position(|a| *a == "-map_metadata").unwrap();
+        all[start..end].to_vec()
     }
 
     #[test]
-    fn ten_bit_h264_is_not_copied() {
+    fn iphone_hevc_mov_to_mp4_is_a_copy_tagged_hvc1() {
+        let mut source = clip("hevc", "yuv420p10le", Some("hev1"));
+        if let Some(a) = source.audio.as_mut() {
+            a.codec_tag = Some("mp4a");
+        }
+        let args = video_args(
+            Path::new("IMG_0042.MOV"),
+            Path::new("out.mp4"),
+            "mp4",
+            QualityLevel::Normal,
+            &source,
+        )
+        .unwrap();
+        assert_eq!(
+            strs(&args),
+            [
+                "-hide_banner",
+                "-nostdin",
+                "-nostats",
+                "-v",
+                "error",
+                "-y",
+                "-i",
+                "IMG_0042.MOV",
+                "-map",
+                "0:V:0",
+                "-map",
+                "0:a:0",
+                "-c:v",
+                "copy",
+                "-tag:v",
+                "hvc1",
+                "-c:a",
+                "copy",
+                "-map_metadata",
+                "0",
+                "-metadata",
+                "major_brand=",
+                "-metadata",
+                "minor_version=",
+                "-metadata",
+                "compatible_brands=",
+                "-movflags",
+                "+faststart",
+                "-max_muxing_queue_size",
+                "4096",
+                "-f",
+                "mp4",
+                "-progress",
+                "pipe:1",
+                "out.mp4",
+            ]
+        );
+    }
+
+    #[test]
+    fn hevc_gets_hvc1_in_apple_containers_only() {
+        let source = clip("hevc", "yuv420p", Some("hvc1"));
+        for to in ["mp4", "mov"] {
+            assert_eq!(
+                codec_part(&video(to, QualityLevel::High, &source)),
+                ["-c:v", "copy", "-tag:v", "hvc1", "-c:a", "copy"],
+                "{to}"
+            );
+        }
+        assert_eq!(
+            codec_part(&video("mkv", QualityLevel::High, &source)),
+            ["-c:v", "copy", "-c:a", "copy"]
+        );
+    }
+
+    #[test]
+    fn h264_yuv420p_mkv_to_mp4_is_a_copy() {
+        let source = clip("h264", "yuv420p", None);
+        assert_eq!(
+            codec_part(&video("mp4", QualityLevel::Normal, &source)),
+            ["-c:v", "copy", "-c:a", "copy"]
+        );
+    }
+
+    #[test]
+    fn vp9_webm_to_mp4_re_encodes() {
+        let mut source = clip("vp9", "yuv420p", None);
+        source.audio = Some(AudioSource {
+            codec: Some("opus"),
+            codec_tag: None,
+            channels: 2,
+        });
+        assert_eq!(
+            codec_part(&video("mp4", QualityLevel::Normal, &source)),
+            [
+                "-vf",
+                scale_filter(),
+                "-c:v",
+                "libx264",
+                "-preset",
+                "medium",
+                "-crf",
+                "23",
+                "-pix_fmt",
+                "yuv420p",
+                "-c:a",
+                "aac",
+                "-b:a",
+                "192k",
+            ]
+        );
+    }
+
+    #[test]
+    fn aac_is_copied_into_mkv_even_when_the_video_is_re_encoded() {
+        // Motion JPEG in 4:2:2 is not something to keep, but its AAC soundtrack is.
+        let source = clip("mjpeg", "yuvj422p", None);
+        let args = video("mkv", QualityLevel::Normal, &source);
+        let part = codec_part(&args);
+        assert_eq!(part[..4], ["-vf", scale_filter(), "-c:v", "libx264"]);
+        assert_eq!(part[part.len() - 2..], ["-c:a", "copy"]);
+    }
+
+    #[test]
+    fn fit_matrix_per_container() {
+        let copies = |codec, fmt, to| {
+            can_copy_video(
+                to,
+                &clip(codec, fmt, None).video.unwrap(),
+                QualityLevel::High,
+            )
+        };
+        for to in ["mp4", "m4v"] {
+            for codec in ["h264", "hevc", "av1", "mpeg4"] {
+                assert!(copies(codec, "yuv420p", to), "{codec} -> {to}");
+            }
+            assert!(!copies("vp9", "yuv420p", to));
+            assert!(!copies("prores", "yuv422p10le", to));
+        }
+        assert!(copies("prores", "yuv422p10le", "mov"));
+        assert!(copies("mpeg4", "yuv420p", "mov"));
+        // ffmpeg's mov muxer refuses AV1 outright.
+        assert!(!copies("av1", "yuv420p", "mov"));
+        for codec in ["h264", "hevc", "av1", "vp8", "vp9", "mpeg2video", "theora"] {
+            assert!(copies(codec, "yuv420p", "mkv"), "{codec} -> mkv");
+        }
+        assert!(copies("prores", "yuv444p12le", "mkv"));
+        for codec in ["vp8", "vp9", "av1"] {
+            assert!(copies(codec, "yuv420p", "webm"));
+        }
+        assert!(!copies("h264", "yuv420p", "webm"));
+        assert!(copies("mpeg4", "yuv420p", "avi"));
+        assert!(!copies("h264", "yuv420p", "avi"));
+        assert!(copies("h264", "yuv420p", "ts"));
+        assert!(!copies("h264", "yuv420p", "gif"));
+    }
+
+    #[test]
+    fn pix_fmt_allow_list() {
+        let copies = |fmt| {
+            can_copy_video(
+                "mp4",
+                &clip("hevc", fmt, None).video.unwrap(),
+                QualityLevel::Normal,
+            )
+        };
+        assert!(copies("yuv420p"));
+        assert!(copies("yuvj420p"));
+        assert!(copies("yuv420p10le"));
+        assert!(!copies("yuv422p"));
+        assert!(!copies("yuv444p"));
+        let mut unknown = clip("h264", "yuv420p", None);
+        if let Some(v) = unknown.video.as_mut() {
+            v.pix_fmt = None;
+        }
+        assert!(!can_copy_video(
+            "mkv",
+            unknown.video.as_ref().unwrap(),
+            QualityLevel::High
+        ));
+        assert!(!can_copy_video(
+            "mp4",
+            &clip("hevc", "yuv420p", None).video.unwrap(),
+            QualityLevel::Small
+        ));
+    }
+
+    #[test]
+    fn audio_copy_rules() {
+        let aac = AudioSource {
+            codec: Some("aac"),
+            codec_tag: None,
+            channels: 2,
+        };
+        let none = AudioOverrides::default();
+        assert!(can_copy_audio("mkv", &aac, QualityLevel::Normal, none));
+        assert!(can_copy_audio("mp4", &aac, QualityLevel::High, none));
+        assert!(!can_copy_audio("webm", &aac, QualityLevel::High, none));
+        assert!(!can_copy_audio("mkv", &aac, QualityLevel::Small, none));
+        let bitrate = AudioOverrides {
+            bitrate_kbps: 128,
+            channels: 0,
+        };
+        assert!(!can_copy_audio("mkv", &aac, QualityLevel::High, bitrate));
+        let mono = AudioOverrides {
+            bitrate_kbps: 0,
+            channels: 1,
+        };
+        let stereo = AudioOverrides {
+            channels: 2,
+            ..mono
+        };
+        assert!(!can_copy_audio("mkv", &aac, QualityLevel::High, mono));
+        assert!(can_copy_audio("mkv", &aac, QualityLevel::High, stereo));
+        let opus = AudioSource {
+            codec: Some("opus"),
+            ..aac
+        };
+        assert!(can_copy_audio("webm", &opus, QualityLevel::High, none));
+        assert!(!can_copy_audio("mp4", &opus, QualityLevel::High, none));
+        let unknown = AudioSource { codec: None, ..aac };
+        assert!(!can_copy_audio("mkv", &unknown, QualityLevel::High, none));
+    }
+
+    #[test]
+    fn mpeg4_into_avi_is_retagged_xvid_unless_it_already_is() {
+        let from_mp4 = clip("mpeg4", "yuv420p", Some("mp4v"));
+        let args = video("avi", QualityLevel::High, &from_mp4);
+        assert!(has_pair(&args, "-c:v", "copy"));
+        assert!(has_pair(&args, "-tag:v", "XVID"));
+        let divx = clip("mpeg4", "yuv420p", Some("DIVX"));
+        let args = video("avi", QualityLevel::High, &divx);
+        assert!(has_pair(&args, "-c:v", "copy"));
+        assert!(!strs(&args).contains(&"-tag:v"));
+    }
+
+    #[test]
+    fn four_two_two_h264_is_not_copied() {
         let mut source = h264_mp4();
         if let Some(v) = source.video.as_mut() {
-            v.pix_fmt = Some("yuv420p10le");
+            v.pix_fmt = Some("yuv422p");
         }
-        assert!(!strs(&video("mov", QualityLevel::Normal, &source)).contains(&"copy"));
+        let args = video("mov", QualityLevel::Normal, &source);
+        assert!(has_pair(&args, "-c:v", "libx264"));
+        // The video and the audio decide on their own: the AAC still rides along untouched.
+        assert!(has_pair(&args, "-c:a", "copy"));
     }
 
     #[test]
@@ -822,6 +1183,7 @@ mod tests {
         let mut source = h264_mp4();
         source.audio = Some(AudioSource {
             codec: Some("opus"),
+            codec_tag: None,
             channels: 2,
         });
         let args = video("mp4", QualityLevel::Normal, &source);
@@ -1026,6 +1388,7 @@ mod tests {
             let source = Source {
                 audio: Some(AudioSource {
                     codec: Some("flac"),
+                    codec_tag: None,
                     channels,
                 }),
                 ..Source::default()

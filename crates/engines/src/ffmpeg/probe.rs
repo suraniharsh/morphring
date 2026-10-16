@@ -16,6 +16,8 @@ pub struct VideoStream {
     pub codec: Option<String>,
     /// FFmpeg's pixel format (`yuv420p`, `yuv420p10le`, ...), if known.
     pub pix_fmt: Option<String>,
+    /// The stream's FourCC (`hvc1`, `hev1`, `XVID`, ...), if it has one.
+    pub codec_tag: Option<String>,
     /// Coded width in pixels, 0 when unknown.
     pub width: u32,
     /// Coded height in pixels, 0 when unknown.
@@ -63,6 +65,8 @@ impl VideoStream {
 pub struct AudioStream {
     /// FFmpeg's codec name (`aac`, `opus`, ...), if known.
     pub codec: Option<String>,
+    /// The stream's FourCC (`mp4a`, ...), if it has one.
+    pub codec_tag: Option<String>,
     /// Channel count, 0 when unknown.
     pub channels: u32,
     /// Sample rate in Hz, 0 when unknown.
@@ -134,6 +138,7 @@ pub fn parse_media_info(json: &str) -> Result<MediaInfo, serde_json::Error> {
                 info.video = Some(VideoStream {
                     codec: owned_text(stream, "codec_name"),
                     pix_fmt: owned_text(stream, "pix_fmt"),
+                    codec_tag: codec_tag_of(stream),
                     width: to_u32(number(stream, "width")),
                     height: to_u32(number(stream, "height")),
                     rotation: rotation_of(stream),
@@ -146,6 +151,7 @@ pub fn parse_media_info(json: &str) -> Result<MediaInfo, serde_json::Error> {
                 let bit_rate = number(stream, "bit_rate");
                 info.audio = Some(AudioStream {
                     codec: owned_text(stream, "codec_name"),
+                    codec_tag: codec_tag_of(stream),
                     channels: to_u32(number(stream, "channels")),
                     sample_rate: to_u32(number(stream, "sample_rate")),
                     bit_rate: (bit_rate > 0.0).then(|| bit_rate.round() as u64),
@@ -196,6 +202,16 @@ pub fn parse_ratio(text: &str) -> Option<f64> {
     let den = den.trim().parse::<f64>().ok()?;
     let ratio = num / den;
     (den > 0.0 && ratio.is_finite()).then_some(ratio)
+}
+
+/// The FourCC from `codec_tag_string`. Containers without FourCCs (Matroska,
+/// WebM) report `[0][0][0][0]`, which is ffprobe for "there is no tag", so
+/// anything with a bracketed byte in it counts as none.
+fn codec_tag_of(stream: &Value) -> Option<String> {
+    text(stream, "codec_tag_string")
+        .map(str::trim)
+        .filter(|t| !t.is_empty() && !t.contains('['))
+        .map(str::to_owned)
 }
 
 fn is_attached_picture(stream: &Value) -> bool {
@@ -401,6 +417,29 @@ mod tests {
         let info = parse_media_info(json).unwrap();
         assert_eq!(info.video, None);
         assert_eq!(info.cover_stream_index, Some(3));
+    }
+
+    #[test]
+    fn codec_tags_are_kept_and_placeholders_dropped() {
+        let json = r#"{ "streams": [
+            { "codec_type": "video", "codec_name": "hevc", "codec_tag_string": "hev1",
+              "codec_tag": "0x31766568", "pix_fmt": "yuv420p10le" },
+            { "codec_type": "audio", "codec_name": "aac", "codec_tag_string": "mp4a", "channels": 6 } ] }"#;
+        let info = parse_media_info(json).unwrap();
+        let video = info.video.unwrap();
+        assert_eq!(video.codec_tag.as_deref(), Some("hev1"));
+        assert_eq!(video.pix_fmt.as_deref(), Some("yuv420p10le"));
+        let audio = info.audio.unwrap();
+        assert_eq!(audio.codec_tag.as_deref(), Some("mp4a"));
+        assert_eq!(audio.channels, 6);
+
+        // Matroska has no FourCCs, and ffprobe says so with four bracketed zeros.
+        let json = r#"{ "streams": [
+            { "codec_type": "video", "codec_name": "vp9", "codec_tag_string": "[0][0][0][0]" },
+            { "codec_type": "audio", "codec_name": "opus", "codec_tag_string": "" } ] }"#;
+        let info = parse_media_info(json).unwrap();
+        assert_eq!(info.video.unwrap().codec_tag, None);
+        assert_eq!(info.audio.unwrap().codec_tag, None);
     }
 
     #[test]
