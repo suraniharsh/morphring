@@ -26,6 +26,10 @@ macro_rules! require_engine {
 }
 
 /// True when `tool` can be found on `PATH`.
+///
+/// Takes plain program names (`pdftoppm`, `pdftotext`, `pdfinfo`, `gs`,
+/// `pandoc`, ...) and asks `which`, so it works for helpers that the engine
+/// discovery code knows nothing about.
 pub fn engine_available(tool: &str) -> bool {
     which::which(tool).is_ok()
 }
@@ -95,4 +99,39 @@ pub fn duration_secs(path: &Path) -> f64 {
     text.trim()
         .parse::<f64>()
         .unwrap_or_else(|e| panic!("bad duration {text:?} for {}: {e}", path.display()))
+}
+
+/// Page count of a PDF, via `pdfinfo`.
+///
+/// Returns `None` when pdfinfo is not installed (or chokes on the file), so a
+/// caller can pair it with `require_engine!("pdfinfo")` or skip on its own.
+pub fn pdf_page_count(path: &Path) -> Option<usize> {
+    let output = Command::new("pdfinfo").arg(path).output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    // pdfinfo pads the value with spaces, e.g. "Pages:          3".
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .find_map(|line| line.strip_prefix("Pages:"))
+        .and_then(|n| n.trim().parse().ok())
+}
+
+/// Reads a text output as UTF-8, minus a leading BOM and with CRLF turned into LF.
+///
+/// Our pdftotext output carries a BOM on purpose (Filee does it too) and
+/// Windows tools love CRLF; neither should make a golden comparison fail.
+pub fn read_text(path: &Path) -> String {
+    let text = std::fs::read_to_string(path)
+        .unwrap_or_else(|e| panic!("cannot read {} as UTF-8: {e}", path.display()));
+    let text = text.strip_prefix('\u{feff}').unwrap_or(&text);
+    text.replace("\r\n", "\n")
+}
+
+/// True when `path` is a directory holding every entry in `names`.
+///
+/// Names may be nested (`"dir/inner.txt"`); extra entries are fine, since
+/// this checks "at least these", not "exactly these".
+pub fn is_dir_with(path: &Path, names: &[&str]) -> bool {
+    path.is_dir() && names.iter().all(|name| path.join(name).exists())
 }

@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="120" height="80" viewBox="0 0 120 80">
+  <rect x="4" y="4" width="112" height="72" rx="8" fill="#2b6cb0"/>
+  <circle cx="34" cy="40" r="20" fill="#f6ad55"/>
+  <text x="62" y="46" font-family="sans-serif" font-size="16" fill="#ffffff">Ring</text>
+</svg>
