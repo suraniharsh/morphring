@@ -629,11 +629,12 @@ impl Worker {
         let cancel = &request.cancel;
         let progress = Mutex::new(Progress::new(request.files.len()));
         let on_event = |event: JobEvent| {
-            let update = progress
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .apply(&event);
-            if let Some(value) = update {
+            // Keep the lock until the update is out. Files convert in parallel,
+            // and two threads that each computed their value and then raced to
+            // the emit could send 67% before 50%: a progress arc doing the
+            // moonwalk.
+            let mut progress = progress.lock().unwrap_or_else(PoisonError::into_inner);
+            if let Some(value) = progress.apply(&event) {
                 // Same coalescing for both audiences: the ring and the toast print
                 // whole percents, so they want exactly the same updates.
                 (self.jobs)(JobNotice::Progress(JobProgress {
