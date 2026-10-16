@@ -123,7 +123,7 @@ mod tests {
     }
 
     #[test]
-    fn there_is_no_merger_yet() {
-        assert!(PdfEngine::new().merger().is_none());
+    fn the_engine_can_merge() {
+        assert!(PdfEngine::new().merger().is_some());
     }
 }
