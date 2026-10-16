@@ -1,19 +1,194 @@
-/* The toast window: transparent, so only the cards are visible. */
+/* The toast window: transparent, so only the cards are visible. The window is
+   sized to its content by the backend, so nothing here may scroll. Same "Soft"
+   palette as the settings and history windows. */
 :root {
   color-scheme: light dark;
+  --surface: #ffffff;
+  --border: rgba(0, 0, 0, 0.12);
+  --text: #1f1e1d;
+  --text-secondary: #6b6a66;
+  --track: #efede6;
+  --accent: #7f77dd;
+  --success: #3b8a5a;
+  --danger: #c73a39;
+  --button: #efede6;
+  --button-hover: #e4e1d8;
   font-family: "Noto Sans", system-ui, sans-serif;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --surface: #262624;
+    --border: rgba(255, 255, 255, 0.14);
+    --text: #f1efe8;
+    --text-secondary: #aeaca4;
+    --track: #31312e;
+    --success: #7cc79a;
+    --danger: #f09595;
+    --button: #31312e;
+    --button-hover: #3b3b38;
+  }
+}
+
+:root[data-theme="dark"] {
+  --surface: #262624;
+  --border: rgba(255, 255, 255, 0.14);
+  --text: #f1efe8;
+  --text-secondary: #aeaca4;
+  --track: #31312e;
+  --success: #7cc79a;
+  --danger: #f09595;
+  --button: #31312e;
+  --button-hover: #3b3b38;
+}
+
+* {
+  box-sizing: border-box;
 }
 
 html,
 body {
   margin: 0;
   background: transparent;
+  overflow: hidden;
+}
+
+body {
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1.4;
 }
 
 #cards {
   list-style: none;
   margin: 0;
   padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 10px 12px;
+  animation: slide-in 180ms ease-out;
+}
+
+@keyframes slide-in {
+  from {
+    transform: translateX(40px);
+    opacity: 0;
+  }
+  to {
+    transform: none;
+    opacity: 1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .card {
+    animation: none;
+  }
+}
+
+.title {
+  margin: 0;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 6px;
+}
+
+.bar {
+  flex: 1;
+  height: 6px;
+  appearance: none;
+  border: none;
+  border-radius: 3px;
+  background: var(--track);
+  overflow: hidden;
+}
+
+.bar::-webkit-progress-bar {
+  background: var(--track);
+  border-radius: 3px;
+}
+
+.bar::-webkit-progress-value {
+  background: var(--accent);
+  border-radius: 3px;
+  transition: width 150ms linear;
+}
+
+.succeeded .bar::-webkit-progress-value {
+  background: var(--success);
+}
+
+.failed .bar::-webkit-progress-value {
+  background: var(--danger);
+}
+
+.percent {
+  min-width: 3.5em;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-secondary);
+}
+
+.status {
+  margin: 4px 0 0;
+  color: var(--text-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.failed .status {
+  color: var(--danger);
+}
+
+.actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.actions button {
+  font: inherit;
+  color: var(--text);
+  background: var(--button);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 3px 10px;
+  cursor: pointer;
+}
+
+.actions button:hover:not(:disabled) {
+  background: var(--button-hover);
+}
+
+.actions button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.actions button:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+[hidden] {
+  display: none !important;
 }
 
 .visually-hidden {

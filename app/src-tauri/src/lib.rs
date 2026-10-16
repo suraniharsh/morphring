@@ -39,7 +39,10 @@ pub fn run() -> anyhow::Result<()> {
             settings::presets_list,
             history::history_list,
             history::history_clear,
-            toast::toast_dismiss
+            toast::toast_dismiss,
+            toast::toast_check,
+            toast::toast_dismiss_delay,
+            toast::toast_layout
         ])
         .setup(|app| {
             tray::setup(app)?;
