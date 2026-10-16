@@ -530,6 +530,29 @@ fn probe_version(tool: Tool, program: &Path) -> Option<String> {
     parse_version(tool, &text)
 }
 
+/// Spawns `command`, retrying briefly while Linux says the program is busy.
+///
+/// "Text file busy" (ETXTBSY) means some process still holds the file open for
+/// writing, typically a program that was just installed or updated, or (in our
+/// tests) a fake tool written a moment ago while another thread forked. It
+/// clears within milliseconds, so a short wait beats calling the tool missing.
+fn spawn_patiently(command: &mut Command) -> Option<std::process::Child> {
+    const ATTEMPTS: u32 = 10;
+    for attempt in 1..=ATTEMPTS {
+        match command.spawn() {
+            Ok(child) => return Some(child),
+            Err(e) if e.kind() == std::io::ErrorKind::ExecutableFileBusy && attempt < ATTEMPTS => {
+                std::thread::sleep(Duration::from_millis(10 * u64::from(attempt)));
+            }
+            Err(e) => {
+                tracing::debug!("could not start the version probe: {e}");
+                return None;
+            }
+        }
+    }
+    None
+}
+
 /// Runs `program args` and returns what it printed on `stream` when it exits
 /// successfully within `timeout`.
 // TODO(T09): switch to process::run once the process runner lands; it was being
@@ -541,13 +564,13 @@ fn run_probe(program: &Path, args: &[&str], stream: Stream, timeout: Duration) -
         Stream::Stdout => (Stdio::piped(), Stdio::null()),
         Stream::Stderr => (Stdio::null(), Stdio::piped()),
     };
-    let mut child = Command::new(program)
+    let mut command = Command::new(program);
+    command
         .args(args)
         .stdin(Stdio::null())
         .stdout(stdout)
-        .stderr(stderr)
-        .spawn()
-        .ok()?;
+        .stderr(stderr);
+    let mut child = spawn_patiently(&mut command)?;
 
     // Read stdout on its own thread and hand it over through a channel. If the
     // program leaves a grandchild holding the pipe open, recv_timeout lets us
