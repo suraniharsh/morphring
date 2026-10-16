@@ -347,7 +347,16 @@ temp     /tmp/morphring
         let folders = Folders::current();
         assert!(folders.temp.ends_with("morphring"));
         for dir in [&folders.config, &folders.data].into_iter().flatten() {
-            assert!(dir.ends_with("morphring"), "{}", dir.display());
+            // ProjectDirs files Windows folders one level deeper, as
+            // %APPDATA%\morphring\config and ...\data, so over there the
+            // `morphring` part is the parent rather than the last component.
+            #[cfg(windows)]
+            let ours = dir
+                .parent()
+                .is_some_and(|parent| parent.ends_with("morphring"));
+            #[cfg(not(windows))]
+            let ours = dir.ends_with("morphring");
+            assert!(ours, "{}", dir.display());
         }
     }
 }

@@ -205,7 +205,34 @@ mod tests {
 
     use super::*;
 
+    // Windows wants a drive letter before it believes a path is absolute, so
+    // "/home/u/work" is merely a suggestion over there. Each OS gets a root it
+    // actually takes seriously.
+    #[cfg(windows)]
+    const CWD: &str = r"C:\work";
+    #[cfg(not(windows))]
     const CWD: &str = "/home/u/work";
+
+    #[cfg(windows)]
+    const ELSEWHERE: &str = r"C:\elsewhere";
+    #[cfg(not(windows))]
+    const ELSEWHERE: &str = "/elsewhere";
+
+    /// `rel` inside [`CWD`], joined the way this OS joins paths.
+    fn at(rel: &str) -> String {
+        Path::new(CWD).join(rel).to_string_lossy().into_owned()
+    }
+
+    /// Folds Windows separators to `/` so one expected string fits every OS.
+    /// Only ever used on the assertion side; on Unix it changes nothing, so a
+    /// stray backslash there still fails loudly.
+    fn norm(s: &str) -> String {
+        if cfg!(windows) {
+            s.replace('\\', "/")
+        } else {
+            s.to_owned()
+        }
+    }
 
     fn result(source: &str, state: FileState, outputs: &[&str]) -> FileResult {
         FileResult {
@@ -223,29 +250,29 @@ mod tests {
     }
 
     fn line(file: &FileResult) -> String {
-        file_line(file, Path::new(CWD))
+        norm(&file_line(file, Path::new(CWD)))
     }
 
     #[test]
     fn report_pins_the_four_human_line_shapes() {
         let done = result(
-            "/home/u/work/a.pdf",
+            &at("a.pdf"),
             FileState::Done,
-            &["/home/u/work/a_p1.png", "/home/u/work/a_p2.png"],
+            &[&at("a_p1.png"), &at("a_p2.png")],
         );
         assert_eq!(line(&done), "ok    a.pdf -> a_p1.png, a_p2.png");
 
-        let skipped = result("/home/u/work/b.png", FileState::Skipped, &[]);
+        let skipped = result(&at("b.png"), FileState::Skipped, &[]);
         assert_eq!(
             line(&skipped),
             "skip  b.png (the output file already exists)"
         );
 
-        let cancelled = result("/home/u/work/c.mp4", FileState::Cancelled, &[]);
+        let cancelled = result(&at("c.mp4"), FileState::Cancelled, &[]);
         assert_eq!(line(&cancelled), "stop  c.mp4 (cancelled)");
 
         let fail = result(
-            "/home/u/work/notes.txt",
+            &at("notes.txt"),
             failed(ErrorKey::NoRoute, "txt → mp3"),
             &[],
         );
@@ -258,7 +285,7 @@ mod tests {
     #[test]
     fn report_engine_missing_line() {
         let fail = result(
-            "/home/u/work/x.docx",
+            &at("x.docx"),
             failed(
                 ErrorKey::EngineMissing,
                 "needs LibreOffice: pacman -S libreoffice-fresh",
@@ -298,25 +325,28 @@ mod tests {
 
     #[test]
     fn report_paths_outside_cwd_stay_full() {
-        let done = result(
-            "/elsewhere/a.png",
-            FileState::Done,
-            &["/home/u/work/out/a.jpg"],
+        let outside = Path::new(ELSEWHERE).join("a.png");
+        let outside = outside.to_string_lossy();
+        let done = result(&outside, FileState::Done, &[&at("out/a.jpg")]);
+        assert_eq!(
+            line(&done),
+            format!("ok    {} -> out/a.jpg", norm(&outside))
         );
-        assert_eq!(line(&done), "ok    /elsewhere/a.png -> out/a.jpg");
 
         // A sibling folder that merely shares a prefix is still outside.
-        let sibling = result("/home/u/workshop/a.png", FileState::Skipped, &[]);
-        assert!(line(&sibling).starts_with("skip  /home/u/workshop/a.png "));
+        let sibling = Path::new(&format!("{CWD}shop")).join("a.png");
+        let sibling = sibling.to_string_lossy();
+        let skipped = result(&sibling, FileState::Skipped, &[]);
+        assert!(line(&skipped).starts_with(&format!("skip  {} ", norm(&sibling))));
 
         // A file name that starts with two dots is inside, not a parent hop.
-        let dotty = result("/home/u/work/..hidden.png", FileState::Skipped, &[]);
+        let dotty = result(&at("..hidden.png"), FileState::Skipped, &[]);
         assert!(line(&dotty).starts_with("skip  ..hidden.png "));
     }
 
     #[test]
     fn report_done_without_outputs_has_no_dangling_arrow() {
-        let done = result("/home/u/work/b.jpg", FileState::Done, &[]);
+        let done = result(&at("b.jpg"), FileState::Done, &[]);
         assert_eq!(line(&done), "ok    b.jpg");
     }
 
@@ -339,13 +369,9 @@ mod tests {
 
     fn sample() -> Vec<FileResult> {
         vec![
-            result(
-                "/home/u/work/a.png",
-                FileState::Done,
-                &["/home/u/work/a.webp"],
-            ),
+            result(&at("a.png"), FileState::Done, &[&at("a.webp")]),
             result("b.png", FileState::Skipped, &[]),
-            result("/home/u/work/c.png", FileState::Cancelled, &[]),
+            result(&at("c.png"), FileState::Cancelled, &[]),
         ]
     }
 
@@ -368,10 +394,10 @@ mod tests {
         let files = v["files"].as_array().unwrap();
         assert_eq!(files.len(), 3);
         assert_eq!(files[0]["state"], "done");
-        assert_eq!(files[0]["outputs"][0], "/home/u/work/a.webp");
+        assert_eq!(files[0]["outputs"][0], at("a.webp"));
         assert_eq!(files[1]["state"], "skipped");
         // Relative sources come out absolute.
-        assert_eq!(files[1]["source"], "/home/u/work/b.png");
+        assert_eq!(files[1]["source"], at("b.png"));
         assert_eq!(files[2]["state"], "cancelled");
         assert!(files[0].get("error").is_none());
         assert!(files[1].get("error").is_none());
@@ -381,7 +407,7 @@ mod tests {
     #[test]
     fn report_json_failed_entry_carries_message_and_detail() {
         let files = [result(
-            "/home/u/work/notes.txt",
+            &at("notes.txt"),
             failed(ErrorKey::NoRoute, "txt → mp3"),
             &[],
         )];
@@ -429,8 +455,8 @@ mod tests {
 
     #[test]
     fn report_json_keeps_unicode_names() {
-        let name = "/home/u/work/한글 report's \"quoted\" 100%.png";
-        let files = [result(name, FileState::Skipped, &[])];
+        let name = at("한글 report's \"quoted\" 100%.png");
+        let files = [result(&name, FileState::Skipped, &[])];
         let report: JsonReport = serde_json::from_slice(&json_bytes(&files)).unwrap();
         assert_eq!(report.files[0].source, name);
     }

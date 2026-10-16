@@ -23,8 +23,10 @@ use std::path::{Path, PathBuf};
 /// The line that marks a file as written by MorphRing.
 pub const MANAGED_MARKER: &str = "X-MorphRing-Managed=true";
 
-/// The menu label shown by every file manager.
-pub const LABEL: &str = "Convert with MorphRing";
+// The label and the error type are shared with the Windows and macOS
+// backends, so they live in `integration` and are re-exported here for
+// everyone who already imports them from this module.
+pub use crate::integration::{IntegrationError, LABEL};
 
 // Freedesktop icon names are the closest thing Linux has to a universal
 // language. "document-save-as" exists in every theme I have ever opened.
@@ -56,6 +58,14 @@ impl FileManager {
             FileManager::Nemo => "Nemo",
             FileManager::Thunar => "Thunar",
         }
+    }
+
+    /// The file manager whose entry `path` is, judged by its file name and
+    /// the folders above it (so any home folder will do).
+    pub fn of_path(path: &Path) -> Option<FileManager> {
+        FileManager::ALL
+            .into_iter()
+            .find(|manager| path.ends_with(manager.relative_path()))
     }
 
     /// Where the entry lives, relative to `$HOME/.local/share`.
@@ -96,19 +106,6 @@ pub struct MenuFile {
     pub contents: String,
     /// True for mode 755, false for mode 644.
     pub executable: bool,
-}
-
-/// Errors from building or writing context menu files.
-#[derive(Debug, thiserror::Error)]
-pub enum IntegrationError {
-    #[error("invalid executable path {path:?}: {reason}")]
-    InvalidExecutable { path: PathBuf, reason: &'static str },
-    #[error(
-        "{path} exists and was not written by MorphRing; move it away and run the command again"
-    )]
-    Unmanaged { path: PathBuf },
-    #[error("could not write {path}: {source}")]
-    Io { path: PathBuf, source: io::Error },
 }
 
 fn io_error(path: &Path) -> impl FnOnce(io::Error) -> IntegrationError + '_ {
@@ -537,6 +534,17 @@ mod tests {
             dolphin_service_menu(exe),
             Err(IntegrationError::InvalidExecutable { .. })
         ));
+    }
+
+    #[test]
+    fn of_path_finds_the_file_manager_from_any_home() {
+        for file in menu_files(exe(), Path::new("/somewhere/else")).unwrap() {
+            assert_eq!(FileManager::of_path(&file.path), Some(file.manager));
+        }
+        assert_eq!(
+            FileManager::of_path(Path::new("/home/u/.local/share/morphring.desktop")),
+            None
+        );
     }
 
     #[test]

@@ -1,6 +1,7 @@
 //! `morphring integrate install|uninstall`: adds or removes the "Convert with
-//! MorphRing" entry in the file manager context menus (Dolphin, Nautilus,
-//! Nemo, Thunar), each starting the MorphRing app with `--convert`.
+//! MorphRing" entry in the file manager context menus, each starting the
+//! MorphRing app with `--convert`. On Linux that is Dolphin, Nautilus, Nemo
+//! and Thunar; `morphring_platform::integration` picks the backend per OS.
 //!
 //! Like Filee, only release builds change the desktop on their own. Other
 //! builds need `--allow`, so `cargo run` never rewires the developer's file
@@ -9,7 +10,7 @@
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
-use morphring_platform::context_menu::{self, FileManager};
+use morphring_platform::integration;
 
 use crate::args::IntegrateArgs;
 use crate::ctx::Ctx;
@@ -141,26 +142,33 @@ fn install(args: &IntegrateArgs, ctx: &mut Ctx, host: &Host, home: &Path) -> i32
         return fail(ctx, &format!("{} is not a file.", exe.display()));
     }
 
-    let files = match context_menu::install(&exe, home, args.dry_run) {
-        Ok(files) => files,
+    let changes = match integration::install(&exe, home, args.dry_run) {
+        Ok(changes) => changes,
         Err(e) => return fail(ctx, &e.to_string()),
     };
-    let verb = if args.dry_run { "Would write" } else { "Wrote" };
-    for file in &files {
+    if changes.is_empty() {
+        // Only a backend that is still a stub says nothing at all, and an
+        // empty "now opens ..." would be a promise we cannot keep.
         let _ = writeln!(
             ctx.out,
-            "{verb} {} ({})",
-            file.path.display(),
-            file.manager.name()
+            "MorphRing cannot add a context menu entry on this system yet."
         );
+        return 0;
+    }
+    let verb = if args.dry_run { "Would write" } else { "Wrote" };
+    for change in &changes {
+        let _ = match integration::surface_of(change) {
+            Some(surface) => writeln!(ctx.out, "{verb} {change} ({surface})"),
+            None => writeln!(ctx.out, "{verb} {change}"),
+        };
     }
     if !args.dry_run {
         let _ = writeln!(
             ctx.out,
             "'{}' now opens {} in {}.",
-            context_menu::LABEL,
+            integration::LABEL,
             exe.display(),
-            manager_list()
+            english_list(&integration::surfaces())
         );
         let _ = writeln!(
             ctx.out,
@@ -171,7 +179,7 @@ fn install(args: &IntegrateArgs, ctx: &mut Ctx, host: &Host, home: &Path) -> i32
 }
 
 fn uninstall(args: &IntegrateArgs, ctx: &mut Ctx, home: &Path) -> i32 {
-    let removed = match context_menu::uninstall(home, args.dry_run) {
+    let removed = match integration::uninstall(home, args.dry_run) {
         Ok(removed) => removed,
         Err(e) => return fail(ctx, &e.to_string()),
     };
@@ -184,15 +192,14 @@ fn uninstall(args: &IntegrateArgs, ctx: &mut Ctx, home: &Path) -> i32 {
     } else {
         "Removed"
     };
-    for path in &removed {
-        let _ = writeln!(ctx.out, "{verb} {}", path.display());
+    for change in &removed {
+        let _ = writeln!(ctx.out, "{verb} {change}");
     }
     0
 }
 
 /// "Dolphin, Nautilus, Nemo and Thunar".
-fn manager_list() -> String {
-    let names: Vec<_> = FileManager::ALL.iter().map(|m| m.name()).collect();
+fn english_list(names: &[&str]) -> String {
     match names.split_last() {
         Some((last, rest)) if !rest.is_empty() => format!("{} and {last}", rest.join(", ")),
         _ => names.concat(),
@@ -250,14 +257,20 @@ mod tests {
             }
         }
 
+        // Only the Linux tests look at menu files.
+        #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
         fn menu(&self, relative: &str) -> PathBuf {
             self.home().join(".local/share").join(relative)
         }
 
+        // Only the Linux tests look at menu files.
+        #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
         fn dolphin(&self) -> PathBuf {
             self.menu("kio/servicemenus/morphring.desktop")
         }
 
+        // Only the Linux tests look at menu files.
+        #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
         fn all_menus(&self) -> [PathBuf; 4] {
             [
                 self.dolphin(),
@@ -299,6 +312,7 @@ mod tests {
         }
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn release_build_installs_every_menu_pointing_at_the_app() {
         let world = World::new();
@@ -310,11 +324,11 @@ mod tests {
         }
         let dolphin = fs::read_to_string(world.dolphin()).unwrap();
         assert!(dolphin.contains(&format!("Exec=\"{}\" --convert %F", world.app().display())));
-        assert!(dolphin.contains(context_menu::MANAGED_MARKER));
+        assert!(dolphin.contains(morphring_platform::context_menu::MANAGED_MARKER));
         assert!(out.contains("Dolphin, Nautilus, Nemo and Thunar"));
     }
 
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     #[test]
     fn dolphin_menu_is_executable() {
         use std::os::unix::fs::PermissionsExt;
@@ -337,6 +351,7 @@ mod tests {
         assert!(!world.home().join(".local").exists());
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn allow_flag_lets_a_debug_build_install() {
         let world = World::new();
@@ -345,6 +360,7 @@ mod tests {
         assert!(world.dolphin().is_file());
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn dry_run_needs_no_permission_and_changes_nothing() {
         let world = World::new();
@@ -360,6 +376,7 @@ mod tests {
         assert!(world.all_menus().iter().all(|m| m.is_file()));
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn uninstall_removes_only_what_we_wrote() {
         let world = World::new();
@@ -382,6 +399,7 @@ mod tests {
         assert_eq!(out, "No MorphRing context menu entries to remove.\n");
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn install_refuses_to_replace_a_file_we_did_not_write() {
         let world = World::new();
@@ -404,6 +422,7 @@ mod tests {
         assert_eq!(world.run(&["install"], &world.host(true)).0, 0);
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn exe_flag_overrides_the_app_and_resolves_against_cwd() {
         let world = World::new();
@@ -496,7 +515,38 @@ mod tests {
     }
 
     #[test]
-    fn manager_list_reads_like_english() {
-        assert_eq!(manager_list(), "Dolphin, Nautilus, Nemo and Thunar");
+    fn lists_read_like_english() {
+        assert_eq!(english_list(&[]), "");
+        assert_eq!(english_list(&["Finder"]), "Finder");
+        assert_eq!(
+            english_list(&["Explorer", "Send To"]),
+            "Explorer and Send To"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_lists_every_file_manager() {
+        assert_eq!(
+            english_list(&integration::surfaces()),
+            "Dolphin, Nautilus, Nemo and Thunar"
+        );
+    }
+
+    // The Explorer and Finder backends are stubs until XP-06 and XP-11, and
+    // they should say so instead of pretending something happened.
+    #[cfg(any(windows, target_os = "macos"))]
+    #[test]
+    fn a_stub_backend_says_it_cannot_integrate_yet() {
+        let world = World::new();
+        let (code, out, err) = world.run(&["install", "--dry-run"], &world.host(false));
+        assert_eq!((code, err.as_str()), (0, ""));
+        assert_eq!(
+            out,
+            "MorphRing cannot add a context menu entry on this system yet.\n"
+        );
+        let (code, out, _) = world.run(&["uninstall"], &world.host(true));
+        assert_eq!(code, 0);
+        assert_eq!(out, "No MorphRing context menu entries to remove.\n");
     }
 }
