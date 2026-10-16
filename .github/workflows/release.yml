@@ -3,12 +3,13 @@
 #   windows-cli  the x86_64 CLI as a zip
 #   windows-app  the ring app as a per-user NSIS installer
 #   macos-cli    the arm64 CLI, ad-hoc signed, as a tarball
+#   macos-app    the ring app for Apple Silicon as an ad-hoc signed .dmg
 # Then `publish` collects every dist/* file, writes one SHA256SUMS.txt and opens a *draft* GitHub release whose notes
 # are the tag's CHANGELOG.md section. A human publishes the draft after a look. A tag push does not wait for ci.yml,
 # so the Linux job runs the tests itself instead of trusting that someone did.
 # Several jobs are fine now: `publish` needs every build job, so it only runs when all of them succeeded, and a draft
-# with half its assets (and a checksum file listing a tarball that isn't there) can no longer happen. New build jobs
-# (the Windows installer, the macOS dmg) only have to upload a `dist-<job>` artifact and add themselves to `needs`.
+# with half its assets (and a checksum file listing a tarball that isn't there) can no longer happen. A new build job
+# only has to upload a `dist-<job>` artifact and add itself to `needs`.
 name: Release
 
 on:
@@ -431,11 +432,117 @@ jobs:
           retention-days: 7
           path: dist/*
 
+  # The ring app for Apple Silicon as an ad-hoc signed .dmg. Not notarized: there is no Developer ID behind this
+  # project, so Gatekeeper asks once ("Open Anyway" in Privacy & Security), and after that it is a normal app.
+  # Intel Macs wait for a later release (PLAN-v0.2.md, out of scope); the CLI tarball has the same arm64-only deal.
+  macos-app:
+    # Same label as macos-cli, and the same insistence that it really is arm64.
+    runs-on: macos-26
+    timeout-minutes: 60
+    steps:
+      - name: Runner check
+        run: |
+          set -euo pipefail
+          sw_vers
+          arch="$(uname -m)"
+          echo "uname -m: $arch"
+          if [ "$arch" != arm64 ]; then
+            echo "::error::macos-app must run on arm64, this runner is $arch"
+            exit 1
+          fi
+
+      - uses: actions/checkout@v4
+
+      # The host is aarch64-apple-darwin already; the explicit add just makes --target below a no-surprise affair.
+      - name: Install Rust toolchain
+        run: |
+          rustup toolchain install
+          rustup target add aarch64-apple-darwin
+          rustup show active-toolchain
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: app/src-tauri -> target
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Check Tauri CLI
+        working-directory: app
+        run: |
+          set -euo pipefail
+          want="$(grep -A1 '^name = "tauri"$' src-tauri/Cargo.lock | sed -nE 's/^version = "([^"]+)"$/\1/p')" || true
+          info="$(npx --yes "@tauri-apps/cli@$TAURI_CLI_VERSION" info 2>&1)" || true
+          got="$(printf '%s\n' "$info" | sed -nE 's/^[[:space:]]*- tauri [^:]*: ([0-9][^,[:space:]]*).*/\1/p' | head -n1)"
+          if [ -z "$want" ] || [ "$got" != "$want" ]; then
+            printf '%s\n' "$info"
+            echo "::error::Tauri CLI $TAURI_CLI_VERSION reports tauri crate '$got', app/src-tauri/Cargo.lock has '$want'"
+            exit 1
+          fi
+          echo "Tauri CLI $TAURI_CLI_VERSION, tauri crate $got"
+
+      # --ci also tells the dmg script to skip its Finder AppleScript, which would otherwise sit waiting for a
+      # permission dialog on a runner that has nobody to click it.
+      - name: Build app bundles
+        working-directory: app
+        run: npx --yes "@tauri-apps/cli@$TAURI_CLI_VERSION" build --bundles app,dmg --target aarch64-apple-darwin --ci
+
+      # signingIdentity "-" in tauri.macos.conf.json asks for an ad-hoc signature; make sure we got one, that the
+      # bundle says it wants macOS 13, and that the disk image is not damaged on the way out.
+      - name: Package
+        run: |
+          set -euo pipefail
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            want="${GITHUB_REF_NAME#v}"
+          else
+            want="$(sed -nE 's/^version = "([^"]+)"$/\1/p' Cargo.toml | head -n1)"
+          fi
+          bundle=app/src-tauri/target/aarch64-apple-darwin/release/bundle
+          app="$bundle/macos/MorphRing.app"
+          dmg="$bundle/dmg/MorphRing_${want}_aarch64.dmg"
+          if [ ! -d "$app" ] || [ ! -f "$dmg" ]; then
+            echo "::error::expected $app and $dmg"
+            ls -R "$bundle" || true
+            exit 1
+          fi
+          codesign -dv "$app" 2>&1 | tee "$RUNNER_TEMP/codesign.txt"
+          if ! grep -q '^Signature=adhoc$' "$RUNNER_TEMP/codesign.txt"; then
+            echo "::error::$app is not ad-hoc signed"
+            exit 1
+          fi
+          codesign --verify --deep --strict --verbose=2 "$app"
+          plist="$app/Contents/Info.plist"
+          version="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$plist")"
+          minos="$(/usr/libexec/PlistBuddy -c 'Print :LSMinimumSystemVersion' "$plist")"
+          echo "CFBundleShortVersionString=$version LSMinimumSystemVersion=$minos"
+          if [ "$version" != "$want" ] || [ "$minos" != 13.0 ]; then
+            echo "::error::$plist says version '$version' (want '$want') and minimum macOS '$minos' (want '13.0')"
+            exit 1
+          fi
+          exe="$app/Contents/MacOS/$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$plist")"
+          lipo -info "$exe"
+          if [ "$(lipo -archs "$exe")" != arm64 ]; then
+            echo "::error::$exe is not an arm64-only binary"
+            exit 1
+          fi
+          hdiutil verify "$dmg"
+          mkdir -p dist
+          cp "$dmg" dist/
+          ls -la dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-macos-app
+          if-no-files-found: error
+          retention-days: 7
+          path: dist/*
+
   publish:
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    # Every build job, so this runs only when all of them succeeded. XP-09 and XP-12 add their jobs here.
-    needs: [linux, windows-cli, windows-app, macos-cli]
+    # Every build job, so this runs only when all of them succeeded.
+    needs: [linux, windows-cli, windows-app, macos-cli, macos-app]
     steps:
       - uses: actions/checkout@v4
 

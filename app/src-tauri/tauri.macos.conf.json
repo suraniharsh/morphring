@@ -4,6 +4,11 @@
     "macOSPrivateApi": true
   },
   "bundle": {
+    "targets": ["app", "dmg"],
+    "macOS": {
+      "signingIdentity": "-",
+      "minimumSystemVersion": "13.0"
+    },
     "fileAssociations": [
       {
         "name": "Image",
