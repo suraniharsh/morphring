@@ -1,8 +1,10 @@
 //! Commands the webviews can invoke, plus the conversion queue behind them.
 //!
-//! The ring's life: [`open_ring`] builds a [`RingModel`] for some files and
-//! sends it as [`RING_OPEN`]; the user clicks a slice and the ring invokes
-//! [`convert`]; the job runs on the queue's worker thread while
+//! The ring's life: [`open_ring`] builds a [`RingModel`] for some files from
+//! the user's preset library and sends it as [`RING_OPEN`]; the user clicks a
+//! slice and the ring invokes [`convert`] with the slice's preset id; the job
+//! runs that preset (its target, options and output rule, with the settings'
+//! default output filled in) on the queue's worker thread while
 //! [`RING_PROGRESS`] events move the progress ring; [`RING_DONE`] says how it
 //! ended. Ported from Filee's `src/Filee.App/Services/RingController.cs`
 //! (convert and progress) and `ViewModels/RadialViewModel.cs` (the model).
@@ -43,6 +45,7 @@ use morphring_core::output::OutputRule;
 use morphring_core::planner::Planner;
 use morphring_core::preset::{self, Preset};
 use morphring_core::profiles::Library;
+use morphring_core::settings::AppSettings;
 use morphring_core::slices::{self, DisabledReason, Reach, ReachCtx};
 use morphring_core::{
     CancelToken, ConvertOptions, Converter, EngineStatus, ErrorKey, FileResult, FileState,
@@ -89,13 +92,16 @@ pub struct RingModel {
     pub slices: Vec<RingSlice>,
 }
 
-/// One slice of the ring: a target format.
+/// One slice of the ring: a preset.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct RingSlice {
-    /// Format id passed to [`convert`] as `to`, e.g. `png`.
+    /// Id of the preset, passed to [`convert`] as `presetId`, e.g. `half-size`.
+    pub preset_id: String,
+    /// The preset's target: a format id such as `png`, or `*` for "same
+    /// format as the source".
     pub target: String,
-    /// Text drawn on the slice, e.g. `PNG`.
+    /// Text drawn on the slice: the preset's display name, e.g. `Half size`.
     pub label: String,
     /// Whether the slice can be clicked.
     pub enabled: bool,
@@ -195,25 +201,24 @@ pub struct ConvertSummary {
     pub message: Option<String>,
 }
 
-/// Builds the ring for `files` from the built-in presets and profiles.
+/// Builds the ring for `files` from the presets and toolbar profiles in
+/// `library`: the profile that fits the files picks the slices, in its order.
 ///
 /// A slice is enabled when at least one file can be converted to its target
 /// with the installed `engines`; a disabled slice says why, naming the
 /// program to install when one would help.
-pub fn ring_model(files: &[PathBuf], engines: &[&dyn Converter]) -> RingModel {
+pub fn ring_model(files: &[PathBuf], engines: &[&dyn Converter], library: &Library) -> RingModel {
     // Two planners, as D10 says: what we can do now, and what we could do if
     // every engine were installed. The second one turns "no" into "not yet".
     let installed = Planner::new(engines, false);
     let every = Planner::new(engines, true);
-    // P2-50 swaps the built-in library for the user's own; for now the
-    // factory one keeps the ring honest.
     let ctx = ReachCtx {
         reach: |from, to| reach(&installed, &every, engines, from, to),
         can_merge: engines
             .iter()
             .any(|e| e.status().is_available() && e.merger().is_some()),
     };
-    let suggestion = slices::suggest(files, &Library::builtin(), &ctx);
+    let suggestion = slices::suggest(files, library, &ctx);
     RingModel {
         files: files.iter().map(|p| display(p)).collect(),
         title: suggestion.title,
@@ -221,9 +226,10 @@ pub fn ring_model(files: &[PathBuf], engines: &[&dyn Converter]) -> RingModel {
             .slices
             .into_iter()
             .map(|slice| RingSlice {
-                target: slice.target.as_str().to_owned(),
-                label: slice.label.to_owned(),
                 enabled: slice.is_enabled(),
+                preset_id: slice.preset_id,
+                target: slice.target,
+                label: slice.label,
                 disabled_reason: slice.disabled.map(|reason| reason.to_string()),
             })
             .collect(),
@@ -266,14 +272,25 @@ pub type EventSink = Arc<dyn Fn(RingEvent) + Send + Sync>;
 /// tests collect them.
 pub type JobSink = Arc<dyn Fn(JobNotice) + Send + Sync>;
 
+/// Where the queue reads the app settings and the preset library from, fresh
+/// for every ring and every job. The app reads its managed settings; tests
+/// hand over a fixed pair.
+pub type PrefsSource = Arc<dyn Fn() -> (AppSettings, Library) + Send + Sync>;
+
 type Engines = Arc<Vec<Box<dyn Converter>>>;
 
-/// One conversion waiting in the queue.
+/// One conversion waiting in the queue, with the preset already turned into
+/// everything `run_job` wants.
 struct Request {
     id: u64,
     files: Vec<PathBuf>,
-    target: FormatId,
+    target: Target,
+    options: ConvertOptions,
+    rule: OutputRule,
+    /// The preset as the user saved it, for the history.
     preset: Preset,
+    /// The preset's display name: the job label and the `{preset}` token.
+    label: String,
     reply: mpsc::Sender<ConvertSummary>,
 }
 
@@ -281,6 +298,7 @@ struct Request {
 /// the order they were submitted.
 pub struct Conversions {
     engines: Engines,
+    prefs: PrefsSource,
     queue: Mutex<mpsc::Sender<Request>>,
     /// Id of the job the ring is showing; 0 when it shows a menu or nothing.
     showing: Arc<AtomicU64>,
@@ -288,16 +306,41 @@ pub struct Conversions {
 }
 
 impl Conversions {
-    /// Starts the worker thread. `sink` receives the events of the job the
-    /// ring is showing, from the worker thread.
-    pub fn new(engines: Vec<Box<dyn Converter>>, sink: EventSink) -> Self {
+    /// Starts the worker thread with a fixed preset `library` and
+    /// `settings`. `sink` receives the events of the job the ring is
+    /// showing, from the worker thread.
+    pub fn new(
+        engines: Vec<Box<dyn Converter>>,
+        sink: EventSink,
+        library: Library,
+        settings: AppSettings,
+    ) -> Self {
         // Nobody listening for job notices? Then they fall on the floor, softly.
-        Self::with_job_sink(engines, sink, Arc::new(|_| {}))
+        Self::with_job_sink(engines, sink, Arc::new(|_| {}), library, settings)
     }
 
     /// Like [`Conversions::new`], and every job also reports to `jobs`, from
     /// the worker thread, whether the ring shows it or not.
-    pub fn with_job_sink(engines: Vec<Box<dyn Converter>>, sink: EventSink, jobs: JobSink) -> Self {
+    pub fn with_job_sink(
+        engines: Vec<Box<dyn Converter>>,
+        sink: EventSink,
+        jobs: JobSink,
+        library: Library,
+        settings: AppSettings,
+    ) -> Self {
+        let prefs: PrefsSource = Arc::new(move || (settings.clone(), library.clone()));
+        Self::with_prefs(engines, sink, jobs, prefs)
+    }
+
+    /// Like [`Conversions::with_job_sink`], but the settings and the library
+    /// are read from `prefs` each time they are needed, so edits made on the
+    /// settings page reach the next ring without a restart.
+    pub fn with_prefs(
+        engines: Vec<Box<dyn Converter>>,
+        sink: EventSink,
+        jobs: JobSink,
+        prefs: PrefsSource,
+    ) -> Self {
         let engines: Engines = Arc::new(engines);
         let showing = Arc::new(AtomicU64::new(0));
         let (queue, requests) = mpsc::channel::<Request>();
@@ -320,6 +363,7 @@ impl Conversions {
         }
         Self {
             engines,
+            prefs,
             queue: Mutex::new(queue),
             showing,
             next_id: AtomicU64::new(1),
@@ -335,22 +379,38 @@ impl Conversions {
     /// jobs started earlier are no longer sent.
     pub fn ring_model(&self, files: &[PathBuf]) -> RingModel {
         self.showing.store(0, Ordering::SeqCst);
-        ring_model(files, &self.engines())
+        let (_, library) = (self.prefs)();
+        ring_model(files, &self.engines(), &library)
     }
 
-    /// Queues `files` for conversion to `to` and returns where the summary
-    /// will arrive. The new job becomes the one the ring shows.
+    /// Queues `files` for conversion with the preset `preset_id` and returns
+    /// where the summary will arrive. The new job becomes the one the ring
+    /// shows.
+    ///
+    /// The preset is looked up by id, else by display name (both ignoring
+    /// case). Its output rule gets the settings' default output filled in,
+    /// and its display name stands in for `{preset}` in the file name.
     pub fn submit(
         &self,
         files: Vec<PathBuf>,
-        to: &str,
+        preset_id: &str,
     ) -> Result<mpsc::Receiver<ConvertSummary>, String> {
         if files.is_empty() {
             return Err("There are no files to convert.".into());
         }
-        let target = formats::lookup_target(to)
-            .filter(|f| f.writable)
-            .ok_or_else(|| format!("MorphRing cannot write the format \"{to}\"."))?;
+        let (settings, library) = (self.prefs)();
+        let preset = preset::find(&library.presets, preset_id)
+            .cloned()
+            .ok_or_else(|| format!("There is no preset \"{preset_id}\"."))?;
+        let target = preset
+            .job_target()
+            .filter(is_writable)
+            .ok_or_else(|| format!("MorphRing cannot write the format \"{}\".", preset.target))?;
+        let label = preset.display_name();
+        let mut rule = settings.with_default_output(&preset.output);
+        rule.pattern = with_preset_name(&rule.pattern, &label);
+        let options = preset.options();
+
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
         let (reply, summary) = mpsc::channel();
         self.showing.store(id, Ordering::SeqCst);
@@ -359,8 +419,11 @@ impl Conversions {
             .send(Request {
                 id,
                 files,
-                target: target.id,
-                preset: preset::for_target(target),
+                target,
+                options,
+                rule,
+                preset,
+                label,
                 reply,
             })
             .map_err(|_| "The conversion queue has stopped. Restart MorphRing.".to_owned())?;
@@ -369,9 +432,13 @@ impl Conversions {
 
     /// Queues the conversion and waits for it without blocking the async
     /// runtime: the wait happens on a blocking thread.
-    pub async fn convert(&self, files: Vec<String>, to: String) -> Result<ConvertSummary, String> {
+    pub async fn convert(
+        &self,
+        files: Vec<String>,
+        preset_id: String,
+    ) -> Result<ConvertSummary, String> {
         let files = files.into_iter().map(PathBuf::from).collect();
-        let summary = self.submit(files, &to)?;
+        let summary = self.submit(files, &preset_id)?;
         tauri::async_runtime::spawn_blocking(move || summary.recv())
             .await
             .map_err(|e| format!("The conversion could not be awaited: {e}"))?
@@ -399,7 +466,7 @@ impl Worker {
             (self.jobs)(JobNotice::Started(JobStarted {
                 job_id: id,
                 files: request.files.iter().map(|p| display(p)).collect(),
-                label: request.preset.display_name(),
+                label: request.label.clone(),
             }));
             // run_job already catches panics per file; this is the belt to its
             // braces, so one cursed job never takes the whole queue down with it.
@@ -466,14 +533,14 @@ impl Worker {
         tracing::info!(
             job = request.id,
             files = request.files.len(),
-            to = %request.target,
+            preset = %request.preset.id,
             "conversion started"
         );
         let results = job::run_job(
             &request.files,
-            Target::Format(request.target),
-            &ConvertOptions::default(),
-            &OutputRule::default(),
+            request.target,
+            &request.options,
+            &request.rule,
             &engines,
             &cancel,
             &on_event,
@@ -589,6 +656,45 @@ fn failure_message(total: usize, failures: &[(&Path, ErrorKey, &str)]) -> String
     }
 }
 
+/// Whether a job can write `target`. "Same as the source" is writable by
+/// definition: the file got here by being a format we read, and the planner
+/// sorts out whether we can also write it.
+fn is_writable(target: &Target) -> bool {
+    match target {
+        Target::SameAsSource => true,
+        Target::Format(id) => formats::find_by_id(id.as_str()).is_some_and(|f| f.writable),
+    }
+}
+
+/// Puts `name` in place of every `{preset}` token (any case) in `pattern`.
+///
+/// `run_job` would fill `{preset}` with the target format's name; the ring
+/// wants the preset's own name, so it is baked into the pattern up front.
+/// Braces in the name become parentheses, so a preset cheekily called
+/// `{name}` can't smuggle a second token into the file name.
+fn with_preset_name(pattern: &str, name: &str) -> String {
+    const TOKEN: &str = "{preset}";
+    let safe = name.replace('{', "(").replace('}', ")");
+    let mut out = String::with_capacity(pattern.len());
+    let mut rest = pattern;
+    while let Some(open) = rest.find('{') {
+        out.push_str(&rest[..open]);
+        let after = &rest[open..];
+        if after
+            .get(..TOKEN.len())
+            .is_some_and(|t| t.eq_ignore_ascii_case(TOKEN))
+        {
+            out.push_str(&safe);
+            rest = &after[TOKEN.len()..];
+        } else {
+            out.push('{');
+            rest = &after[1..];
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
 fn failed_summary(message: &str) -> ConvertSummary {
     ConvertSummary {
         outcome: Outcome::Failed,
@@ -616,10 +722,15 @@ fn conversions<R: Runtime>(app: &AppHandle<R>) -> tauri::State<'_, Conversions> 
         let sink: EventSink = Arc::new(move |event| send_to_ring(&handle, event));
         let handle = app.clone();
         let jobs: JobSink = Arc::new(move |notice| on_job_notice(&handle, notice));
-        app.manage(Conversions::with_job_sink(
+        let handle = app.clone();
+        // Read on every ring and every job: a preset edited a minute ago
+        // should be on the very next ring, not on the one after a restart.
+        let prefs: PrefsSource = Arc::new(move || crate::settings::current(&handle));
+        app.manage(Conversions::with_prefs(
             morphring_engines::registry::all(),
             sink,
             jobs,
+            prefs,
         ));
     }
     app.state::<Conversions>()
@@ -685,7 +796,9 @@ pub fn ping() -> &'static str {
     "pong"
 }
 
-/// Converts `files` to the format `to` and answers when the job has ended.
+/// Converts `files` with the preset `presetId` and answers when the job has
+/// ended. The preset's target, options and output rule apply; a preset that
+/// saves to the default location uses the one from the settings.
 ///
 /// Progress and the outcome also reach the ring window as [`RING_PROGRESS`]
 /// and [`RING_DONE`] events. Jobs run one at a time, in the order they were
@@ -694,9 +807,9 @@ pub fn ping() -> &'static str {
 pub async fn convert<R: Runtime>(
     app: AppHandle<R>,
     files: Vec<String>,
-    to: String,
+    preset_id: String,
 ) -> Result<ConvertSummary, String> {
-    conversions(&app).convert(files, to).await
+    conversions(&app).convert(files, preset_id).await
 }
 
 /// Hides the ring window. Does nothing when the ring is not open.
@@ -818,6 +931,11 @@ mod tests {
         path
     }
 
+    /// A queue with the factory presets and default settings.
+    fn queue(engines: Vec<Box<dyn Converter>>, sink: EventSink) -> Conversions {
+        Conversions::new(engines, sink, Library::builtin(), AppSettings::default())
+    }
+
     fn recorder() -> (EventSink, Arc<Mutex<Vec<RingEvent>>>) {
         let events = Arc::new(Mutex::new(Vec::new()));
         let seen = Arc::clone(&events);
@@ -856,7 +974,7 @@ mod tests {
     fn ring_model_offers_targets_with_reasons() {
         let (img, office) = (images(), office_missing());
         let files = vec![PathBuf::from("/a/one.png"), PathBuf::from("/a/two.PNG")];
-        let model = ring_model(&files, &[&img, &office]);
+        let model = ring_model(&files, &[&img, &office], &Library::builtin());
 
         assert_eq!(model.title, "2 × PNG");
         assert_eq!(model.files, ["/a/one.png", "/a/two.PNG"]);
@@ -868,6 +986,7 @@ mod tests {
         let jpg = slice(&model, "jpg");
         assert!(jpg.enabled);
         assert_eq!(jpg.label, "JPG");
+        assert_eq!(jpg.preset_id, "to-jpg");
         assert_eq!(jpg.disabled_reason, None);
 
         let pdf = slice(&model, "pdf");
@@ -890,7 +1009,11 @@ mod tests {
     #[test]
     fn ring_model_for_unknown_files_disables_everything() {
         let img = images();
-        let model = ring_model(&[PathBuf::from("notes.unknownext")], &[&img]);
+        let model = ring_model(
+            &[PathBuf::from("notes.unknownext")],
+            &[&img],
+            &Library::builtin(),
+        );
         assert!(!model.slices.is_empty());
         for s in &model.slices {
             assert!(!s.enabled);
@@ -910,12 +1033,14 @@ mod tests {
             title: "1 × PNG".into(),
             slices: vec![
                 RingSlice {
+                    preset_id: "to-jpg".into(),
                     target: "jpg".into(),
                     label: "JPG".into(),
                     enabled: true,
                     disabled_reason: None,
                 },
                 RingSlice {
+                    preset_id: "to-pdf".into(),
                     target: "pdf".into(),
                     label: "PDF".into(),
                     enabled: false,
@@ -929,8 +1054,8 @@ mod tests {
                 "files": ["/a.png"],
                 "title": "1 × PNG",
                 "slices": [
-                    { "target": "jpg", "label": "JPG", "enabled": true },
-                    { "target": "pdf", "label": "PDF", "enabled": false, "disabledReason": "why" }
+                    { "presetId": "to-jpg", "target": "jpg", "label": "JPG", "enabled": true },
+                    { "presetId": "to-pdf", "target": "pdf", "label": "PDF", "enabled": false, "disabledReason": "why" }
                 ]
             })
         );
@@ -956,9 +1081,9 @@ mod tests {
             .map(|n| display(&touch(dir.path(), n)))
             .collect();
         let (sink, events) = recorder();
-        let conv = Conversions::new(vec![Box::new(images())], sink);
+        let conv = queue(vec![Box::new(images())], sink);
 
-        let summary = tauri::async_runtime::block_on(conv.convert(files, "JPEG".into())).unwrap();
+        let summary = tauri::async_runtime::block_on(conv.convert(files, "to-jpg".into())).unwrap();
 
         assert_eq!(summary.outcome, Outcome::Succeeded);
         assert_eq!(summary.done, 3);
@@ -996,7 +1121,7 @@ mod tests {
         let good = touch(dir.path(), "good.jpg");
         let bad = touch(dir.path(), "bad.txt");
         let (sink, events) = recorder();
-        let conv = Conversions::new(vec![Box::new(images())], sink);
+        let conv = queue(vec![Box::new(images())], sink);
 
         let summary = conv.submit(vec![good, bad], "png").unwrap().recv().unwrap();
 
@@ -1022,7 +1147,7 @@ mod tests {
         let mut img = images();
         img.fail = true;
         let (sink, _) = recorder();
-        let conv = Conversions::new(vec![Box::new(img)], sink);
+        let conv = queue(vec![Box::new(img)], sink);
         let summary = conv
             .submit(vec![touch(dir.path(), "cat.png")], "jpg")
             .unwrap()
@@ -1040,11 +1165,11 @@ mod tests {
     #[test]
     fn bad_requests_are_refused_before_queueing() {
         let (sink, events) = recorder();
-        let conv = Conversions::new(vec![Box::new(images())], sink);
+        let conv = queue(vec![Box::new(images())], sink);
         let err = conv
             .submit(vec![PathBuf::from("a.png")], "nope")
             .unwrap_err();
-        assert_eq!(err, "MorphRing cannot write the format \"nope\".");
+        assert_eq!(err, "There is no preset \"nope\".");
         let err = conv.submit(Vec::new(), "jpg").unwrap_err();
         assert_eq!(err, "There are no files to convert.");
         assert!(events.lock().unwrap().is_empty());
@@ -1084,7 +1209,7 @@ mod tests {
         }
 
         let (sink, _) = recorder();
-        let conv = Conversions::new(vec![Box::new(Shared(Arc::clone(&img)))], sink);
+        let conv = queue(vec![Box::new(Shared(Arc::clone(&img)))], sink);
         let sources: Vec<PathBuf> = (0..4)
             .map(|i| touch(dir.path(), &format!("f{i}.png")))
             .collect();
@@ -1106,7 +1231,7 @@ mod tests {
         let mut img = images();
         img.delay = Duration::from_millis(20);
         let (sink, events) = recorder();
-        let conv = Conversions::new(vec![Box::new(img)], sink);
+        let conv = queue(vec![Box::new(img)], sink);
 
         let first = conv
             .submit(vec![touch(dir.path(), "a.png")], "jpg")
@@ -1163,7 +1288,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (ring, ring_events) = recorder();
         let (jobs, notices) = job_recorder();
-        let conv = Conversions::with_job_sink(vec![Box::new(images())], ring, jobs);
+        let conv = Conversions::with_job_sink(
+            vec![Box::new(images())],
+            ring,
+            jobs,
+            Library::builtin(),
+            AppSettings::default(),
+        );
 
         let pending: Vec<_> = ["a.png", "b.png", "c.png"]
             .iter()
@@ -1224,7 +1355,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (ring, _) = recorder();
         let (jobs, notices) = job_recorder();
-        let conv = Conversions::with_job_sink(vec![Box::new(images())], ring, jobs);
+        let conv = Conversions::with_job_sink(
+            vec![Box::new(images())],
+            ring,
+            jobs,
+            Library::builtin(),
+            AppSettings::default(),
+        );
         let bad = touch(dir.path(), "bad.txt");
         let summary = conv.submit(vec![bad], "png").unwrap().recv().unwrap();
         assert_eq!(summary.outcome, Outcome::Failed);
@@ -1279,5 +1416,122 @@ mod tests {
         let summary = summarize(&results, true);
         assert_eq!(summary.outcome, Outcome::Cancelled);
         assert_eq!(summary.message, None);
+    }
+
+    #[test]
+    fn the_preset_name_fills_the_preset_token() {
+        assert_eq!(
+            with_preset_name("{name}_{preset}", "JPG 70%"),
+            "{name}_JPG 70%"
+        );
+        assert_eq!(
+            with_preset_name("{PRESET}-{Preset}", "Half size"),
+            "Half size-Half size"
+        );
+        assert_eq!(with_preset_name("{name}", "x"), "{name}");
+        assert_eq!(with_preset_name("{pre}{preset", "x"), "{pre}{preset");
+        // No token smuggling through a creative preset name.
+        assert_eq!(with_preset_name("{preset}", "{name}"), "(name)");
+        assert_eq!(with_preset_name("", "x"), "");
+    }
+
+    #[test]
+    fn a_ring_slice_runs_its_preset_with_options_and_pattern() {
+        let dir = tempfile::tempdir().unwrap();
+        let (sink, _) = recorder();
+        let (jobs, notices) = job_recorder();
+        let mut library = Library::builtin();
+        let mut custom = library.preset("to-jpg").unwrap().clone();
+        custom.id = "custom".into();
+        custom.name = "Tiny {name}".into();
+        custom.output.pattern = "{name}-{preset}".into();
+        library.presets.push(custom);
+        let conv = Conversions::with_job_sink(
+            vec![Box::new(images())],
+            sink,
+            jobs,
+            library,
+            AppSettings::default(),
+        );
+
+        let summary = conv
+            .submit(vec![touch(dir.path(), "a.png")], "custom")
+            .unwrap()
+            .recv()
+            .unwrap();
+        assert_eq!(summary.outcome, Outcome::Succeeded, "{summary:?}");
+        assert!(dir.path().join("a-Tiny (name).jpg").is_file());
+
+        let notices = notices.lock().unwrap();
+        let Some(JobNotice::Started(started)) = notices.first() else {
+            panic!("no start in {notices:?}");
+        };
+        assert_eq!(started.label, "Tiny {name}");
+        let Some(JobNotice::Finished(_, record)) = notices.last() else {
+            panic!("no finish in {notices:?}");
+        };
+        assert_eq!(record.preset.id, "custom");
+    }
+
+    #[test]
+    fn same_as_source_presets_keep_the_format() {
+        let dir = tempfile::tempdir().unwrap();
+        let (sink, _) = recorder();
+        let mut img = images();
+        img.edges.push(Edge::new("png", "png"));
+        let conv = queue(vec![Box::new(img)], sink);
+        let summary = conv
+            .submit(vec![touch(dir.path(), "cat.png")], "half-size")
+            .unwrap()
+            .recv()
+            .unwrap();
+        assert_eq!(summary.outcome, Outcome::Succeeded, "{summary:?}");
+        assert!(dir.path().join("cat_50.png").is_file());
+    }
+
+    #[test]
+    fn the_default_output_comes_from_the_settings() {
+        use morphring_core::settings::DefaultLocation;
+        let dir = tempfile::tempdir().unwrap();
+        let (sink, _) = recorder();
+        let mut settings = AppSettings::default();
+        settings.default_output.location = DefaultLocation::Subfolder;
+        settings.default_output.subfolder_name = "out".into();
+        let conv = Conversions::new(vec![Box::new(images())], sink, Library::builtin(), settings);
+        let summary = conv
+            .submit(vec![touch(dir.path(), "a.png")], "to-jpg")
+            .unwrap()
+            .recv()
+            .unwrap();
+        assert_eq!(summary.outcome, Outcome::Succeeded, "{summary:?}");
+        assert!(dir.path().join("out").join("a.jpg").is_file());
+    }
+
+    #[test]
+    fn presets_are_found_by_name_too_and_bad_targets_are_refused() {
+        let (sink, _) = recorder();
+        let mut library = Library::builtin();
+        let mut odd = Preset {
+            id: "odd".into(),
+            target: "nonsense".into(),
+            ..Preset::default()
+        };
+        odd.name = "Odd".into();
+        library.presets.push(odd);
+        let conv = Conversions::new(
+            vec![Box::new(images())],
+            sink,
+            library,
+            AppSettings::default(),
+        );
+        let err = conv
+            .submit(vec![PathBuf::from("a.png")], "odd")
+            .unwrap_err();
+        assert_eq!(err, "MorphRing cannot write the format \"nonsense\".");
+        // Display name, any case: "half size" is the Half size preset.
+        assert!(
+            conv.submit(vec![PathBuf::from("a.png")], "half size")
+                .is_ok()
+        );
     }
 }

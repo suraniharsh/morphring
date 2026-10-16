@@ -5,15 +5,24 @@
 // Backend contract (everything goes through window.__TAURI__, no bundler):
 //   events the ring listens for
 //     "ring-open"     { files: string[], title: string,
-//                       slices: [{ target, label, caption?, enabled, disabledReason? }] }
-//                     Rebuilds the donut and plays the open animation. Show and
+//                       slices: [{ presetId, target, label, caption?, enabled,
+//                                  disabledReason? }] }
+//                     One slice per preset of the toolbar profile that fits the
+//                     files, in the profile's order. presetId names the preset,
+//                     target is its format id ("*" = same as the source) and
+//                     label its display name. Rebuilds the donut and plays the
+//                     open animation. Show and
 //                     focus the window after emitting this; the ring is centred
 //                     by the window itself, never at the cursor (Wayland).
 //     "ring-progress" { progress: 0..1 }      for the running conversion
 //     "ring-done"     { outcome: "succeeded" | "failed" | "cancelled", message? }
 //   commands the ring invokes
-//     convert { files, to }   a rejected promise counts as a failed job, and
-//                             its error text is shown under the ring
+//     convert { files, presetId }
+//                             runs the clicked slice's preset: its target,
+//                             options and output rule, with the default output
+//                             from the settings. A rejected promise counts as
+//                             a failed job, and its error text is shown under
+//                             the ring
 //     ring_close              hides the window
 //     ping                    once at start-up, as a health check
 "use strict";
@@ -116,6 +125,9 @@
     const p = payload || {};
     const files = Array.isArray(p.files) ? p.files.map(String) : [];
     const slices = (Array.isArray(p.slices) ? p.slices : []).map((s) => ({
+      // An old backend sent no presetId; its target id is the best guess, and
+      // the backend finds a preset by display name too, so "png" still lands.
+      presetId: String(s.presetId || s.target || ""),
       target: String(s.target || ""),
       label: String(s.label || String(s.target || "").toUpperCase()),
       caption: s.caption ? String(s.caption) : "",
@@ -287,7 +299,7 @@
     svg.classList.remove("pointing");
     startAnimation();
     const mine = job;
-    backend.convert(model.files, slice.target).catch((err) => {
+    backend.convert(model.files, slice.presetId).catch((err) => {
       if (mine === job) finish("failed", errorText(err));
     });
   }
@@ -640,7 +652,7 @@
     on("ring-done", (p) => finish(p && p.outcome, p && p.message));
     tauri.core.invoke("ping").catch((err) => console.warn("backend did not answer ping:", err));
     return {
-      convert: (files, to) => tauri.core.invoke("convert", { files, to }),
+      convert: (files, presetId) => tauri.core.invoke("convert", { files, presetId }),
       close: () => tauri.core.invoke("ring_close"),
     };
   }
@@ -653,25 +665,26 @@
       files: ["/home/me/Pictures/holiday.heic", "/home/me/Pictures/beach.heic"],
       title: "2 × HEIC",
       slices: [
-        { target: "jpg", label: "JPG", caption: "JPEG image", enabled: true },
-        { target: "png", label: "PNG", caption: "PNG image", enabled: true },
-        { target: "webp", label: "WebP", caption: "WebP image", enabled: true },
-        { target: "avif", label: "AVIF", caption: "AV1 image", enabled: true },
+        { presetId: "to-jpg", target: "jpg", label: "JPG", caption: "JPEG image", enabled: true },
+        { presetId: "to-png", target: "png", label: "PNG", caption: "PNG image", enabled: true },
+        { presetId: "to-webp", target: "webp", label: "WebP", caption: "WebP image", enabled: true },
+        { presetId: "to-avif", target: "avif", label: "AVIF", caption: "AV1 image", enabled: true },
         {
+          presetId: "to-pdf",
           target: "pdf",
           label: "PDF",
           caption: "PDF document",
           enabled: false,
           disabledReason: "Needs LibreOffice: pacman -S libreoffice-fresh",
         },
-        { target: "gif", label: "GIF", caption: "GIF image", enabled: true },
+        { presetId: "to-gif", target: "gif", label: "GIF", caption: "GIF image", enabled: true },
       ],
     };
     setTimeout(() => openRing(sample), 50);
     return {
-      convert: (files, to) =>
+      convert: (files, presetId) =>
         new Promise((resolve, reject) => {
-          if (to === "gif") {
+          if (presetId === "to-gif") {
             setTimeout(() => reject("magick exited with code 1: no images defined"), 900);
             return;
           }
