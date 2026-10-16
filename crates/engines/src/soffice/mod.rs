@@ -18,12 +18,18 @@ use morphring_core::{
 
 use crate::discovery::{self, Tool};
 use crate::process::{self, RunError, RunOptions};
+use crate::progress::Estimate;
 
 /// How many conversions run at once, each with its own user profile.
 pub const WORKERS: usize = 2;
 
 /// How long one soffice run may take before its process group is killed.
 pub const TIMEOUT: Duration = Duration::from_secs(180);
+
+// How long a conversion usually takes, for the progress estimate. A warm
+// soffice does a small document in a second or two; a cold one spends most of
+// that just remembering who it is.
+const TYPICAL: Duration = Duration::from_secs(4);
 
 // How often a conversion waiting for a free profile looks at the cancel token.
 const POOL_POLL: Duration = Duration::from_millis(50);
@@ -139,7 +145,10 @@ impl Converter for SofficeEngine {
             timeout: Some(TIMEOUT),
             ..RunOptions::default()
         };
-        let run = process::run(&soffice, &args, opts, cancel);
+        // soffice says nothing until it's done, so the ring gets an estimate.
+        let run = Estimate::during(progress, TYPICAL, || {
+            process::run(&soffice, &args, opts, cancel)
+        });
         drop(slot);
 
         let failure = match run {

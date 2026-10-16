@@ -17,10 +17,15 @@ use morphring_core::{
 
 use crate::discovery::{self, Tool};
 use crate::process::{self, RunError, RunOptions};
+use crate::progress::Estimate;
 use args::FramePolicy;
 
 /// How long one `magick` run may take before its process group is killed.
 const TIMEOUT: Duration = Duration::from_secs(120);
+
+// How long a conversion usually takes, for the progress estimate. Most images
+// are done well before this; a 60-megapixel TIFF to AVIF is not most images.
+const TYPICAL: Duration = Duration::from_secs(2);
 
 /// Converts images with ImageMagick 7 (`magick`).
 #[derive(Clone, Copy, Debug, Default)]
@@ -143,16 +148,19 @@ impl Converter for MagickEngine {
             &step.options,
             frame,
         );
-        let run = process::run(
-            &program,
-            &argv,
-            RunOptions {
-                timeout: Some(TIMEOUT),
-                cwd: Some(temp.path().to_path_buf()),
-                ..RunOptions::default()
-            },
-            cancel,
-        );
+        // magick works in silence, so the ring gets an estimate meanwhile.
+        let run = Estimate::during(progress, TYPICAL, || {
+            process::run(
+                &program,
+                &argv,
+                RunOptions {
+                    timeout: Some(TIMEOUT),
+                    cwd: Some(temp.path().to_path_buf()),
+                    ..RunOptions::default()
+                },
+                cancel,
+            )
+        });
         let tail = match run {
             Ok(output) => output.stderr_tail,
             Err(err) => return Err(run_error(err)),

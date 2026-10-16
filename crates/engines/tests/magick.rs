@@ -120,7 +120,14 @@ fn png_to_jpg_keeps_size() {
     assert_eq!(written, [run.out_dir.join("sample.jpg")]);
     assert_eq!(image_size(&written[0]), (64, 48));
     assert_eq!(magick_format(&written[0]), "JPEG");
-    assert_eq!(run.progress, [0.0, 1.0]);
+    // Estimated ticks may land in between on a slow run; the ends are fixed.
+    assert_eq!(run.progress.first(), Some(&0.0));
+    assert_eq!(run.progress.last(), Some(&1.0));
+    assert!(
+        run.progress.windows(2).all(|w| w[0] <= w[1]),
+        "{:?}",
+        run.progress
+    );
 }
 
 #[test]
