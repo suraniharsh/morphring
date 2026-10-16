@@ -86,7 +86,7 @@ fn output_folder_is_flat_and_conflicts_follow_the_policy() {
     let r = run_in(tmp.path(), png_to_jpg(), &[&base[..], &["--skip"]].concat());
     assert_eq!(r.code, 0);
     assert_eq!(
-        r.out,
+        r.out.replace('\\', "/"),
         "skip  in/sub/a.png (the output file already exists)\nConverted 0 of 1 file(s).\n"
     );
     assert!(!out.join("a (3).jpg").exists());
