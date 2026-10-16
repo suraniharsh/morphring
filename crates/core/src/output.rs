@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use chrono::NaiveDateTime;
+use serde::{Deserialize, Serialize};
 
 use crate::contract::OutputAllocator;
 
@@ -21,8 +22,13 @@ pub const DEFAULT_SUBFOLDER: &str = "converted";
 pub const DEFAULT_PATTERN: &str = "{name}";
 
 /// Where outputs are written.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all_fields = "camelCase")]
 pub enum OutputLocation {
+    /// Use the default output location from the settings. Whoever builds the
+    /// rule swaps it for the real one; [`resolve`] treats a leftover one as
+    /// [`OutputLocation::SameFolder`].
+    Default,
     /// Next to the source file.
     #[default]
     SameFolder,
@@ -39,7 +45,7 @@ pub enum OutputLocation {
 }
 
 /// What to do when the output path is already taken.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ConflictPolicy {
     /// Append ` (2)`, ` (3)`, ... to the name.
     #[default]
@@ -51,13 +57,16 @@ pub enum ConflictPolicy {
 }
 
 /// How output paths are chosen.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
 pub struct OutputRule {
     pub location: OutputLocation,
     /// File name without extension. Tokens: `{name}`, `{ext}`, `{preset}`,
     /// `{date}` (yyyyMMdd), `{time}` (HHmmss) and `{index}`, case-insensitive.
     pub pattern: String,
     pub conflict: ConflictPolicy,
+    /// Give each output the creation and modification times of its source.
+    pub keep_dates: bool,
 }
 
 impl Default for OutputRule {
@@ -66,6 +75,7 @@ impl Default for OutputRule {
             location: OutputLocation::SameFolder,
             pattern: DEFAULT_PATTERN.to_owned(),
             conflict: ConflictPolicy::Rename,
+            keep_dates: false,
         }
     }
 }
@@ -104,7 +114,9 @@ pub fn resolve(
     let source_dir = source.parent().map(Path::to_path_buf).unwrap_or_default();
 
     let dir = match &rule.location {
-        OutputLocation::SameFolder => source_dir,
+        // Default should have been swapped for the settings' choice by now; if it
+        // slipped through, next to the source is the least surprising place.
+        OutputLocation::Default | OutputLocation::SameFolder => source_dir,
         OutputLocation::Subfolder(name) => {
             source_dir.join(sanitize(&expand_pattern(name, tokens), DEFAULT_SUBFOLDER))
         }
@@ -737,6 +749,42 @@ mod tests {
             &none(),
         );
         assert_eq!(path, Some(PathBuf::from("/x/{preset}.png")));
+    }
+
+    #[test]
+    fn a_leftover_default_location_means_same_folder() {
+        let rule = OutputRule {
+            location: OutputLocation::Default,
+            ..OutputRule::default()
+        };
+        let path = resolve(&rule, &tokens("/x/a.jpg"), "png", "", &never, &none());
+        assert_eq!(path, Some(PathBuf::from("/x/a.png")));
+        assert!(!OutputRule::default().keep_dates);
+    }
+
+    #[test]
+    fn rules_round_trip_through_json() {
+        let rule = OutputRule {
+            location: OutputLocation::CustomFolder {
+                path: PathBuf::from("/out"),
+                keep_folders_from: Some(PathBuf::from("/in")),
+            },
+            pattern: "{name}_50".into(),
+            conflict: ConflictPolicy::Skip,
+            keep_dates: true,
+        };
+        let json = serde_json::to_value(&rule).unwrap();
+        assert_eq!(json["keepDates"], true);
+        assert_eq!(json["conflict"], "Skip");
+        assert_eq!(json["location"]["CustomFolder"]["keepFoldersFrom"], "/in");
+        let back: OutputRule = serde_json::from_value(json).unwrap();
+        assert_eq!(back, rule);
+
+        let sparse: OutputRule =
+            serde_json::from_str(r#"{"location":"Default","pattern":"{name}_gray"}"#).unwrap();
+        assert_eq!(sparse.location, OutputLocation::Default);
+        assert_eq!(sparse.conflict, ConflictPolicy::Rename);
+        assert!(!sparse.keep_dates);
     }
 
     #[test]

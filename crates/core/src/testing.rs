@@ -10,7 +10,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crate::contract::{CancelToken, Converter, Edge, EngineStatus, OutputAllocator, Step};
+use crate::contract::{
+    CancelToken, ConvertOptions, Converter, Edge, EngineStatus, OutputAllocator, Step,
+};
 use crate::error::EngineError;
 
 /// What a `FakeConverter` does when asked to convert.
@@ -70,6 +72,7 @@ pub struct FakeConverter {
     max_parallelism: usize,
     status: EngineStatus,
     behaviour: Behaviour,
+    declines: bool,
     counters: FakeCounters,
 }
 
@@ -86,6 +89,7 @@ impl FakeConverter {
                 version: "1.0".into(),
             },
             behaviour: Behaviour::Copy,
+            declines: false,
             counters: FakeCounters::default(),
         }
     }
@@ -111,6 +115,13 @@ impl FakeConverter {
     /// Marks the engine as not installed, with this install hint.
     pub fn missing(mut self, hint: &str) -> Self {
         self.status = EngineStatus::Missing { hint: hint.into() };
+        self
+    }
+
+    /// Makes `accepts` return false for every option set, so the job runner
+    /// must leave this engine out.
+    pub fn declining(mut self) -> Self {
+        self.declines = true;
         self
     }
 
@@ -150,6 +161,10 @@ impl Converter for FakeConverter {
 
     fn status(&self) -> EngineStatus {
         self.status.clone()
+    }
+
+    fn accepts(&self, _options: &ConvertOptions) -> bool {
+        !self.declines
     }
 
     fn convert(

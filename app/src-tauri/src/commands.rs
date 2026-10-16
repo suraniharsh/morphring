@@ -23,7 +23,7 @@ use morphring_core::planner::Planner;
 use morphring_core::slices::{self, DisabledReason, Reach};
 use morphring_core::{
     CancelToken, ConvertOptions, Converter, EngineStatus, ErrorKey, FileResult, FileState,
-    FormatId, JobState,
+    FormatId, JobState, Target,
 };
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, Runtime};
@@ -347,7 +347,7 @@ impl Worker {
         );
         let results = job::run_job(
             &request.files,
-            request.target,
+            Target::Format(request.target),
             &ConvertOptions::default(),
             &OutputRule::default(),
             &engines,

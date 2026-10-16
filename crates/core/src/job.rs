@@ -2,8 +2,10 @@
 //! parallel, with a concurrency limit per engine.
 //!
 //! Ported from Filee's `src/Filee.Core/Conversion/JobQueue.cs`, minus the
-//! queue itself (the CLI runs a single job) and minus the merge, multi-page
-//! TIFF and combine modes, which arrive with presets.
+//! queue itself (the CLI runs a single job). The merge mode lives next door in
+//! [`merge`]; multi-page TIFF and combine-into-one-archive are still to come.
+
+mod merge;
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -18,13 +20,40 @@ use std::thread;
 use std::time::Duration;
 
 use crate::contract::{
-    CancelToken, ConvertOptions, Converter, EngineStatus, FileResult, FileState, FormatId,
+    CancelToken, ConvertOptions, Converter, Edge, EngineStatus, FileResult, FileState, FormatId,
     OutputAllocator, Step,
 };
 use crate::error::{EngineError, ErrorKey};
 use crate::formats;
 use crate::output::{JobAllocator, OutputRule, Reservations, Tokens};
 use crate::planner::{Planner, Route};
+
+/// What a job converts its files to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Target {
+    /// Every file becomes this format.
+    Format(FormatId),
+    /// Every file stays in its own format, re-encoded through the engine's self
+    /// edge (`png -> png`). Used by presets such as "Half size" whose options do
+    /// the work while the format stays put.
+    SameAsSource,
+}
+
+impl Target {
+    /// The format `source_format` is converted to under this target.
+    pub fn for_source(self, source_format: FormatId) -> FormatId {
+        match self {
+            Self::Format(format) => format,
+            Self::SameAsSource => source_format,
+        }
+    }
+}
+
+impl From<FormatId> for Target {
+    fn from(format: FormatId) -> Self {
+        Self::Format(format)
+    }
+}
 
 /// Something that happened to one file of a running job.
 ///
@@ -44,18 +73,19 @@ pub enum JobEvent {
 /// file, in input order.
 ///
 /// Routes are planned once for the job over the engines whose status is
-/// available. Files run in parallel, at most one per CPU core, and each engine
+/// available and that accept `options` ([`Converter::accepts`]). Files run in parallel, at most one per CPU core, and each engine
 /// runs at most `max_parallelism()` steps at a time (0 means one per core).
 /// Intermediate files of multi-step routes live in a private folder below
 /// `$TMPDIR/morphring/`, which is removed before this returns. Final outputs
-/// are named by `rule`. A failure, panic or cancellation only affects its own
+/// are named by `rule`; with `rule.keep_dates` a finished file's outputs get
+/// its dates. A failure, panic or cancellation only affects its own
 /// file; partial outputs of a failed or cancelled file are deleted.
 ///
 /// Use [`JobState::from_files`](crate::JobState::from_files) on the result to
 /// get the state of the whole job.
 pub fn run_job(
     files: &[PathBuf],
-    target: FormatId,
+    target: Target,
     options: &ConvertOptions,
     rule: &OutputRule,
     engines: &[&dyn Converter],
@@ -66,6 +96,14 @@ pub fn run_job(
         return Vec::new();
     }
 
+    // An engine that turns these options down sits this job out. It is swapped
+    // for a stand-in with no edges rather than removed, so route hops still
+    // index into `engines` and registry priorities stay exactly where they were.
+    let installed: Vec<&dyn Converter> = engines
+        .iter()
+        .map(|&e| if e.accepts(options) { e } else { &BENCHED })
+        .collect();
+
     let cores = thread::available_parallelism().map_or(1, |n| n.get());
     let job = Job {
         target,
@@ -74,7 +112,7 @@ pub fn run_job(
         engines,
         cancel,
         on_event,
-        planner: Planner::new(engines, false),
+        planner: Planner::new(&installed, false),
         // Only consulted when a route is missing, but building it costs about as
         // much as a blink, and doing it once beats racing to do it lazily.
         dream_planner: Planner::new(engines, true),
@@ -88,11 +126,13 @@ pub fn run_job(
             })
             .collect(),
         reserved: Reservations::default(),
-        preset: formats::find_by_id(target.as_str())
-            .map_or_else(|| target.as_str().to_owned(), |f| f.name.to_owned()),
         now: chrono::Local::now().naive_local(),
         work_dir: create_work_dir(),
     };
+
+    if let Some(results) = merge::try_run(&job, files) {
+        return results;
+    }
 
     let slots: Vec<OnceLock<FileResult>> = files.iter().map(|_| OnceLock::new()).collect();
     let next = AtomicUsize::new(0);
@@ -139,26 +179,25 @@ pub fn run_job(
 
 /// Everything the workers of one job share.
 struct Job<'a> {
-    target: FormatId,
+    target: Target,
     options: &'a ConvertOptions,
     rule: &'a OutputRule,
     engines: &'a [&'a dyn Converter],
     cancel: &'a CancelToken,
     on_event: &'a (dyn Fn(JobEvent) + Sync),
-    /// Routes over the installed engines.
+    /// Routes over the installed engines that accept the job's options.
     planner: Planner,
     /// Routes over every engine, installed or not; explains `engine_missing`.
     dream_planner: Planner,
     gates: HashMap<&'static str, Gate>,
     reserved: Reservations,
-    preset: String,
     now: chrono::NaiveDateTime,
     /// `$TMPDIR/morphring/<random>/`, or why it could not be created.
     work_dir: Result<tempfile::TempDir, String>,
 }
 
 /// How a file's conversion ended, before it is turned into a `FileResult`.
-enum Outcome {
+pub(super) enum Outcome {
     Finished(Vec<PathBuf>),
     Cancelled,
     Failed(ErrorKey, String),
@@ -184,6 +223,9 @@ impl Job<'_> {
             Outcome::Cancelled => (FileState::Cancelled, Vec::new()),
             Outcome::Failed(key, detail) => (FileState::Failed { key, detail }, Vec::new()),
         };
+        if state == FileState::Done && self.rule.keep_dates {
+            crate::dates::copy_dates(source, &outputs);
+        }
         FileResult {
             source: source.to_path_buf(),
             state,
@@ -195,14 +237,9 @@ impl Job<'_> {
         if self.cancel.is_cancelled() {
             return Outcome::Cancelled;
         }
-        let Some(format) = formats::detect(source) else {
-            return Outcome::Failed(
-                ErrorKey::UnsupportedSource,
-                format!(".{}", formats::extension_of(source)),
-            );
-        };
-        let Some(route) = self.planner.plan(format.id, self.target) else {
-            return self.explain_missing_route(format.id);
+        let (target, route) = match self.plan_file(source) {
+            Ok(planned) => planned,
+            Err(outcome) => return outcome,
         };
         let work_dir = match &self.work_dir {
             Ok(dir) => dir.path(),
@@ -215,7 +252,11 @@ impl Job<'_> {
         // temp file first and the user's old file is still intact.
         let created = RefCell::new(Vec::new());
         let run = panic::catch_unwind(AssertUnwindSafe(|| {
-            self.run_route(index, source, &route, work_dir, &created)
+            let mut final_out = FinalAllocator {
+                inner: self.final_allocator(index, source, target),
+                created: &created,
+            };
+            self.run_route(index, source, &route, work_dir, &mut final_out)
         }));
         let outcome = match run {
             Ok(Ok(outputs)) => return Outcome::Finished(outputs),
@@ -239,11 +280,52 @@ impl Job<'_> {
         outcome
     }
 
+    /// Detects the format of `source` and plans its route to the job's target.
+    /// Returns the per-file target with the route, or the outcome that ends the
+    /// file right here (unknown format, no route).
+    pub(super) fn plan_file(&self, source: &Path) -> Result<(FormatId, Route), Outcome> {
+        let Some(format) = formats::detect(source) else {
+            return Err(Outcome::Failed(
+                ErrorKey::UnsupportedSource,
+                format!(".{}", formats::extension_of(source)),
+            ));
+        };
+        let target = self.target.for_source(format.id);
+        match self.planner.plan(format.id, target) {
+            Some(route) => Ok((target, route)),
+            None => Err(self.explain_missing_route(format.id, target)),
+        }
+    }
+
+    /// The allocator for the final outputs of the file at `index`, converted
+    /// to `target`.
+    pub(super) fn final_allocator(
+        &self,
+        index: usize,
+        source: &Path,
+        target: FormatId,
+    ) -> JobAllocator {
+        // {preset} is the target's display name for now; presets bring their own
+        // names along with P2-10.
+        let preset = formats::find_by_id(target.as_str())
+            .map_or_else(|| target.as_str().to_owned(), |f| f.name.to_owned());
+        JobAllocator::new(
+            self.rule.clone(),
+            Tokens {
+                source: source.to_path_buf(),
+                preset,
+                index: index + 1,
+                now: self.now,
+            },
+            Arc::clone(&self.reserved),
+        )
+    }
+
     /// No route with the installed engines: find out whether installing
     /// something would help (D10), or whether it is simply impossible.
-    fn explain_missing_route(&self, from: FormatId) -> Outcome {
+    fn explain_missing_route(&self, from: FormatId, target: FormatId) -> Outcome {
         let mut missing: Vec<String> = Vec::new();
-        if let Some(route) = self.dream_planner.plan(from, self.target) {
+        if let Some(route) = self.dream_planner.plan(from, target) {
             for engine in route.engines().map(|i| self.engines[i]) {
                 if let EngineStatus::Missing { hint } = engine.status() {
                     let line = format!("needs {}: {hint}", engine.display_name());
@@ -254,47 +336,32 @@ impl Job<'_> {
             }
         }
         if missing.is_empty() {
-            Outcome::Failed(ErrorKey::NoRoute, format!("{from} → {}", self.target))
+            Outcome::Failed(ErrorKey::NoRoute, format!("{from} → {target}"))
         } else {
             Outcome::Failed(ErrorKey::EngineMissing, missing.join("; "))
         }
     }
 
     /// Runs every hop of `route`. A hop that produces several files (pages,
-    /// frames) runs the next hop once per file.
-    fn run_route(
+    /// frames) runs the next hop once per file. The last hop writes through
+    /// `final_out`, every earlier one into `work_dir`.
+    pub(super) fn run_route(
         &self,
         index: usize,
         source: &Path,
         route: &Route,
         work_dir: &Path,
-        created: &RefCell<Vec<PathBuf>>,
+        final_out: &mut dyn OutputAllocator,
     ) -> Result<Vec<PathBuf>, EngineError> {
         let steps = route.hops.len();
         let best = Cell::new(0.0_f32);
-        let mut final_out = FinalAllocator {
-            inner: JobAllocator::new(
-                self.rule.clone(),
-                Tokens {
-                    source: source.to_path_buf(),
-                    preset: self.preset.clone(),
-                    index: index + 1,
-                    now: self.now,
-                },
-                Arc::clone(&self.reserved),
-            ),
-            created,
-        };
-        let mut temp_out = TempAllocator {
-            work_dir,
-            base: formats::name_without_extension(source),
-        };
+        let mut temp_out = TempAllocator::new(work_dir, source);
 
         let mut inputs = vec![source.to_path_buf()];
         for (s, hop) in route.hops.iter().enumerate() {
             let engine = self.engines[hop.engine];
             let out: &mut dyn OutputAllocator = if s + 1 == steps {
-                &mut final_out
+                &mut *final_out
             } else {
                 &mut temp_out
             };
@@ -371,9 +438,19 @@ impl OutputAllocator for FinalAllocator<'_> {
 ///
 /// Every output gets its own random folder, so two files called `a.png` and
 /// `a.jpg` can't trip over each other's `a.pdf` halfway through a route.
-struct TempAllocator<'a> {
+pub(super) struct TempAllocator<'a> {
     work_dir: &'a Path,
     base: OsString,
+}
+
+impl<'a> TempAllocator<'a> {
+    /// Intermediates of `source`, named after it, below `work_dir`.
+    pub(super) fn new(work_dir: &'a Path, source: &Path) -> Self {
+        Self {
+            work_dir,
+            base: formats::name_without_extension(source),
+        }
+    }
 }
 
 impl OutputAllocator for TempAllocator<'_> {
@@ -400,6 +477,46 @@ impl OutputAllocator for TempAllocator<'_> {
             name.push(ext);
         }
         Some(dir.join(name))
+    }
+}
+
+/// Stands in for an engine that declined the job's options: no edges, never
+/// available, never asked to convert anything.
+struct Benched;
+
+static BENCHED: Benched = Benched;
+
+impl Converter for Benched {
+    fn id(&self) -> &'static str {
+        "benched"
+    }
+
+    fn display_name(&self) -> &'static str {
+        "benched"
+    }
+
+    fn edges(&self) -> &[Edge] {
+        &[]
+    }
+
+    fn status(&self) -> EngineStatus {
+        EngineStatus::Missing {
+            hint: String::new(),
+        }
+    }
+
+    fn convert(
+        &self,
+        _step: &Step,
+        _out: &mut dyn OutputAllocator,
+        _progress: &dyn Fn(f32),
+        _cancel: &CancelToken,
+    ) -> Result<Vec<PathBuf>, EngineError> {
+        // The planner never routes through an engine without edges, so getting
+        // here means someone rewired the planner without telling us.
+        Err(EngineError::Failed(
+            "this engine is not used for this job".into(),
+        ))
     }
 }
 
@@ -476,7 +593,7 @@ fn create_work_dir() -> Result<tempfile::TempDir, String> {
 }
 
 /// Deletes a partial output, file or folder. Already gone is fine.
-fn remove_path(path: &Path) {
+pub(super) fn remove_path(path: &Path) {
     let result = match path.symlink_metadata() {
         Ok(meta) if meta.is_dir() => fs::remove_dir_all(path),
         Ok(_) => fs::remove_file(path),
@@ -585,7 +702,7 @@ mod tests {
     ) -> Vec<FileResult> {
         run_job(
             files,
-            FormatId::new(target),
+            Target::Format(FormatId::new(target)),
             &ConvertOptions::default(),
             rule,
             engines,
@@ -971,7 +1088,7 @@ mod tests {
 
         let results = run_job(
             &files,
-            FormatId::new("png"),
+            Target::Format(FormatId::new("png")),
             &ConvertOptions::default(),
             &OutputRule::default(),
             &[&first, &second],
@@ -1041,7 +1158,7 @@ mod tests {
 
         let results = run_job(
             &files,
-            FormatId::new("jpg"),
+            Target::Format(FormatId::new("jpg")),
             &ConvertOptions::default(),
             &OutputRule::default(),
             &[&fake],
@@ -1073,6 +1190,119 @@ mod tests {
         assert_eq!(results[0].state, FileState::Done);
         assert!(dir.path().join("a_50.jpg").is_file());
         assert_eq!(fs::read_to_string(&source).unwrap(), "x");
+    }
+
+    #[test]
+    fn same_as_source_keeps_each_file_in_its_own_format() {
+        let dir = tempfile::tempdir().unwrap();
+        let files = [touch(&dir, "a.png"), touch(&dir, "b.jpg")];
+        let magick = FakeConverter::new("magick")
+            .edge("png", "png", 10)
+            .edge("jpg", "jpg", 10)
+            // Bait: a cheap cross-format edge SameAsSource must not take.
+            .edge("png", "jpg", 1);
+        let rule = OutputRule {
+            pattern: "{name}_50".into(),
+            ..OutputRule::default()
+        };
+
+        let results = run_job(
+            &files,
+            Target::SameAsSource,
+            &ConvertOptions::default(),
+            &rule,
+            &[&magick],
+            &CancelToken::new(),
+            &|_| {},
+        );
+
+        assert!(results.iter().all(|r| r.state == FileState::Done));
+        assert_eq!(results[0].outputs, [dir.path().join("a_50.png")]);
+        assert_eq!(results[1].outputs, [dir.path().join("b_50.jpg")]);
+        assert_eq!(
+            fs::read_to_string(&results[0].outputs[0]).unwrap(),
+            "fake png -> png\n"
+        );
+    }
+
+    #[test]
+    fn same_as_source_without_a_self_edge_is_no_route() {
+        let dir = tempfile::tempdir().unwrap();
+        let files = [touch(&dir, "a.gif")];
+        let magick = FakeConverter::new("magick").edge("gif", "png", 10);
+
+        let results = run_job(
+            &files,
+            Target::SameAsSource,
+            &ConvertOptions::default(),
+            &OutputRule::default(),
+            &[&magick],
+            &CancelToken::new(),
+            &|_| {},
+        );
+
+        assert_eq!(failed(&results[0]), (ErrorKey::NoRoute, "gif → gif"));
+    }
+
+    #[test]
+    fn an_engine_that_declines_the_options_is_never_used() {
+        let dir = tempfile::tempdir().unwrap();
+        let files = [touch(&dir, "a.png")];
+        // The picky engine is first in line and cheaper, so it would win if it
+        // were allowed to play.
+        let picky = FakeConverter::new("picky")
+            .edge("png", "jpg", 1)
+            .declining();
+        let steady = FakeConverter::new("steady").edge("png", "jpg", 10);
+        let (picky_calls, steady_calls) = (picky.counters(), steady.counters());
+
+        let results = run(&files, "jpg", &[&picky, &steady]);
+
+        assert_eq!(results[0].state, FileState::Done);
+        assert_eq!(picky_calls.calls(), 0);
+        assert_eq!(steady_calls.calls(), 1);
+    }
+
+    #[test]
+    fn a_route_only_a_declining_engine_has_still_reports_as_before() {
+        let dir = tempfile::tempdir().unwrap();
+        let files = [touch(&dir, "a.png")];
+        let picky = FakeConverter::new("picky")
+            .edge("png", "jpg", 10)
+            .declining();
+        let counters = picky.counters();
+
+        let results = run(&files, "jpg", &[&picky]);
+        assert_eq!(failed(&results[0]), (ErrorKey::NoRoute, "png → jpg"));
+        assert_eq!(counters.calls(), 0);
+
+        // A route through a declining engine and a missing one still names the
+        // missing one, since installing it is part of the answer.
+        let docs = [touch(&dir, "report.docx")];
+        let to_png = FakeConverter::new("magick")
+            .edge("pdf", "png", 10)
+            .declining();
+        let soffice = FakeConverter::new("soffice")
+            .display_name("LibreOffice")
+            .edge("docx", "pdf", 10)
+            .missing("pacman -S libreoffice-fresh");
+        let results = run(&docs, "png", &[&to_png, &soffice]);
+        assert_eq!(
+            failed(&results[0]),
+            (
+                ErrorKey::EngineMissing,
+                "needs LibreOffice: pacman -S libreoffice-fresh"
+            )
+        );
+    }
+
+    #[test]
+    fn target_maps_per_source() {
+        let png = FormatId::new("png");
+        let jpg = FormatId::new("jpg");
+        assert_eq!(Target::Format(jpg).for_source(png), jpg);
+        assert_eq!(Target::SameAsSource.for_source(png), png);
+        assert_eq!(Target::from(jpg), Target::Format(jpg));
     }
 
     #[test]

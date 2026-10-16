@@ -7,7 +7,7 @@ use std::thread;
 
 use morphring_core::job::{self, JobEvent};
 use morphring_core::output::{ConflictPolicy, OutputLocation, OutputRule};
-use morphring_core::{ConvertOptions, Converter, FileResult, FileState, formats};
+use morphring_core::{ConvertOptions, Converter, FileResult, FileState, Target, formats};
 
 use crate::args::ConvertArgs;
 use crate::ctx::Ctx;
@@ -63,6 +63,7 @@ pub fn run(args: &ConvertArgs, ctx: &mut Ctx) -> i32 {
     let rule = output_rule(args, &ctx.cwd);
     let options = ConvertOptions {
         quality: args.quality,
+        ..Default::default()
     };
     let engines: Vec<&dyn Converter> = ctx.engines.iter().map(|e| e.as_ref()).collect();
     let cancel = ctx.cancel.clone();
@@ -90,7 +91,7 @@ pub fn run(args: &ConvertArgs, ctx: &mut Ctx) -> i32 {
             };
             job::run_job(
                 &expanded.files,
-                target.id,
+                Target::Format(target.id),
                 &options,
                 &rule,
                 &engines,

@@ -8,6 +8,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::error::{EngineError, ErrorKey};
+use crate::options::{ArchiveOptions, DocumentOptions, ImageOptions, MediaOptions, PdfOptions};
 
 /// Identifier of a format, such as `"png"` or `"docx"`.
 ///
@@ -63,11 +64,18 @@ impl Edge {
     }
 }
 
-/// Options chosen by the user for a conversion.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+/// Options chosen by the user for a conversion: a preset's option groups plus
+/// the command line's quality override.
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct ConvertOptions {
-    /// Quality in percent (1 to 100), or `None` for the engine default.
+    /// Quality in percent (1 to 100), or `None` for the engine default. This is
+    /// the CLI's `-q`; a preset's own quality lives in `image.quality`.
     pub quality: Option<u8>,
+    pub image: ImageOptions,
+    pub pdf: PdfOptions,
+    pub document: DocumentOptions,
+    pub media: MediaOptions,
+    pub archive: ArchiveOptions,
 }
 
 impl ConvertOptions {
@@ -119,6 +127,23 @@ pub trait OutputAllocator {
     /// `ext` has no dot; an empty `ext` asks for a folder path. `suffix` is
     /// appended to the name, for example `_p2` when one input produces many files.
     fn allocate(&mut self, ext: &str, suffix: &str) -> Option<PathBuf>;
+}
+
+/// Combines many inputs into one output (merge PDFs, zip a selection, stack
+/// images into a multi-page TIFF), where a plain step only ever sees one file.
+pub trait Merger: Send + Sync {
+    /// Merges `inputs`, in order, and returns the files actually written.
+    ///
+    /// The same rules as [`Converter::convert`] apply: outputs come from `out`,
+    /// `progress` only goes up, `cancel` is honoured and inputs are never
+    /// modified.
+    fn merge(
+        &self,
+        inputs: &[PathBuf],
+        out: &mut dyn OutputAllocator,
+        progress: &dyn Fn(f32),
+        cancel: &CancelToken,
+    ) -> Result<Vec<PathBuf>, EngineError>;
 }
 
 /// Whether an engine can currently be used.
@@ -179,6 +204,18 @@ pub trait Converter: Send + Sync {
 
     /// Whether the engine is usable. Cheap; results may be cached.
     fn status(&self) -> EngineStatus;
+
+    /// Whether this engine can honour `options`. An engine that returns
+    /// `false` is left out of route planning for that job, so another engine
+    /// (or a longer route) is used instead.
+    fn accepts(&self, _options: &ConvertOptions) -> bool {
+        true
+    }
+
+    /// The engine's merge mode, if it has one.
+    fn merger(&self) -> Option<&dyn Merger> {
+        None
+    }
 
     /// Performs one step and returns the files actually written.
     ///

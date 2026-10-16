@@ -24,6 +24,8 @@ pub mod watch;
 
 pub use contract::{
     CancelToken, ConvertOptions, Converter, Edge, EngineStatus, FileResult, FileState, FormatId,
-    JobState, OutputAllocator, QualityLevel, Step,
+    JobState, Merger, OutputAllocator, QualityLevel, Step,
 };
 pub use error::{EngineError, ErrorKey};
+pub use job::Target;
+pub use options::*;

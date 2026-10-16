@@ -351,7 +351,10 @@ mod tests {
             Path::new("/out/a.dst"),
             id(from),
             id(to),
-            &ConvertOptions { quality },
+            &ConvertOptions {
+                quality,
+                ..Default::default()
+            },
             None,
         )
         .into_iter()
