@@ -1,0 +1,9 @@
+# Windows: link the C runtime statically, so morphring.exe and the app run on a
+# fresh Windows without the Visual C++ Redistributable. Without this a clean PC
+# greets you with "VCRUNTIME140.dll was not found", which is a rough first date.
+# Applies to every build under this folder, the app's own workspace included.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
+
+[target.aarch64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

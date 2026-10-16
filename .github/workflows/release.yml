@@ -204,6 +204,11 @@ jobs:
         run: |
           set -euo pipefail
           bin=target/release/morphring.exe
+          # A fresh Windows has no Visual C++ Redistributable; the CRT must be linked in (.cargo/config.toml).
+          if grep -qai 'vcruntime140' "$bin"; then
+            echo "::error::$bin still imports VCRUNTIME140.dll; the static CRT setting did not apply"
+            exit 1
+          fi
           if [ "$GITHUB_REF_TYPE" = tag ]; then
             want="${GITHUB_REF_NAME#v}"
           else
