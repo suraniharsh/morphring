@@ -11,5 +11,10 @@ repository.workspace = true
 thiserror.workspace = true
 tempfile.workspace = true
 
+# Explorer integration: the registry verb, plus a .lnk for Send To.
+[target.'cfg(windows)'.dependencies]
+winreg.workspace = true
+mslnk.workspace = true
+
 [lints]
 workspace = true

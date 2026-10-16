@@ -7,6 +7,15 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[features]
+# The native engines. Turn them all off and you get the v0.1 build: every
+# conversion goes through the external tools, and the binary stays svelte.
+default = ["img", "svg", "pdf", "archive"]
+img = ["dep:image"]
+svg = ["dep:resvg", "dep:usvg", "dep:flate2"]
+pdf = ["dep:lopdf", "dep:krilla", "dep:krilla-svg", "dep:usvg", "dep:image"]
+archive = ["dep:zip", "dep:tar", "dep:flate2"]
+
 [dependencies]
 morphring-core = { path = "../core", version = "0.1.0" }
 thiserror.workspace = true
@@ -18,9 +27,22 @@ which.workspace = true
 regex.workspace = true
 url.workspace = true
 directories.workspace = true
+dunce.workspace = true
+image = { workspace = true, optional = true }
+resvg = { workspace = true, optional = true }
+usvg = { workspace = true, optional = true }
+krilla = { workspace = true, optional = true }
+krilla-svg = { workspace = true, optional = true }
+lopdf = { workspace = true, optional = true }
+zip = { workspace = true, optional = true }
+tar = { workspace = true, optional = true }
+flate2 = { workspace = true, optional = true }
 
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys.workspace = true
 
 [dev-dependencies]
 morphring-core = { path = "../core", version = "0.1.0", features = ["test-support"] }

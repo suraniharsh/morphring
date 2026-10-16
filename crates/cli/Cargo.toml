@@ -27,11 +27,13 @@ glob.workspace = true
 walkdir.workspace = true
 indexmap.workspace = true
 pathdiff.workspace = true
+notify.workspace = true
 
 [dev-dependencies]
 morphring-core = { path = "../core", version = "0.1.0", features = ["test-support"] }
 tempfile.workspace = true
 which.workspace = true
+filetime.workspace = true
 
 [lints]
 workspace = true

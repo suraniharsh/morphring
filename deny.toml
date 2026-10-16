@@ -37,6 +37,9 @@ allow = [
     "MPL-2.0",
     "Unicode-3.0",
     "Unicode-DFS-2016",
+    # notify (watch folders) is public domain via CC0. Nothing to attribute,
+    # nothing to worry about; it just needs to be on the list.
+    "CC0-1.0",
 ]
 confidence-threshold = 0.8
 # The list is policy, not an inventory: a licence nobody uses yet is fine.

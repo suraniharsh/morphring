@@ -8,7 +8,7 @@ exclude = ["app"]
 [workspace.package]
 version = "0.1.1"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.92"
 license = "MIT"
 repository = "https://github.com/suraniharsh/morphring"
 
@@ -33,9 +33,37 @@ walkdir = "2"
 indexmap = "2"
 pathdiff = "0.2"
 
+# v0.2: everything the native engines, watch folders and --keep-dates need is
+# declared here in one go, so the feature tasks never fight over this file.
+# Versions were checked against crates.io on 2026-10-16 (see the commit body).
+# Native raster codecs only; the exotic formats stay with magick, who earned it.
+image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "gif", "bmp", "tiff", "ico", "qoi", "pnm", "tga"] }
+# Pinned exactly: krilla-svg wants usvg ^0.47, and two copies of usvg is one too many.
+resvg = "=0.47.0"
+usvg = "=0.47.0"
+krilla = "0.8.2"
+krilla-svg = "0.8.1"
+# Must stay >= 0.42 (RUSTSEC-2026-0187).
+lopdf = "0.45"
+# No AES, bzip2, lzma, zstd: we write plain deflate zips and read what Filee read.
+zip = { version = "9.0.3", default-features = false, features = ["deflate", "time"] }
+# Must stay >= 0.4.45 (RUSTSEC-2026-0067, RUSTSEC-2026-0068).
+tar = "0.4.46"
+flate2 = "1.1.10"
+notify = "8.2.0"
+filetime = "0.2.29"
+dunce = "1.0.5"
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_System_JobObjects", "Win32_System_Threading", "Win32_Security", "Win32_Storage_FileSystem"] }
+winreg = "0.56"
+mslnk = "0.1.8"
+
 [workspace.lints.rust]
 unsafe_code = "deny"
 
 [workspace.lints.clippy]
 unwrap_used = "warn"
 expect_used = "warn"
+# With the MSRV at 1.92, clippy suddenly wants every nested `if let` turned into
+# a let chain. Fair, but rewriting src/ is not this commit's job, and a dozen
+# parallel branches would trip over it the moment they rebase. Opt back in later.
+collapsible_if = "allow"
