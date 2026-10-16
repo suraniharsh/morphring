@@ -95,6 +95,7 @@ mod tests {
         assert_eq!(engine.id(), "pdf");
         assert_eq!(engine.display_name(), "Built-in PDF");
         assert!(engine.edges().iter().any(|e| e.from.as_str() == "png"));
+        assert!(engine.edges().iter().any(|e| e.from.as_str() == "svg"));
     }
 
     #[test]
@@ -112,7 +113,7 @@ mod tests {
 
     #[test]
     fn every_part_is_a_stub_for_now() {
-        let parts: [crate::parts::ConvertFn; 2] = [pages::convert, svg_pdf::convert];
+        let parts: [crate::parts::ConvertFn; 1] = [pages::convert];
         for convert in parts {
             let err = convert(
                 &step("pdf", "png"),
