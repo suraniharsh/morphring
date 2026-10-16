@@ -1,0 +1,23 @@
+pkgbase = morphring-bin
+	pkgdesc = Offline file converter that plans conversions and drives ImageMagick, FFmpeg and LibreOffice
+	pkgver = 0.1.1
+	pkgrel = 1
+	url = https://github.com/suraniharsh/morphring
+	arch = x86_64
+	license = MIT
+	depends = gcc-libs
+	depends = glibc
+	optdepends = imagemagick: image conversions
+	optdepends = ffmpeg: audio and video conversions
+	optdepends = libreoffice-fresh: office document conversions
+	optdepends = poppler: PDF page rendering with pdftoppm
+	optdepends = ghostscript: PDF rendering and compression
+	optdepends = pandoc: markup and document conversions
+	provides = morphring
+	conflicts = morphring
+	options = !strip
+	options = !debug
+	source = morphring-v0.1.1-x86_64-linux.tar.gz::https://github.com/suraniharsh/morphring/releases/download/v0.1.1/morphring-v0.1.1-x86_64-linux.tar.gz
+	sha256sums = SKIP
+
+pkgname = morphring-bin

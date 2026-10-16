@@ -1,0 +1,42 @@
+# Maintainer: surani <harshsurani00@gmail.com>
+#
+# Repackages the prebuilt CLI from the GitHub release. No cargo, no rustup, no
+# twenty minutes of your laptop fan auditioning for a jet engine.
+# The ring app ships separately as morphring-app-bin; this one is CLI only.
+
+pkgname=morphring-bin
+_pkgname=morphring
+pkgver=0.1.1
+pkgrel=1
+pkgdesc='Offline file converter that plans conversions and drives ImageMagick, FFmpeg and LibreOffice'
+arch=('x86_64')
+url='https://github.com/suraniharsh/morphring'
+license=('MIT')
+depends=('gcc-libs' 'glibc')
+optdepends=(
+  'imagemagick: image conversions'
+  'ffmpeg: audio and video conversions'
+  'libreoffice-fresh: office document conversions'
+  'poppler: PDF page rendering with pdftoppm'
+  'ghostscript: PDF rendering and compression'
+  'pandoc: markup and document conversions'
+)
+provides=("$_pkgname")
+conflicts=("$_pkgname")
+# Ship the binary exactly as released: stripping it would make it differ from
+# the checksummed upstream file, and a -debug package of a prebuilt is all hat.
+options=('!strip' '!debug')
+_dirname="$_pkgname-v$pkgver-x86_64-linux"
+source=("$_dirname.tar.gz::$url/releases/download/v$pkgver/$_dirname.tar.gz")
+# TODO(R-03): real checksum
+sha256sums=('SKIP')
+
+package() {
+  cd "$srcdir/$_dirname"
+  install -Dm755 morphring "$pkgdir/usr/bin/morphring"
+  install -Dm644 README.md CHANGELOG.md THIRD-PARTY-NOTICES.md -t "$pkgdir/usr/share/doc/$_pkgname/"
+  install -Dm644 LICENSE -t "$pkgdir/usr/share/licenses/$_pkgname/"
+  # Third-party notices are licence text too, so they live in both places.
+  # pacman won't mind the duplicate; lawyers might mind its absence.
+  install -Dm644 THIRD-PARTY-NOTICES.md -t "$pkgdir/usr/share/licenses/$_pkgname/"
+}
