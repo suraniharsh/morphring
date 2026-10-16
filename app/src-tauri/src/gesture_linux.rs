@@ -23,6 +23,11 @@ const POLL: Duration = Duration::from_millis(20);
 /// An armed press that never turns into a drag stops polling after this long.
 const ARM_TIMEOUT: Duration = Duration::from_secs(15);
 
+/// A touch this short is a tap (libinput's own tap timeout is 180 ms).
+const TAP_MAX: Duration = Duration::from_millis(250);
+/// A second touch this soon after a tap is a tap-and-drag.
+const TAP_DRAG_GAP: Duration = Duration::from_millis(350);
+
 /// Window classes of file managers, lowercased. Matched as substrings, so
 /// `org.kde.dolphin` and `dolphin` both count.
 const FILE_MANAGERS: &[&str] = &[
@@ -107,6 +112,44 @@ fn on_key(state: &mut State, code: KeyCode, down: bool) -> Action {
     }
 }
 
+/// Spots tap-and-drag on a touchpad. Tapping is libinput's invention: the
+/// kernel only reports fingers landing and lifting, never a BTN_LEFT. So we
+/// redo the arithmetic: tap, touch again quickly, and that second touch is
+/// the button held down until the finger lifts.
+#[derive(Debug, Default)]
+struct TapDrag {
+    touched_at: Option<Instant>,
+    last_tap_end: Option<Instant>,
+    dragging: bool,
+}
+
+impl TapDrag {
+    /// Feeds one BTN_TOUCH change; returns a pretend BTN_LEFT change, if any.
+    fn on_touch(&mut self, down: bool, now: Instant) -> Option<bool> {
+        if down {
+            let tap_then_touch = self
+                .last_tap_end
+                .take()
+                .is_some_and(|end| now.duration_since(end) <= TAP_DRAG_GAP);
+            self.touched_at = Some(now);
+            if tap_then_touch {
+                self.dragging = true;
+                return Some(true);
+            }
+            None
+        } else {
+            let touched = self.touched_at.take();
+            if std::mem::take(&mut self.dragging) {
+                return Some(false);
+            }
+            if touched.is_some_and(|t| now.duration_since(t) <= TAP_MAX) {
+                self.last_tap_end = Some(now);
+            }
+            None
+        }
+    }
+}
+
 fn in_file_manager() -> bool {
     if std::env::var_os("MORPHRING_GESTURE_ANYWHERE").is_some() {
         return true;
@@ -147,6 +190,10 @@ pub fn start<R: Runtime>(app: &AppHandle<R>) -> bool {
         let state = Arc::clone(&state);
         let app = app.clone();
         std::thread::spawn(move || {
+            let touchpad = device.supported_keys().is_some_and(|keys| {
+                keys.contains(KeyCode::BTN_TOUCH) && keys.contains(KeyCode::BTN_TOOL_FINGER)
+            });
+            let mut tap = TapDrag::default();
             loop {
                 let events = match device.fetch_events() {
                     Ok(events) => events.collect::<Vec<_>>(),
@@ -156,6 +203,13 @@ pub fn start<R: Runtime>(app: &AppHandle<R>) -> bool {
                 for event in events {
                     // value 2 is key repeat; Ctrl held down repeats happily.
                     if let EventSummary::Key(_, code, value @ (0 | 1)) = event.destructure() {
+                        if touchpad && code == KeyCode::BTN_TOUCH {
+                            if let Some(down) = tap.on_touch(value == 1, Instant::now()) {
+                                tracing::debug!(down, "touchpad tap-and-drag");
+                                handle(&app, &state, KeyCode::BTN_LEFT, down);
+                            }
+                            continue;
+                        }
                         handle(&app, &state, code, value == 1);
                     }
                 }
@@ -299,6 +353,31 @@ mod tests {
         assert_eq!(press(&mut s, KeyCode::KEY_RIGHTCTRL), Action::None);
         assert_eq!(release(&mut s, KeyCode::BTN_LEFT), Action::None);
         assert_eq!(s.phase, Phase::Idle);
+    }
+
+    #[test]
+    fn tap_then_touch_is_a_drag() {
+        let t0 = Instant::now();
+        let ms = |n| t0 + Duration::from_millis(n);
+        let mut tap = TapDrag::default();
+        assert_eq!(tap.on_touch(true, ms(0)), None);
+        assert_eq!(tap.on_touch(false, ms(90)), None);
+        assert_eq!(tap.on_touch(true, ms(200)), Some(true));
+        assert_eq!(tap.on_touch(false, ms(1500)), Some(false));
+    }
+
+    #[test]
+    fn plain_touches_are_just_pointing() {
+        let t0 = Instant::now();
+        let ms = |n| t0 + Duration::from_millis(n);
+        let mut tap = TapDrag::default();
+        // A long touch is moving the pointer, not tapping.
+        tap.on_touch(true, ms(0));
+        assert_eq!(tap.on_touch(false, ms(600)), None);
+        assert_eq!(tap.on_touch(true, ms(700)), None);
+        // A tap followed by a slow second touch is two separate things.
+        assert_eq!(tap.on_touch(false, ms(750)), None);
+        assert_eq!(tap.on_touch(true, ms(1500)), None);
     }
 
     #[test]
