@@ -2,8 +2,7 @@
 //! in plain Rust (krilla for writing, lopdf for reading).
 //!
 //! Each job lives in its own part: `image_to_pdf`, `pages` and `svg_pdf` for
-//! conversions, and `merge` for the merge mode. This is the skeleton: every
-//! part is a stub, so the engine has no edges and no merger yet.
+//! conversions, and `merge` for the merge mode. The merger is still a stub.
 
 mod image_to_pdf;
 mod merge;
@@ -90,12 +89,13 @@ mod tests {
     use crate::parts::test_support::{NoOutputs, step};
 
     #[test]
-    fn the_engine_has_an_id_and_image_edges() {
+    fn the_engine_has_an_id_and_its_edges() {
         let engine = PdfEngine::new();
         assert_eq!(engine.id(), "pdf");
         assert_eq!(engine.display_name(), "Built-in PDF");
         assert!(engine.edges().iter().any(|e| e.from.as_str() == "png"));
         assert!(engine.edges().iter().any(|e| e.from.as_str() == "svg"));
+        assert!(engine.edges().contains(&Edge::new("pdf", "pdf")));
     }
 
     #[test]
@@ -109,21 +109,6 @@ mod tests {
             )
             .unwrap_err();
         assert_eq!(err.to_string(), "Built-in PDF cannot convert pdf to png");
-    }
-
-    #[test]
-    fn every_part_is_a_stub_for_now() {
-        let parts: [crate::parts::ConvertFn; 1] = [pages::convert];
-        for convert in parts {
-            let err = convert(
-                &step("pdf", "png"),
-                &mut NoOutputs,
-                &|_| {},
-                &CancelToken::new(),
-            )
-            .unwrap_err();
-            assert_eq!(err.to_string(), "not implemented");
-        }
     }
 
     #[test]
