@@ -32,7 +32,16 @@
 //! `job-started` comes first and `job-finished` last for each job; jobs run one
 //! at a time, so their events never interleave. After `job-finished` the job
 //! is also handed to [`crate::history::record`].
+//!
+//! # Cancelling
+//!
+//! [`cancel_job`] stops a job by id. A running job stops its engines and
+//! deletes the partial outputs; a job still waiting in the queue never starts.
+//! Either way the job ends with the [`Outcome::Cancelled`] outcome. The ring
+//! learns which job it shows from the `jobId` of [`RING_PROGRESS`], whose
+//! first event (progress 0) is sent as soon as the job is queued.
 
+use std::collections::HashMap;
 use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -114,6 +123,8 @@ pub struct RingSlice {
 #[derive(Debug, Clone, Copy, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct RingProgress {
+    /// The job the ring shows, as [`cancel_job`] wants it.
+    pub job_id: u64,
     /// Progress of the whole job, `0.0..=1.0`. Only goes up.
     pub progress: f32,
 }
@@ -291,7 +302,36 @@ struct Request {
     preset: Preset,
     /// The preset's display name: the job label and the `{preset}` token.
     label: String,
+    /// Fired by [`Conversions::cancel`]; also kept on the [`Board`] by id.
+    cancel: CancelToken,
     reply: mpsc::Sender<ConvertSummary>,
+}
+
+/// The jobs that can still be cancelled, queued or running, by id. Shared by
+/// [`Conversions::cancel`] and the worker, which wipes a job off the board
+/// once it has ended.
+#[derive(Default)]
+struct Board {
+    tokens: HashMap<u64, CancelToken>,
+    /// Id of the job the worker is running; 0 between jobs.
+    running: u64,
+}
+
+type SharedBoard = Arc<Mutex<Board>>;
+
+fn lock(board: &SharedBoard) -> std::sync::MutexGuard<'_, Board> {
+    // A panic while holding this lock leaves a map and a number behind, both
+    // still perfectly sensible. Poison is for food, not for job boards.
+    board.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// Sends `event` to the ring, but only when the ring shows job `id`.
+fn emit_if_showing(showing: &AtomicU64, sink: &EventSink, id: u64, event: RingEvent) {
+    // The ring only ever shows one job. Events from an older one would yank
+    // the new progress ring around, so they quietly go nowhere.
+    if showing.load(Ordering::SeqCst) == id {
+        sink(event);
+    }
 }
 
 /// The conversion queue: one worker thread that runs jobs one at a time, in
@@ -303,6 +343,8 @@ pub struct Conversions {
     /// Id of the job the ring is showing; 0 when it shows a menu or nothing.
     showing: Arc<AtomicU64>,
     next_id: AtomicU64,
+    board: SharedBoard,
+    sink: EventSink,
 }
 
 impl Conversions {
@@ -343,11 +385,13 @@ impl Conversions {
     ) -> Self {
         let engines: Engines = Arc::new(engines);
         let showing = Arc::new(AtomicU64::new(0));
+        let board = SharedBoard::default();
         let (queue, requests) = mpsc::channel::<Request>();
         let worker = Worker {
             engines: Arc::clone(&engines),
             showing: Arc::clone(&showing),
-            sink,
+            board: Arc::clone(&board),
+            sink: Arc::clone(&sink),
             jobs,
         };
         // One thread, one channel, FIFO for free. Jobs already run their files in
@@ -367,6 +411,8 @@ impl Conversions {
             queue: Mutex::new(queue),
             showing,
             next_id: AtomicU64::new(1),
+            board,
+            sink,
         }
     }
 
@@ -413,21 +459,71 @@ impl Conversions {
 
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
         let (reply, summary) = mpsc::channel();
+        let cancel = CancelToken::new();
         self.showing.store(id, Ordering::SeqCst);
+        // Introduce the job to the ring before the worker can say a word about
+        // it: this is how the ring learns the id that Escape has to cancel,
+        // even while the job is still stuck behind someone else's.
+        emit_if_showing(
+            &self.showing,
+            &self.sink,
+            id,
+            RingEvent::Progress(RingProgress {
+                job_id: id,
+                progress: 0.0,
+            }),
+        );
+        lock(&self.board).tokens.insert(id, cancel.clone());
         let queue = self.queue.lock().unwrap_or_else(PoisonError::into_inner);
-        queue
-            .send(Request {
-                id,
-                files,
-                target,
-                options,
-                rule,
-                preset,
-                label,
-                reply,
-            })
-            .map_err(|_| "The conversion queue has stopped. Restart MorphRing.".to_owned())?;
+        let sent = queue.send(Request {
+            id,
+            files,
+            target,
+            options,
+            rule,
+            preset,
+            label,
+            cancel,
+            reply,
+        });
+        if sent.is_err() {
+            lock(&self.board).tokens.remove(&id);
+            return Err("The conversion queue has stopped. Restart MorphRing.".to_owned());
+        }
         Ok(summary)
+    }
+
+    /// Cancels job `job_id` and answers whether there was anything to cancel.
+    ///
+    /// A running job stops as soon as its engines notice, and its partial
+    /// outputs are deleted. A queued job will not run at all: the ring hears
+    /// [`Outcome::Cancelled`] right away, and its summary and job notices come
+    /// when its turn in the queue arrives. A job that already ended, or an id
+    /// that never existed, is left alone.
+    pub fn cancel(&self, job_id: u64) -> bool {
+        let queued = {
+            let board = lock(&self.board);
+            let Some(token) = board.tokens.get(&job_id) else {
+                return false;
+            };
+            token.cancel();
+            board.running != job_id
+        };
+        tracing::info!(job = job_id, queued, "conversion cancelled");
+        if queued {
+            // The worker will skip it without a word to the ring, so the ring
+            // hears it from us, now, instead of after the job in front ends.
+            emit_if_showing(
+                &self.showing,
+                &self.sink,
+                job_id,
+                RingEvent::Done(RingDone {
+                    outcome: Outcome::Cancelled,
+                    message: None,
+                }),
+            );
+        }
+        true
     }
 
     /// Queues the conversion and waits for it without blocking the async
@@ -450,6 +546,7 @@ impl Conversions {
 struct Worker {
     engines: Engines,
     showing: Arc<AtomicU64>,
+    board: SharedBoard,
     sink: EventSink,
     jobs: JobSink,
 }
@@ -463,14 +560,24 @@ impl Worker {
         }
         for request in requests {
             let id = request.id;
+            // Checked under the board lock: `cancel` then sees this job either
+            // as queued (and we skip it) or as running (and run_job stops),
+            // never as some third thing that falls between the chairs.
+            let skipped = {
+                let mut board = lock(&self.board);
+                board.running = id;
+                request.cancel.is_cancelled()
+            };
             (self.jobs)(JobNotice::Started(JobStarted {
                 job_id: id,
                 files: request.files.iter().map(|p| display(p)).collect(),
                 label: request.label.clone(),
             }));
-            // run_job already catches panics per file; this is the belt to its
-            // braces, so one cursed job never takes the whole queue down with it.
-            let (summary, record) =
+            let (summary, record) = if skipped {
+                cancelled_before_start(&request)
+            } else {
+                // run_job already catches panics per file; this is the belt to
+                // its braces, so one cursed job never takes the queue down.
                 panic::catch_unwind(AssertUnwindSafe(|| self.run_job(&request))).unwrap_or_else(
                     |_| {
                         let record = JobRecord {
@@ -484,17 +591,26 @@ impl Worker {
                             record,
                         )
                     },
-                );
+                )
+            };
+            {
+                let mut board = lock(&self.board);
+                board.tokens.remove(&id);
+                board.running = 0;
+            }
             if let Some(message) = &summary.message {
                 tracing::warn!(job = id, "conversion failed: {message}");
             }
-            self.emit(
-                id,
-                RingEvent::Done(RingDone {
-                    outcome: summary.outcome,
-                    message: summary.message.clone(),
-                }),
-            );
+            // A skipped job already told the ring when it was cancelled.
+            if !skipped {
+                self.emit(
+                    id,
+                    RingEvent::Done(RingDone {
+                        outcome: summary.outcome,
+                        message: summary.message.clone(),
+                    }),
+                );
+            }
             (self.jobs)(JobNotice::Finished(
                 JobFinished {
                     job_id: id,
@@ -510,7 +626,7 @@ impl Worker {
 
     fn run_job(&self, request: &Request) -> (ConvertSummary, JobRecord) {
         let engines: Vec<&dyn Converter> = self.engines.iter().map(|e| e.as_ref()).collect();
-        let cancel = CancelToken::new();
+        let cancel = &request.cancel;
         let progress = Mutex::new(Progress::new(request.files.len()));
         let on_event = |event: JobEvent| {
             let update = progress
@@ -526,7 +642,10 @@ impl Worker {
                 }));
                 self.emit(
                     request.id,
-                    RingEvent::Progress(RingProgress { progress: value }),
+                    RingEvent::Progress(RingProgress {
+                        job_id: request.id,
+                        progress: value,
+                    }),
                 );
             }
         };
@@ -542,10 +661,14 @@ impl Worker {
             &request.options,
             &request.rule,
             &engines,
-            &cancel,
+            cancel,
             &on_event,
         );
-        let cancelled = cancel.is_cancelled();
+        // A cancel that lands after the last file finished stopped nothing, so
+        // the job gets its real outcome; "cancelled" with outputs on disk
+        // would be a fib.
+        let cancelled =
+            cancel.is_cancelled() && results.iter().any(|r| r.state == FileState::Cancelled);
         let summary = summarize(&results, cancelled);
         let record = JobRecord {
             job_id: request.id,
@@ -557,12 +680,30 @@ impl Worker {
     }
 
     fn emit(&self, id: u64, event: RingEvent) {
-        // The ring only ever shows one job. Events from an older one would yank
-        // the new progress ring around, so they quietly go nowhere.
-        if self.showing.load(Ordering::SeqCst) == id {
-            (self.sink)(event);
-        }
+        emit_if_showing(&self.showing, &self.sink, id, event);
     }
+}
+
+/// What a job cancelled while it was still queued ends with: every file
+/// cancelled, nothing written.
+fn cancelled_before_start(request: &Request) -> (ConvertSummary, JobRecord) {
+    let results: Vec<FileResult> = request
+        .files
+        .iter()
+        .map(|source| FileResult {
+            source: source.clone(),
+            state: FileState::Cancelled,
+            outputs: Vec::new(),
+        })
+        .collect();
+    let summary = summarize(&results, true);
+    let record = JobRecord {
+        job_id: request.id,
+        preset: request.preset.clone(),
+        state: JobState::Cancelled,
+        results,
+    };
+    (summary, record)
 }
 
 /// The job's overall progress: the mean of its files' progress (Filee's
@@ -827,12 +968,15 @@ pub fn ring_close<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
     }
 }
 
-/// Cancels job `job_id`. Does nothing for a job that already ended.
+/// Cancels job `jobId`, running or queued; it then ends with the
+/// `cancelled` outcome. Does nothing for a job that already ended.
 #[tauri::command]
-pub fn cancel_job(job_id: u64) -> Result<(), String> {
-    // Not wired up yet: the queue learns to cancel in P2-51. Until then the
-    // job simply finishes, which is at least a well-behaved kind of stubborn.
-    let _ = job_id;
+pub fn cancel_job<R: Runtime>(app: AppHandle<R>, job_id: u64) -> Result<(), String> {
+    // No queue yet means no job was ever submitted, so there is nothing to
+    // cancel. Spinning up every engine just to say "no" would be rude.
+    if let Some(conversions) = app.try_state::<Conversions>() {
+        conversions.cancel(job_id);
+    }
     Ok(())
 }
 
@@ -1068,8 +1212,12 @@ mod tests {
             serde_json::json!({ "outcome": "succeeded" })
         );
         assert_eq!(
-            serde_json::to_value(RingProgress { progress: 0.5 }).unwrap(),
-            serde_json::json!({ "progress": 0.5 })
+            serde_json::to_value(RingProgress {
+                job_id: 2,
+                progress: 0.5
+            })
+            .unwrap(),
+            serde_json::json!({ "jobId": 2, "progress": 0.5 })
         );
     }
 
@@ -1239,7 +1387,15 @@ mod tests {
         // The user reopened the ring for other files before the first job ended.
         let _ = conv.ring_model(&[dir.path().join("b.png")]);
         assert_eq!(first.recv().unwrap().outcome, Outcome::Succeeded);
-        assert!(events.lock().unwrap().is_empty());
+        // All the ring heard of job 1 is its introduction, before the reopen.
+        assert_eq!(
+            *events.lock().unwrap(),
+            [RingEvent::Progress(RingProgress {
+                job_id: 1,
+                progress: 0.0
+            })]
+        );
+        events.lock().unwrap().clear();
 
         let second = conv
             .submit(vec![touch(dir.path(), "b.png")], "jpg")
@@ -1252,6 +1408,149 @@ mod tests {
                 ..
             }))
         ));
+    }
+
+    #[test]
+    fn the_ring_learns_its_job_id_before_anything_runs() {
+        let dir = tempfile::tempdir().unwrap();
+        let (sink, events) = recorder();
+        let conv = queue(vec![Box::new(images())], sink);
+        let summary = conv
+            .submit(vec![touch(dir.path(), "a.png")], "jpg")
+            .unwrap();
+        assert_eq!(summary.recv().unwrap().outcome, Outcome::Succeeded);
+        let events = events.lock().unwrap();
+        assert_eq!(
+            events.first(),
+            Some(&RingEvent::Progress(RingProgress {
+                job_id: 1,
+                progress: 0.0
+            }))
+        );
+        for event in events.iter() {
+            if let RingEvent::Progress(p) = event {
+                assert_eq!(p.job_id, 1);
+            }
+        }
+    }
+
+    #[test]
+    fn cancelling_nothing_is_a_polite_no() {
+        let dir = tempfile::tempdir().unwrap();
+        let (sink, events) = recorder();
+        let conv = queue(vec![Box::new(images())], sink);
+        assert!(!conv.cancel(42), "no such job");
+        let summary = conv
+            .submit(vec![touch(dir.path(), "a.png")], "jpg")
+            .unwrap();
+        assert_eq!(summary.recv().unwrap().outcome, Outcome::Succeeded);
+        // Give the worker a moment to wipe the job off the board after replying.
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !lock(&conv.board).tokens.is_empty() && std::time::Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert!(!conv.cancel(1), "the job already ended");
+        assert!(matches!(
+            events.lock().unwrap().last(),
+            Some(RingEvent::Done(RingDone {
+                outcome: Outcome::Succeeded,
+                ..
+            }))
+        ));
+    }
+
+    #[test]
+    fn a_queued_job_is_cancelled_before_it_runs() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut img = images();
+        img.delay = Duration::from_millis(300);
+        let img = Arc::new(img);
+        struct Shared(Arc<Fake>);
+        impl Converter for Shared {
+            fn id(&self) -> &'static str {
+                self.0.id()
+            }
+            fn display_name(&self) -> &'static str {
+                self.0.display_name()
+            }
+            fn edges(&self) -> &[Edge] {
+                self.0.edges()
+            }
+            fn status(&self) -> EngineStatus {
+                self.0.status()
+            }
+            fn convert(
+                &self,
+                step: &Step,
+                out: &mut dyn OutputAllocator,
+                progress: &dyn Fn(f32),
+                cancel: &CancelToken,
+            ) -> Result<Vec<PathBuf>, EngineError> {
+                self.0.convert(step, out, progress, cancel)
+            }
+        }
+        let (sink, events) = recorder();
+        let (jobs, notices) = job_recorder();
+        let conv = Conversions::with_job_sink(
+            vec![Box::new(Shared(Arc::clone(&img)))],
+            sink,
+            jobs,
+            Library::builtin(),
+            AppSettings::default(),
+        );
+
+        let a = touch(dir.path(), "a.png");
+        let first = conv.submit(vec![a.clone()], "jpg").unwrap();
+        let second = conv
+            .submit(vec![touch(dir.path(), "b.png")], "jpg")
+            .unwrap();
+        assert!(conv.cancel(2));
+
+        // The ring shows job 2 and hears about it at once, while job 1 still
+        // has a good 300 ms of napping to do.
+        assert_eq!(
+            events.lock().unwrap().last(),
+            Some(&RingEvent::Done(RingDone {
+                outcome: Outcome::Cancelled,
+                message: None
+            }))
+        );
+
+        assert_eq!(first.recv().unwrap().outcome, Outcome::Succeeded);
+        let summary = second.recv().unwrap();
+        assert_eq!(summary.outcome, Outcome::Cancelled);
+        assert!(summary.outputs.is_empty());
+        assert_eq!((summary.done, summary.failed), (0, 0));
+        assert!(!dir.path().join("b.jpg").exists());
+        assert_eq!(*img.order.lock().unwrap(), [a], "job 2 ran anyway");
+
+        // The ring heard "cancelled" exactly once.
+        let dones = events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|e| matches!(e, RingEvent::Done(_)))
+            .count();
+        assert_eq!(dones, 1);
+
+        // App-wide, job 2 still starts and finishes, in queue order.
+        let notices = notices.lock().unwrap();
+        let ids: Vec<(char, u64)> = notices
+            .iter()
+            .filter_map(|n| match n {
+                JobNotice::Started(s) => Some(('s', s.job_id)),
+                JobNotice::Finished(f, _) => Some(('f', f.job_id)),
+                JobNotice::Progress(_) => None,
+            })
+            .collect();
+        assert_eq!(ids, [('s', 1), ('f', 1), ('s', 2), ('f', 2)]);
+        let Some(JobNotice::Finished(finished, record)) = notices.last() else {
+            panic!("no finish in {notices:?}");
+        };
+        assert_eq!(finished.summary, summary);
+        assert_eq!(record.state, JobState::Cancelled);
+        assert_eq!(record.results.len(), 1);
+        assert_eq!(record.results[0].state, FileState::Cancelled);
     }
 
     #[test]
@@ -1403,7 +1702,6 @@ mod tests {
                 "summary": { "outcome": "failed", "outputs": [], "done": 0, "failed": 0, "message": "nope" }
             })
         );
-        assert_eq!(cancel_job(3), Ok(()));
     }
 
     #[test]

@@ -40,6 +40,8 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [dev-dependencies]
+# The FakeConverter, for jobs slow enough to cancel on purpose.
+morphring-core = { path = "../../crates/core", features = ["test-support"] }
 tempfile = "3"
 
 [lints.rust]

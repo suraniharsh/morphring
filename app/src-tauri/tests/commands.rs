@@ -110,7 +110,7 @@ fn ring_ui_listens_for_the_events_we_send() {
             "ring.js ignores {event}"
         );
     }
-    for command in ["convert", "ring_close"] {
+    for command in ["convert", "ring_close", "cancel_job"] {
         assert!(
             js.contains(&format!("invoke(\"{command}\"")),
             "ring.js never invokes {command}"
@@ -120,6 +120,72 @@ fn ring_ui_listens_for_the_events_we_send() {
         js.contains("invoke(\"convert\", { files, presetId })"),
         "ring.js does not convert by preset id"
     );
+    assert!(
+        js.contains("invoke(\"cancel_job\", { jobId })"),
+        "ring.js does not cancel by job id"
+    );
+}
+
+#[test]
+fn cancelling_a_running_job_leaves_nothing_behind() {
+    use morphring_core::testing::{Behaviour, FakeConverter};
+    use std::time::{Duration, Instant};
+
+    let (dir, source) = sample_png();
+    // A png -> jpg engine that would take a full minute, unless someone
+    // loses patience first. Spoiler: we do.
+    let slow = FakeConverter::new("slow")
+        .edge("png", "jpg", 10)
+        .behaviour(Behaviour::Sleep(Duration::from_secs(60)));
+    let counters = slow.counters();
+    let (sink, events) = recorder();
+    let conv = Conversions::new(
+        vec![Box::new(slow)],
+        sink,
+        Library::builtin(),
+        AppSettings::default(),
+    );
+
+    let summary = conv.submit(vec![source.clone()], "to-jpg").unwrap();
+    let job_id = match events.lock().unwrap().first() {
+        Some(RingEvent::Progress(p)) => p.job_id,
+        other => panic!("the ring was not told the job id: {other:?}"),
+    };
+    // Wait until the engine is really at it, so this cancels a running job
+    // and not merely a queued one.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while counters.calls() == 0 {
+        assert!(Instant::now() < deadline, "the job never started");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let asked = Instant::now();
+    assert!(conv.cancel(job_id));
+
+    let summary = summary.recv_timeout(Duration::from_secs(10)).unwrap();
+    assert!(asked.elapsed() < Duration::from_secs(5), "cancel took ages");
+    assert_eq!(summary.outcome, Outcome::Cancelled, "{summary:?}");
+    assert!(summary.outputs.is_empty(), "{summary:?}");
+    assert_eq!(summary.message, None);
+
+    let left: Vec<PathBuf> = std::fs::read_dir(dir.path())
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .collect();
+    assert_eq!(left, [source], "partial output left behind");
+
+    assert_eq!(
+        events.lock().unwrap().last(),
+        Some(&RingEvent::Done(RingDone {
+            outcome: Outcome::Cancelled,
+            message: None
+        }))
+    );
+    // Too late is too late: the job is over, so a second cancel finds nothing.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while conv.cancel(job_id) {
+        assert!(Instant::now() < deadline, "the job never left the board");
+        std::thread::sleep(Duration::from_millis(5));
+    }
 }
 
 #[test]

@@ -14,7 +14,10 @@
 //                     open animation. Show and
 //                     focus the window after emitting this; the ring is centred
 //                     by the window itself, never at the cursor (Wayland).
-//     "ring-progress" { progress: 0..1 }      for the running conversion
+//     "ring-progress" { jobId, progress: 0..1 }
+//                     for the conversion the ring shows. The first one
+//                     (progress 0) arrives as soon as the job is queued, so
+//                     the ring knows which jobId to cancel.
 //     "ring-done"     { outcome: "succeeded" | "failed" | "cancelled", message? }
 //   commands the ring invokes
 //     convert { files, presetId }
@@ -23,6 +26,9 @@
 //                             from the settings. A rejected promise counts as
 //                             a failed job, and its error text is shown under
 //                             the ring
+//     cancel_job { jobId }    cancels the job the ring shows (Escape or a
+//                             click on the centre while it runs); the backend
+//                             answers with ring-done "cancelled"
 //     ring_close              hides the window
 //     ping                    once at start-up, as a health check
 "use strict";
@@ -74,6 +80,11 @@
   let progress = null;
   let chosen = -1;
   let job = 0;
+  // The backend's id for the job on the ring, from ring-progress; 0 until the
+  // first one arrives. cancelWanted remembers an Escape that beat it there.
+  let backendJob = 0;
+  let cancelWanted = false;
+  let cancelSent = false;
   let failureText = "";
   let sliceEls = [];
   // Focus-follows-mouse compositors (hello, Hyprland) hand focus to whatever
@@ -258,7 +269,7 @@
     message.hidden = true;
     svg.removeAttribute("aria-busy");
     svg.removeAttribute("aria-activedescendant");
-    svg.classList.remove("pointing");
+    svg.classList.remove("pointing", "cancelling");
     build();
     setHub(model.title, M.hintFor(null));
     svg.classList.remove("off");
@@ -272,8 +283,8 @@
       clock = 0;
       startAnimation();
     } else if (mode === "menu" || mode === "progress") {
-      // Closing mid-conversion only hides the ring. The job carries on in the
-      // backend; we just stop staring at it.
+      // Closing mid-conversion (by clicking away) only hides the ring. The
+      // job carries on in the backend; we just stop staring at it.
       hide();
     }
   }
@@ -282,6 +293,7 @@
     mode = "hidden";
     job++;
     message.hidden = true;
+    svg.classList.remove("cancelling", "pointing");
     svg.classList.add("off");
     backend.close().catch((err) => console.warn("ring_close failed:", err));
   }
@@ -295,6 +307,9 @@
     mode = "progress";
     progress = new M.ProgressRing(model.slices.length, { reduced });
     failureText = "";
+    backendJob = 0;
+    cancelWanted = false;
+    cancelSent = false;
     svg.setAttribute("aria-busy", "true");
     svg.classList.remove("pointing");
     startAnimation();
@@ -304,12 +319,46 @@
     });
   }
 
+  // Whether the job on the ring is still going, i.e. cancelling means something.
+  function running() {
+    return mode === "progress" && !!progress && !progress.pending;
+  }
+
+  // Escape or a click on the centre while the job runs. The ring greys out
+  // at once, then fades like any other cancelled job when ring-done says so.
+  // Asking twice is fine; the second ask just closes the ring.
+  function requestCancel() {
+    if (!running() || cancelWanted) {
+      requestClose();
+      return;
+    }
+    cancelWanted = true;
+    svg.classList.add("cancelling");
+    svg.classList.remove("pointing");
+    sendCancel();
+  }
+
+  function sendCancel() {
+    if (!cancelWanted || cancelSent || !backendJob) return;
+    cancelSent = true;
+    const mine = job;
+    backend.cancel(backendJob).catch((err) => {
+      console.warn("cancel_job failed:", err);
+      // The job runs on, so stop pretending otherwise.
+      if (mine !== job) return;
+      cancelWanted = false;
+      cancelSent = false;
+      svg.classList.remove("cancelling");
+    });
+  }
+
   function finish(outcome, text) {
     // First word wins: a late ring-done must not rewrite an error already shown.
     if (mode !== "progress" || !progress || progress.pending) return;
     const known = outcome === "succeeded" || outcome === "cancelled";
     failureText = text || "";
     progress.complete(known ? outcome : "failed");
+    svg.classList.remove("pointing");
     startAnimation();
   }
 
@@ -561,6 +610,11 @@
   }
 
   svg.addEventListener("pointermove", (e) => {
+    if (mode === "progress") {
+      // The centre is a cancel button while the job runs; say so with the cursor.
+      svg.classList.toggle("pointing", running() && !cancelWanted && hitAt(e).kind === "ring");
+      return;
+    }
     if (mode !== "menu") return;
     const hit = hitAt(e);
     setHover(hit.kind === "segment" ? hit.index : -1);
@@ -587,6 +641,8 @@
       else if (hit.kind !== "empty") requestClose();
     } else if (mode === "progress" && progress && progress.phase === "failed") {
       requestClose();
+    } else if (running() && hit.kind === "ring") {
+      requestCancel();
     }
   });
 
@@ -597,7 +653,9 @@
     if (mode === "hidden") return;
     if (e.key === "Escape") {
       e.preventDefault();
-      requestClose();
+      // Mid-conversion, Escape means "stop that"; anywhere else, "go away".
+      if (running()) requestCancel();
+      else requestClose();
       return;
     }
     if (mode === "progress" && progress && progress.phase === "failed" && e.key === "Enter") {
@@ -646,6 +704,11 @@
     on("ring-open", openRing);
     on("ring-progress", (p) => {
       if (mode !== "progress" || !progress) return;
+      const id = Number(p && p.jobId);
+      if (id > 0 && id !== backendJob) {
+        backendJob = id;
+        sendCancel();
+      }
       progress.setProgress(p && p.progress);
       startAnimation();
     });
@@ -653,6 +716,7 @@
     tauri.core.invoke("ping").catch((err) => console.warn("backend did not answer ping:", err));
     return {
       convert: (files, presetId) => tauri.core.invoke("convert", { files, presetId }),
+      cancel: (jobId) => tauri.core.invoke("cancel_job", { jobId }),
       close: () => tauri.core.invoke("ring_close"),
     };
   }
@@ -681,27 +745,43 @@
       ],
     };
     setTimeout(() => openRing(sample), 50);
+    let demoJob = 0;
+    let stopDemo = null;
     return {
       convert: (files, presetId) =>
         new Promise((resolve, reject) => {
+          demoJob++;
+          backendJob = demoJob;
+          sendCancel();
           if (presetId === "to-gif") {
             setTimeout(() => reject("magick exited with code 1: no images defined"), 900);
             return;
           }
           let p = 0;
           const tick = setInterval(() => {
-            p = Math.min(1, p + 0.08);
+            p = Math.min(1, p + 0.03);
             if (mode === "progress" && progress) {
               progress.setProgress(p);
               startAnimation();
             }
             if (p >= 1) {
               clearInterval(tick);
+              stopDemo = null;
               finish("succeeded");
               resolve();
             }
           }, 90);
+          stopDemo = () => {
+            clearInterval(tick);
+            stopDemo = null;
+            finish("cancelled");
+            resolve();
+          };
         }),
+      cancel: () => {
+        if (stopDemo) setTimeout(stopDemo, 150);
+        return Promise.resolve();
+      },
       close: () => {
         setTimeout(() => openRing(sample), 700);
         return Promise.resolve();

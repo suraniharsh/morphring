@@ -138,6 +138,16 @@ body {
   stroke: var(--text-secondary);
 }
 
+/* Cancel asked for, answer not in yet: grey the ring straight away, so an
+   Escape on a slow engine still feels like it did something. */
+#ring.cancelling .arc {
+  stroke: var(--text-secondary);
+}
+
+#ring.cancelling .percent {
+  fill: var(--text-secondary);
+}
+
 .percent {
   font-size: 15px;
   font-weight: 600;
