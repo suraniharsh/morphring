@@ -1,219 +1,32 @@
-//! Ring slice suggestions: which target formats the ring offers for a set of
-//! dropped files, and why a slice is greyed out.
+//! Ring slice suggestions: which presets the ring offers for a set of dropped
+//! files, and why a slice is greyed out.
 //!
-//! Filee's ring shows presets picked by a toolbar profile
-//! (`src/Filee.Core/Profiles/ToolbarProfile.cs`, `ProfileSelector`) and greys
-//! out the ones that can't run (`src/Filee.App/Services/PresetAvailability.cs`).
-//! Until presets land in v0.2, a slice is simply a target format taken from a
-//! favourites list (PLAN.md D2). The list selection, the centre title and the
-//! "at least one source can do it" rule are Filee's.
+//! Filee's ring shows the presets of the toolbar profile picked for the files
+//! (`src/Filee.App/ViewModels/RadialViewModel.cs`, `Load`) and greys out the
+//! ones that can't run (`src/Filee.App/Services/PresetAvailability.cs`). This
+//! is that, minus the WPF. The v0.1 favourites lists (PLAN.md D2) retired
+//! here; they had a good run as a stand-in for real presets.
 //!
-//! Nothing here plans routes itself: the caller passes a function that says,
-//! for one source and target, whether a route exists with the installed
-//! engines, only with a missing one, or not at all. The app answers that with
-//! two planners (installed engines, then all engines), as D10 describes.
+//! Nothing here plans routes itself: the caller passes, in a [`ReachCtx`], a
+//! function that says, for one source and target, whether a route exists with
+//! the installed engines, only with a missing one, or not at all, plus whether
+//! any installed engine can merge. The app answers the first with two planners
+//! (installed engines, then all engines), as D10 describes.
 
 use std::fmt;
 use std::path::Path;
 
 use crate::contract::FormatId;
 use crate::error::ErrorKey;
-use crate::formats::{self, Category, FOLDER, Format};
+use crate::formats::{self, Format};
+use crate::preset::{Preset, SAME_AS_SOURCE};
+use crate::profiles::Library;
 
 /// Most slices one ring shows (Filee's `ToolbarProfile.MaxSlices`).
-pub const MAX_SLICES: usize = 12;
+pub use crate::profiles::MAX_SLICES;
 
-/// The favourite target formats for one family of source files.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct FavouriteList {
-    /// Stable identifier, e.g. `images`.
-    pub id: String,
-    /// Name shown to the user, e.g. `Images`.
-    pub name: String,
-    /// Source categories this list is for. For a mixed list, the categories a
-    /// mixed selection must stay within; empty means any selection.
-    pub sources: Vec<Category>,
-    /// A list for selections that no single-family list takes.
-    pub mixed: bool,
-    /// Target format ids in ring order, clockwise from 12 o'clock. Unknown and
-    /// read-only ids are ignored.
-    pub targets: Vec<String>,
-}
-
-impl FavouriteList {
-    fn new(id: &str, name: &str, sources: &[Category], mixed: bool, targets: &[&str]) -> Self {
-        Self {
-            id: id.to_owned(),
-            name: name.to_owned(),
-            sources: sources.to_vec(),
-            mixed,
-            targets: targets.iter().map(|t| (*t).to_owned()).collect(),
-        }
-    }
-
-    fn takes(&self, category: Category) -> bool {
-        self.sources.contains(&category)
-    }
-}
-
-/// The built-in favourites: Filee's default toolbar profiles
-/// (`src/Filee.Core/Presets/BuiltInData.cs`, `CreateProfiles`) with each
-/// "to X" preset turned into its target format, in the same order.
-pub fn default_favourites() -> Vec<FavouriteList> {
-    use Category::*;
-    // Filee's profiles also hold presets that aren't a plain target (half
-    // size, merge PDF, zip all, 720p, 128 kbps). Those wait for v0.2 presets;
-    // what's left is the honest "to X" skeleton. "extract" became the folder
-    // pseudo-format, which is what extracting an archive produces anyway.
-    vec![
-        FavouriteList::new(
-            "images",
-            "Images",
-            &[Image],
-            false,
-            &["png", "jpg", "webp", "pdf", "tiff", "bmp", "ico"],
-        ),
-        FavouriteList::new(
-            "pdf",
-            "PDF",
-            &[Pdf],
-            false,
-            &[
-                "png", "jpg", "docx", "txt", "md", "epub", "hwpx", "hwp", "tiff",
-            ],
-        ),
-        FavouriteList::new(
-            "office",
-            "Documents",
-            &[Document],
-            false,
-            &[
-                "pdf", "hwpx", "hwp", "docx", "odt", "txt", "html", "epub", "png",
-            ],
-        ),
-        FavouriteList::new(
-            "spreadsheets",
-            "Spreadsheets",
-            &[Spreadsheet],
-            false,
-            &["pdf", "xlsx", "csv", "ods", "hwpx", "hwp", "html"],
-        ),
-        FavouriteList::new(
-            "presentations",
-            "Presentations",
-            &[Presentation],
-            false,
-            &["pdf", "png", "jpg", "pptx", "hwpx", "hwp"],
-        ),
-        FavouriteList::new(
-            "hwp",
-            "HWP / HWPX",
-            &[Hwp],
-            false,
-            &[
-                "pdf", "docx", "hwpx", "hwp", "png", "jpg", "txt", "md", "epub",
-            ],
-        ),
-        FavouriteList::new(
-            "text",
-            "Text & Markdown",
-            &[Text],
-            false,
-            &["pdf", "hwpx", "hwp", "docx", "html", "txt", "epub"],
-        ),
-        FavouriteList::new(
-            "ebooks",
-            "E-books",
-            &[Ebook],
-            false,
-            &[
-                "pdf", "epub", "docx", "txt", "azw3", "mobi", "hwpx", "hwp", "html",
-            ],
-        ),
-        FavouriteList::new(
-            "video",
-            "Video",
-            &[Video],
-            false,
-            &["mp4", "webm", "mov", "gif", "mp3", "mkv", "avi"],
-        ),
-        FavouriteList::new(
-            "audio",
-            "Audio",
-            &[Audio],
-            false,
-            &["mp3", "m4a", "wav", "flac", "ogg", "opus", "aac"],
-        ),
-        FavouriteList::new(
-            "vector",
-            "Vector graphics",
-            &[Vector],
-            false,
-            &["png", "pdf", "svg", "jpg", "webp", "eps"],
-        ),
-        FavouriteList::new(
-            "archives",
-            "Archives",
-            &[Archive],
-            false,
-            &["folder", "zip", "7z", "tgz", "tar"],
-        ),
-        FavouriteList::new(
-            "cad",
-            "CAD drawings",
-            &[Cad],
-            false,
-            &["pdf", "png", "svg", "dxf", "dwg"],
-        ),
-        FavouriteList::new(
-            "fonts",
-            "Fonts",
-            &[Font],
-            false,
-            &["woff2", "woff", "ttf", "otf", "eot"],
-        ),
-        FavouriteList::new("mixed", "Mixed files", &[], true, &["pdf", "png", "txt"]),
-    ]
-}
-
-/// Picks the favourite list for the given files, in Filee's order:
-///
-/// 1. the first single-family list that takes every file;
-/// 2. else the first mixed list with categories that take every file;
-/// 3. else the catch-all: the first mixed list with no categories, then the
-///    first mixed list, then the first list.
-///
-/// A file of unknown type matches no family, so it always lands in step 3.
-pub fn select_list<'a, P: AsRef<Path>>(
-    lists: &'a [FavouriteList],
-    files: &[P],
-) -> Option<&'a FavouriteList> {
-    let categories: Option<Vec<Category>> = files
-        .iter()
-        .map(|f| formats::detect(f).map(|format| format.category))
-        .collect();
-
-    // Filee compares extensions, which an unknown file can never match. A
-    // `None` here is the same thing: one stranger in the pile sends the whole
-    // selection to the catch-all.
-    if let Some(categories) = categories.filter(|c| !c.is_empty()) {
-        let takes_all = |list: &FavouriteList| categories.iter().all(|c| list.takes(*c));
-        let found = lists.iter().find(|l| !l.mixed && takes_all(l)).or_else(|| {
-            lists
-                .iter()
-                .find(|l| l.mixed && !l.sources.is_empty() && takes_all(l))
-        });
-        if found.is_some() {
-            return found;
-        }
-    }
-
-    lists
-        .iter()
-        .find(|l| l.mixed && l.sources.is_empty())
-        .or_else(|| lists.iter().find(|l| l.mixed))
-        .or_else(|| lists.first())
-}
+/// The format a merge preset produces, and the only one it merges into.
+const PDF: FormatId = FormatId::new("pdf");
 
 /// What the route planner says about converting one source format to a target.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -231,23 +44,70 @@ pub enum Reach {
     NoRoute,
 }
 
-/// Why a slice is disabled: one of the stable error keys plus, for a missing
-/// engine, a detail naming the program and how to install it (PLAN.md D10).
+/// What [`suggest`] needs to know about the engines.
+pub struct ReachCtx<R: Fn(FormatId, FormatId) -> Reach> {
+    /// Whether one source format can be converted to a target.
+    pub reach: R,
+    /// Whether an installed engine has a merge mode. Callers compute it as
+    /// `engines.iter().any(|e| e.status().is_available() && e.merger().is_some())`.
+    pub can_merge: bool,
+}
+
+/// Why a slice is disabled.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct DisabledReason {
-    pub key: ErrorKey,
-    /// For `error.engine_missing`: `needs LibreOffice: pacman -S libreoffice-fresh`.
-    pub detail: Option<String>,
+pub enum DisabledReason {
+    /// One of the stable error keys plus, for a missing engine, a detail
+    /// naming the program and how to install it (PLAN.md D10).
+    Error {
+        key: ErrorKey,
+        /// For `error.engine_missing`: `needs LibreOffice: pacman -S libreoffice-fresh`.
+        detail: Option<String>,
+    },
+    /// The preset uses a mode MorphRing does not run yet: one archive for
+    /// every file, a multi-page TIFF, or a PDF as one long image.
+    NotYetSupported,
+    /// A merge preset with fewer than two files.
+    NeedsSeveralFiles,
+    /// A merge preset, but no installed engine can merge.
+    NoMerger,
 }
 
 impl DisabledReason {
-    /// The short English message for the key, as the CLI report shows it.
+    /// A reason made of an error key and an optional detail.
+    pub fn error(key: ErrorKey, detail: Option<String>) -> Self {
+        Self::Error { key, detail }
+    }
+
+    /// The stable key, e.g. `error.no_route` or `slice.not_yet_supported`.
+    pub fn key(&self) -> &'static str {
+        match self {
+            Self::Error { key, .. } => key.as_str(),
+            Self::NotYetSupported => "slice.not_yet_supported",
+            Self::NeedsSeveralFiles => "slice.needs_several_files",
+            Self::NoMerger => "slice.no_merger",
+        }
+    }
+
+    /// The short English message, as the CLI report shows it.
     pub fn message(&self) -> &'static str {
-        match self.key {
-            ErrorKey::UnsupportedSource => "This file type isn't supported",
-            ErrorKey::NoRoute => "No engine can do this conversion",
-            ErrorKey::EngineMissing => "A required program is not installed",
-            ErrorKey::ConversionFailed => "The engine reported an error",
+        match self {
+            Self::Error { key, .. } => match key {
+                ErrorKey::UnsupportedSource => "This file type isn't supported",
+                ErrorKey::NoRoute => "No engine can do this conversion",
+                ErrorKey::EngineMissing => "A required program is not installed",
+                ErrorKey::ConversionFailed => "The engine reported an error",
+            },
+            Self::NotYetSupported => "This preset is not supported yet",
+            Self::NeedsSeveralFiles => "Select two or more files to merge",
+            Self::NoMerger => "No installed program can merge files",
+        }
+    }
+
+    /// The detail, when there is one.
+    pub fn detail(&self) -> Option<&str> {
+        match self {
+            Self::Error { detail, .. } => detail.as_deref(),
+            _ => None,
         }
     }
 }
@@ -255,20 +115,24 @@ impl DisabledReason {
 impl fmt::Display for DisabledReason {
     /// The message, followed by the detail in parentheses when there is one.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match &self.detail {
+        match self.detail() {
             Some(detail) => write!(f, "{} ({detail})", self.message()),
             None => f.write_str(self.message()),
         }
     }
 }
 
-/// One slice of the ring: a target format.
+/// One slice of the ring: a preset.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Slice {
-    /// The format the files are converted to.
-    pub target: FormatId,
-    /// The label drawn on the slice, e.g. `PNG`.
-    pub label: &'static str,
+    /// Id of the preset the slice runs.
+    pub preset_id: String,
+    /// The label drawn on the slice: the preset's display name, e.g. `PNG`
+    /// or `Half size`.
+    pub label: String,
+    /// The preset's target: a format id, `*` (same as the source) or
+    /// `folder`.
+    pub target: String,
     /// `None` when the slice can be used; otherwise why it can't.
     pub disabled: Option<DisabledReason>,
 }
@@ -283,8 +147,8 @@ impl Slice {
 /// What the ring shows for a set of files.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RingSuggestion {
-    /// Id of the favourite list that was used, if any list exists.
-    pub list: Option<String>,
+    /// Id of the toolbar profile that was used, if the library has any.
+    pub profile: Option<String>,
     /// Centre text: `3 × JPG` when all recognised files share a format,
     /// otherwise `3 files`.
     pub title: String,
@@ -292,56 +156,49 @@ pub struct RingSuggestion {
     pub slices: Vec<Slice>,
 }
 
-/// Suggests the ring's slices for `files` from the favourite `lists`.
+/// Suggests the ring's slices for `files`: the presets of the profile
+/// [`Library::select`] picks, in order, at most [`MAX_SLICES`] of them.
 ///
-/// `reach(from, to)` reports whether `from` can be converted to `to`. A slice
-/// is enabled when at least one of the files' formats is `Ready`. Otherwise it
-/// carries `error.engine_missing` (naming the first missing engine found, in
-/// file order), `error.no_route`, or `error.unsupported_source` when no file
-/// has a known type.
-///
-/// A target that every recognised file already has is left out, as are
-/// unknown, read-only and repeated targets.
-pub fn suggest<P, R>(files: &[P], lists: &[FavouriteList], reach: R) -> RingSuggestion
+/// A slice is disabled, checked in this order:
+/// - [`DisabledReason::NotYetSupported`] for a mode v0.2 can't run;
+/// - for a merge preset (`pdf.merge_into_single` to PDF):
+///   [`DisabledReason::NeedsSeveralFiles`] with fewer than two files, else
+///   [`DisabledReason::NoMerger`] without `ctx.can_merge`;
+/// - `error.unsupported_source` when no file has a known type;
+/// - `error.no_route` when the target is not a writable format;
+/// - otherwise it is enabled when at least one file's format is `Ready` for
+///   the target (`*` meaning that file's own format; a PDF counts as ready
+///   for a merge), and else carries `error.engine_missing` (naming the first
+///   missing engine found, in file order) or `error.no_route`.
+pub fn suggest<P, R>(files: &[P], library: &Library, ctx: &ReachCtx<R>) -> RingSuggestion
 where
     P: AsRef<Path>,
     R: Fn(FormatId, FormatId) -> Reach,
 {
-    let list = select_list(lists, files);
+    let profile = library.select(files);
     let sources = distinct_formats(files);
     let title = match sources.as_slice() {
         [only] => format!("{} × {}", files.len(), only.name),
         _ => format!("{} files", files.len()),
     };
 
-    let mut targets: Vec<&'static Format> = Vec::new();
-    for id in list.map(|l| l.targets.as_slice()).unwrap_or_default() {
-        let Some(target) = formats::find_by_id(id).filter(|f| f.writable) else {
-            continue;
-        };
-        // Converting a pile of MP4s to MP4 is a very slow way to copy files,
-        // so the slice for "the format you already have" quietly stays home.
-        let already_there = !sources.is_empty() && sources.iter().all(|s| s.id == target.id);
-        if already_there || targets.iter().any(|t| t.id == target.id) {
-            continue;
-        }
-        targets.push(target);
-        if targets.len() == MAX_SLICES {
-            break;
-        }
-    }
-
-    let slices = targets
+    // `ensure_consistency` already caps a loaded profile, but a library built
+    // by hand has signed no such contract, so the cap is enforced here too.
+    let slices = profile
+        .map(|p| library.ring_presets(p))
+        .unwrap_or_default()
         .into_iter()
-        .map(|target| Slice {
-            target: target.id,
-            label: label_of(target),
-            disabled: availability(&sources, target.id, &reach),
+        .take(MAX_SLICES)
+        .map(|preset| Slice {
+            preset_id: preset.id.clone(),
+            label: preset.display_name(),
+            target: target_text(preset),
+            disabled: availability(preset, &sources, files.len(), ctx),
         })
         .collect();
 
     RingSuggestion {
-        list: list.map(|l| l.id.clone()),
+        profile: profile.map(|p| p.id.clone()),
         title,
         slices,
     }
@@ -358,31 +215,73 @@ fn distinct_formats<P: AsRef<Path>>(files: &[P]) -> Vec<&'static Format> {
     found
 }
 
-fn label_of(target: &'static Format) -> &'static str {
-    // "Folder" on a slice reads like a place, not an action. Filee calls this
-    // preset "Extract", and so do I.
-    if target.id == FOLDER {
-        "Extract"
-    } else {
-        target.name
+/// The preset's target as the ring reports it: `*`, a canonical format id,
+/// or (for a target nobody recognises) the text as written.
+fn target_text(preset: &Preset) -> String {
+    let target = preset.target.trim();
+    if target == SAME_AS_SOURCE {
+        return SAME_AS_SOURCE.to_owned();
     }
+    formats::lookup_target(target).map_or_else(|| target.to_owned(), |f| f.id.as_str().to_owned())
+}
+
+/// Modes that exist in the preset model but not yet in any v0.2 engine.
+fn not_yet_supported(preset: &Preset) -> bool {
+    preset.archive.combine_into_one || preset.image.multi_page_tiff || preset.pdf.combine_pages
+}
+
+/// Filee's merge test: merge mode on, and the target is PDF.
+fn is_merge(preset: &Preset) -> bool {
+    preset.pdf.merge_into_single
+        && formats::lookup_target(&preset.target).is_some_and(|f| f.id == PDF)
 }
 
 /// Filee's `PresetAvailability.Check`: `None` if any source works.
-fn availability<R>(sources: &[&Format], target: FormatId, reach: &R) -> Option<DisabledReason>
+fn availability<R>(
+    preset: &Preset,
+    sources: &[&Format],
+    file_count: usize,
+    ctx: &ReachCtx<R>,
+) -> Option<DisabledReason>
 where
     R: Fn(FormatId, FormatId) -> Reach,
 {
-    if sources.is_empty() {
-        return Some(DisabledReason {
-            key: ErrorKey::UnsupportedSource,
-            detail: None,
-        });
+    if not_yet_supported(preset) {
+        return Some(DisabledReason::NotYetSupported);
     }
+
+    let merge = is_merge(preset);
+    if merge {
+        // Merging one file is a very elaborate way to copy it.
+        if file_count < 2 {
+            return Some(DisabledReason::NeedsSeveralFiles);
+        }
+        if !ctx.can_merge {
+            return Some(DisabledReason::NoMerger);
+        }
+    }
+
+    if sources.is_empty() {
+        return Some(DisabledReason::error(ErrorKey::UnsupportedSource, None));
+    }
+
+    // `None` is "same as the source", resolved per file below.
+    let target = if preset.target.trim() == SAME_AS_SOURCE {
+        None
+    } else {
+        match formats::lookup_target(&preset.target).filter(|f| f.writable) {
+            Some(format) => Some(format.id),
+            None => return Some(DisabledReason::error(ErrorKey::NoRoute, None)),
+        }
+    };
 
     let mut missing = None;
     for source in sources {
-        match reach(source.id, target) {
+        // A PDF going into a merge is already where it needs to be.
+        if merge && source.id == PDF {
+            return None;
+        }
+        match (ctx.reach)(source.id, target.unwrap_or(source.id)) {
             Reach::Ready => return None,
             Reach::NeedsEngine { engine, hint } => {
                 missing.get_or_insert_with(|| format!("needs {engine}: {hint}"));
@@ -392,193 +291,271 @@ where
     }
 
     Some(match missing {
-        Some(detail) => DisabledReason {
-            key: ErrorKey::EngineMissing,
-            detail: Some(detail),
-        },
-        None => DisabledReason {
-            key: ErrorKey::NoRoute,
-            detail: None,
-        },
+        Some(detail) => DisabledReason::error(ErrorKey::EngineMissing, Some(detail)),
+        None => DisabledReason::error(ErrorKey::NoRoute, None),
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::preset;
+    use crate::profiles::ToolbarProfile;
 
     /// Every pair converts.
     fn all_ready(_: FormatId, _: FormatId) -> Reach {
         Reach::Ready
     }
 
-    fn targets(ring: &RingSuggestion) -> Vec<&'static str> {
-        ring.slices.iter().map(|s| s.target.as_str()).collect()
-    }
-
-    fn list_id(files: &[&str]) -> Option<String> {
-        select_list(&default_favourites(), files).map(|l| l.id.clone())
-    }
-
-    #[test]
-    fn default_lists_name_real_writable_formats() {
-        let lists = default_favourites();
-        for list in &lists {
-            assert!(!list.targets.is_empty(), "{} is empty", list.id);
-            assert!(list.targets.len() <= MAX_SLICES, "{} is too long", list.id);
-            for id in &list.targets {
-                let format = formats::find_by_id(id);
-                assert!(
-                    format.is_some_and(|f| f.writable),
-                    "{}: {id} is not a writable format",
-                    list.id
-                );
-            }
-        }
-        // Exactly one catch-all, and it comes last like Filee's.
-        assert_eq!(lists.iter().filter(|l| l.mixed).count(), 1);
-        assert!(
-            lists
-                .last()
-                .is_some_and(|l| l.mixed && l.sources.is_empty())
-        );
-    }
-
-    #[test]
-    fn every_category_has_a_list() {
-        let lists = default_favourites();
-        for format in formats::all() {
-            assert!(
-                lists.iter().any(|l| !l.mixed && l.takes(format.category)),
-                "no list for {}",
-                format.category.name()
-            );
+    fn ready() -> ReachCtx<fn(FormatId, FormatId) -> Reach> {
+        ReachCtx {
+            reach: all_ready,
+            can_merge: true,
         }
     }
 
-    #[test]
-    fn selects_by_family() {
-        assert_eq!(list_id(&["a.png", "b.JPG"]).as_deref(), Some("images"));
-        assert_eq!(list_id(&["report.pdf"]).as_deref(), Some("pdf"));
-        assert_eq!(list_id(&["letter.docx"]).as_deref(), Some("office"));
-        assert_eq!(list_id(&["clip.mp4", "b.mkv"]).as_deref(), Some("video"));
-        assert_eq!(list_id(&["song.flac"]).as_deref(), Some("audio"));
-        assert_eq!(list_id(&["backup.tar.gz"]).as_deref(), Some("archives"));
+    fn ctx<R: Fn(FormatId, FormatId) -> Reach>(reach: R) -> ReachCtx<R> {
+        ReachCtx {
+            reach,
+            can_merge: true,
+        }
+    }
+
+    fn ids(ring: &RingSuggestion) -> Vec<&str> {
+        ring.slices.iter().map(|s| s.preset_id.as_str()).collect()
+    }
+
+    fn by_id<'a>(ring: &'a RingSuggestion, id: &str) -> &'a Slice {
+        ring.slices
+            .iter()
+            .find(|s| s.preset_id == id)
+            .unwrap_or_else(|| panic!("no {id} slice in {ring:?}"))
+    }
+
+    fn builtin_ring(files: &[&str]) -> RingSuggestion {
+        suggest(files, &Library::builtin(), &ready())
+    }
+
+    /// A library of `presets` with one catch-all profile showing all of them.
+    fn library_of(presets: Vec<Preset>) -> Library {
+        let profile = ToolbarProfile {
+            id: "custom".into(),
+            is_fallback: true,
+            preset_ids: presets.iter().map(|p| p.id.clone()).collect(),
+            ..ToolbarProfile::default()
+        };
+        Library {
+            presets,
+            profiles: vec![profile],
+        }
+    }
+
+    fn plain(id: &str, target: &str) -> Preset {
+        Preset {
+            id: id.into(),
+            target: target.into(),
+            ..Preset::default()
+        }
+    }
+
+    fn error(key: ErrorKey) -> Option<DisabledReason> {
+        Some(DisabledReason::error(key, None))
     }
 
     #[test]
-    fn mixed_or_unknown_files_use_the_catch_all() {
-        assert_eq!(list_id(&["a.png", "b.mp3"]).as_deref(), Some("mixed"));
-        assert_eq!(list_id(&["a.png", "notes.zzz"]).as_deref(), Some("mixed"));
-        assert_eq!(list_id(&["README"]).as_deref(), Some("mixed"));
-        let none: [&str; 0] = [];
-        assert_eq!(list_id(&none).as_deref(), Some("mixed"));
-    }
-
-    #[test]
-    fn a_bounded_mixed_list_wins_over_the_catch_all() {
-        let mut lists = default_favourites();
-        lists.insert(
-            0,
-            FavouriteList::new(
-                "media",
-                "Media",
-                &[Category::Audio, Category::Video],
-                true,
-                &["mp3"],
-            ),
-        );
-        let pick = |files: &[&str]| select_list(&lists, files).map(|l| l.id.clone());
-        assert_eq!(pick(&["a.mp4", "b.wav"]).as_deref(), Some("media"));
-        // A single family still beats a mixed list that comes first.
-        assert_eq!(pick(&["a.mp4"]).as_deref(), Some("video"));
-        assert_eq!(pick(&["a.mp4", "b.png"]).as_deref(), Some("mixed"));
-    }
-
-    #[test]
-    fn catch_all_falls_back_to_any_mixed_list_then_the_first() {
-        let bounded = FavouriteList::new("media", "Media", &[Category::Audio], true, &["mp3"]);
-        let images = FavouriteList::new("images", "Images", &[Category::Image], false, &["png"]);
-        let lists = [images.clone(), bounded];
+    fn slices_are_the_profile_presets_in_order() {
+        let ring = builtin_ring(&["a.png", "b.png"]);
+        assert_eq!(ring.profile.as_deref(), Some("images"));
         assert_eq!(
-            select_list(&lists, &["x.zzz"]).map(|l| l.id.as_str()),
-            Some("media")
+            ids(&ring),
+            [
+                "to-png",
+                "to-jpg",
+                "to-webp",
+                "to-pdf",
+                "to-tiff",
+                "to-bmp",
+                "to-ico",
+                "half-size"
+            ]
         );
-        let only_images = [images];
-        assert_eq!(
-            select_list(&only_images, &["x.zzz"]).map(|l| l.id.as_str()),
-            Some("images")
-        );
-        assert_eq!(select_list(&[], &["x.png"]), None);
-    }
-
-    #[test]
-    fn slices_follow_the_list_and_skip_the_source_format() {
-        let ring = suggest(&["a.png", "b.png"], &default_favourites(), all_ready);
-        assert_eq!(ring.list.as_deref(), Some("images"));
-        assert_eq!(targets(&ring), ["jpg", "webp", "pdf", "tiff", "bmp", "ico"]);
         assert!(ring.slices.iter().all(Slice::is_enabled));
-        assert_eq!(ring.slices[0].label, "JPG");
+        let jpg = by_id(&ring, "to-jpg");
+        assert_eq!((jpg.label.as_str(), jpg.target.as_str()), ("JPG", "jpg"));
     }
 
     #[test]
-    fn mixed_image_formats_keep_every_target() {
-        let ring = suggest(&["a.png", "b.jpg"], &default_favourites(), all_ready);
-        assert_eq!(
-            targets(&ring),
-            ["png", "jpg", "webp", "pdf", "tiff", "bmp", "ico"]
-        );
+    fn profile_is_picked_by_family() {
+        let profile = |files: &[&str]| builtin_ring(files).profile;
+        assert_eq!(profile(&["a.png", "b.JPG"]).as_deref(), Some("images"));
+        assert_eq!(profile(&["report.pdf"]).as_deref(), Some("pdf"));
+        assert_eq!(profile(&["letter.docx"]).as_deref(), Some("office"));
+        assert_eq!(profile(&["clip.mp4", "b.mkv"]).as_deref(), Some("video"));
+        assert_eq!(profile(&["song.flac"]).as_deref(), Some("audio"));
+        assert_eq!(profile(&["backup.tar.gz"]).as_deref(), Some("archives"));
+        assert_eq!(profile(&["a.png", "b.mp3"]).as_deref(), Some("mixed"));
+        assert_eq!(profile(&["README"]).as_deref(), Some("mixed"));
     }
 
     #[test]
     fn title_counts_files_and_names_a_shared_format() {
-        let lists = default_favourites();
-        assert_eq!(
-            suggest(&["a.jpg", "b.jpeg", "c.JPG"], &lists, all_ready).title,
-            "3 × JPG"
-        );
-        assert_eq!(
-            suggest(&["a.jpg", "b.png"], &lists, all_ready).title,
-            "2 files"
-        );
+        assert_eq!(builtin_ring(&["a.jpg", "b.jpeg", "c.JPG"]).title, "3 × JPG");
+        assert_eq!(builtin_ring(&["a.jpg", "b.png"]).title, "2 files");
         // Unknown files still count, like Filee's files.Count.
+        assert_eq!(builtin_ring(&["a.jpg", "b.zzz"]).title, "2 × JPG");
+        assert_eq!(builtin_ring(&["b.zzz"]).title, "1 files");
+    }
+
+    #[test]
+    fn keyed_presets_use_their_display_name() {
+        let ring = builtin_ring(&["backup.zip"]);
         assert_eq!(
-            suggest(&["a.jpg", "b.zzz"], &lists, all_ready).title,
-            "2 × JPG"
+            ids(&ring),
+            ["extract", "to-zip", "to-7z", "to-tgz", "to-tar"]
         );
-        assert_eq!(suggest(&["b.zzz"], &lists, all_ready).title, "1 files");
-    }
-
-    #[test]
-    fn folder_target_is_labelled_extract() {
-        let ring = suggest(&["backup.zip"], &default_favourites(), all_ready);
-        assert_eq!(targets(&ring), ["folder", "7z", "tgz", "tar"]);
-        assert_eq!(ring.slices[0].label, "Extract");
-    }
-
-    #[test]
-    fn unknown_read_only_and_repeated_targets_are_dropped() {
-        let list = FavouriteList::new(
-            "custom",
-            "Custom",
-            &[Category::Image],
-            false,
-            &["jpg", "nope", "JPG", "cr2", "webp", "jpg"],
+        let extract = by_id(&ring, "extract");
+        assert_eq!(
+            (extract.label.as_str(), extract.target.as_str()),
+            ("Extract", "folder")
         );
-        let ring = suggest(&["a.png"], &[list], all_ready);
-        assert_eq!(targets(&ring), ["jpg", "webp"]);
+        assert_eq!(by_id(&ring, "to-tgz").label, "TAR.GZ");
     }
 
     #[test]
     fn at_most_twelve_slices() {
-        let many = [
-            "jpg", "webp", "pdf", "tiff", "bmp", "ico", "gif", "avif", "heic", "jxl", "psd", "tga",
-            "icns", "svg",
-        ];
-        let list = FavouriteList::new("big", "Big", &[Category::Image], false, &many);
-        let ring = suggest(&["a.png"], &[list], all_ready);
+        let presets: Vec<Preset> = ["jpg", "webp", "pdf", "tiff", "bmp", "ico", "gif"]
+            .iter()
+            .flat_map(|t| [plain(&format!("a-{t}"), t), plain(&format!("b-{t}"), t)])
+            .collect();
+        assert!(presets.len() > MAX_SLICES);
+        let ring = suggest(&["a.png"], &library_of(presets.clone()), &ready());
         assert_eq!(ring.slices.len(), MAX_SLICES);
-        assert_eq!(targets(&ring), many[..MAX_SLICES]);
+        let expected: Vec<&str> = presets[..MAX_SLICES]
+            .iter()
+            .map(|p| p.id.as_str())
+            .collect();
+        assert_eq!(ids(&ring), expected);
+    }
+
+    #[test]
+    fn missing_presets_are_skipped_and_no_profiles_mean_an_empty_ring() {
+        let mut library = library_of(vec![plain("to-jpg", "jpg")]);
+        library.profiles[0].preset_ids.insert(0, "ghost".into());
+        assert_eq!(ids(&suggest(&["a.png"], &library, &ready())), ["to-jpg"]);
+
+        library.profiles.clear();
+        let ring = suggest(&["a.png"], &library, &ready());
+        assert_eq!(ring.profile, None);
+        assert!(ring.slices.is_empty());
+        assert_eq!(ring.title, "1 × PNG");
+    }
+
+    #[test]
+    fn same_as_source_resolves_to_each_file_format() {
+        // Only PNGs can be resized here; the JPG in the pile doesn't spoil it.
+        let png_only = |from: FormatId, to: FormatId| {
+            if from == to && from.as_str() == "png" {
+                Reach::Ready
+            } else {
+                Reach::NoRoute
+            }
+        };
+        let ring = suggest(&["a.jpg", "b.png"], &Library::builtin(), &ctx(png_only));
+        let half = by_id(&ring, "half-size");
+        assert_eq!(half.target, "*");
+        assert_eq!(half.label, "Half size");
+        assert!(half.is_enabled());
+
+        let ring = suggest(&["a.jpg"], &Library::builtin(), &ctx(png_only));
+        assert_eq!(by_id(&ring, "half-size").disabled, error(ErrorKey::NoRoute));
+    }
+
+    #[test]
+    fn modes_not_in_v02_are_not_yet_supported() {
+        let mut tiff = plain("multi-tiff", "tiff");
+        tiff.image.multi_page_tiff = true;
+        let mut library = library_of(vec![tiff]);
+        let zip_all = Library::builtin().preset("zip-all").cloned().unwrap();
+        let long = Library::builtin()
+            .preset("pdf-long-image")
+            .cloned()
+            .unwrap();
+        for preset in [zip_all, long] {
+            library.profiles[0].preset_ids.push(preset.id.clone());
+            library.presets.push(preset);
+        }
+
+        // Even unknown files get this reason: the mode is the problem, not them.
+        for files in [&["a.pdf", "b.png"][..], &["x.zzz"]] {
+            let ring = suggest(files, &library, &ready());
+            assert_eq!(ids(&ring), ["multi-tiff", "zip-all", "pdf-long-image"]);
+            for slice in &ring.slices {
+                let reason = slice.disabled.as_ref().unwrap();
+                assert_eq!(reason, &DisabledReason::NotYetSupported);
+                assert_eq!(reason.key(), "slice.not_yet_supported");
+                assert_eq!(reason.to_string(), "This preset is not supported yet");
+            }
+        }
+    }
+
+    #[test]
+    fn merge_needs_two_files_and_a_merger() {
+        let docs = ["a.docx", "b.docx"];
+        let ring = suggest(&docs, &Library::builtin(), &ready());
+        assert!(by_id(&ring, "merge-pdf").is_enabled());
+
+        let ring = suggest(&["a.docx"], &Library::builtin(), &ready());
+        let merge = by_id(&ring, "merge-pdf");
+        assert_eq!(merge.disabled, Some(DisabledReason::NeedsSeveralFiles));
+        assert_eq!(merge.label, "Merge PDF");
+        assert_eq!(merge.target, "pdf");
+        // The plain PDF slice next door is not bothered by the file count.
+        assert!(by_id(&ring, "to-pdf").is_enabled());
+
+        let no_merger = ReachCtx {
+            reach: all_ready,
+            can_merge: false,
+        };
+        let ring = suggest(&docs, &Library::builtin(), &no_merger);
+        let reason = by_id(&ring, "merge-pdf").disabled.clone().unwrap();
+        assert_eq!(reason, DisabledReason::NoMerger);
+        assert_eq!(reason.key(), "slice.no_merger");
+        assert!(by_id(&ring, "to-pdf").is_enabled());
+    }
+
+    #[test]
+    fn merging_pdfs_needs_no_conversion() {
+        let nothing = |_: FormatId, _: FormatId| Reach::NoRoute;
+        let ring = suggest(&["a.pdf", "b.pdf"], &Library::builtin(), &ctx(nothing));
+        assert!(by_id(&ring, "merge-pdf").is_enabled());
+        assert_eq!(by_id(&ring, "to-png").disabled, error(ErrorKey::NoRoute));
+
+        // A merge of DOCX files still has to reach PDF first.
+        let ring = suggest(&["a.docx", "b.docx"], &Library::builtin(), &ctx(nothing));
+        assert_eq!(by_id(&ring, "merge-pdf").disabled, error(ErrorKey::NoRoute));
+    }
+
+    #[test]
+    fn unknown_or_read_only_target_has_no_route() {
+        // CR2 is a camera raw: a fine source, but nothing writes one.
+        let library = library_of(vec![plain("odd", "nope"), plain("to-cr2", "cr2")]);
+        let ring = suggest(&["a.png"], &library, &ready());
+        assert_eq!(by_id(&ring, "odd").target, "nope");
+        assert_eq!(by_id(&ring, "to-cr2").target, "raw");
+        for slice in &ring.slices {
+            assert_eq!(slice.disabled, error(ErrorKey::NoRoute));
+        }
+    }
+
+    #[test]
+    fn target_text_is_canonical() {
+        let ring = suggest(
+            &["a.png"],
+            &library_of(vec![plain("j", ".JPEG"), plain("s", " * ")]),
+            &ready(),
+        );
+        assert_eq!(by_id(&ring, "j").target, "jpg");
+        assert_eq!(by_id(&ring, "s").target, "*");
     }
 
     #[test]
@@ -591,17 +568,9 @@ mod tests {
                 Reach::NoRoute
             }
         };
-        let ring = suggest(&["a.png", "b.jpg"], &default_favourites(), reach);
-        let webp = ring.slices.iter().find(|s| s.target.as_str() == "webp");
-        assert!(webp.is_some_and(Slice::is_enabled));
-        let pdf = ring.slices.iter().find(|s| s.target.as_str() == "pdf");
-        assert_eq!(
-            pdf.and_then(|s| s.disabled.clone()),
-            Some(DisabledReason {
-                key: ErrorKey::NoRoute,
-                detail: None
-            })
-        );
+        let ring = suggest(&["a.png", "b.jpg"], &Library::builtin(), &ctx(reach));
+        assert!(by_id(&ring, "to-webp").is_enabled());
+        assert_eq!(by_id(&ring, "to-pdf").disabled, error(ErrorKey::NoRoute));
     }
 
     #[test]
@@ -614,21 +583,20 @@ mod tests {
             "txt" => Reach::Ready,
             _ => Reach::NoRoute,
         };
-        let ring = suggest(&["letter.docx"], &default_favourites(), reach);
+        let ring = suggest(&["letter.docx"], &Library::builtin(), &ctx(reach));
         let pdf = &ring.slices[0];
-        assert_eq!(pdf.target.as_str(), "pdf");
+        assert_eq!(pdf.preset_id, "to-pdf");
         let reason = pdf.disabled.clone().unwrap();
-        assert_eq!(reason.key, ErrorKey::EngineMissing);
+        assert_eq!(reason.key(), "error.engine_missing");
         assert_eq!(
-            reason.detail.as_deref(),
+            reason.detail(),
             Some("needs LibreOffice: pacman -S libreoffice-fresh")
         );
         assert_eq!(
             reason.to_string(),
             "A required program is not installed (needs LibreOffice: pacman -S libreoffice-fresh)"
         );
-        let txt = ring.slices.iter().find(|s| s.target.as_str() == "txt");
-        assert!(txt.is_some_and(Slice::is_enabled));
+        assert!(by_id(&ring, "to-txt").is_enabled());
     }
 
     #[test]
@@ -644,15 +612,13 @@ mod tests {
                 hint: "pacman -S libreoffice-fresh".into(),
             },
         };
-        let ring = suggest(&["a.png", "b.mp3", "c.docx"], &default_favourites(), reach);
-        assert!(!ring.slices.is_empty());
-        for slice in &ring.slices {
+        let files = ["a.png", "b.mp3", "c.docx"];
+        let ring = suggest(&files, &Library::builtin(), &ctx(reach));
+        assert_eq!(ring.profile.as_deref(), Some("mixed"));
+        // zip-all is out for another reason; everyone else blames FFmpeg.
+        for slice in ring.slices.iter().filter(|s| s.preset_id != "zip-all") {
             let reason = slice.disabled.clone().unwrap();
-            assert_eq!(reason.key, ErrorKey::EngineMissing);
-            assert_eq!(
-                reason.detail.as_deref(),
-                Some("needs FFmpeg: pacman -S ffmpeg")
-            );
+            assert_eq!(reason.detail(), Some("needs FFmpeg: pacman -S ffmpeg"));
         }
     }
 
@@ -661,27 +627,26 @@ mod tests {
         let reach = |_: FormatId, _: FormatId| -> Reach {
             panic!("no source format, so nothing to ask the planner")
         };
-        let ring = suggest(&["notes.zzz"], &default_favourites(), reach);
-        assert_eq!(ring.list.as_deref(), Some("mixed"));
-        assert_eq!(targets(&ring), ["pdf", "png", "txt"]);
+        let library = library_of(vec![
+            plain("to-pdf", "pdf"),
+            plain("to-png", "png"),
+            Preset {
+                target: preset::SAME_AS_SOURCE.into(),
+                ..plain("same", "")
+            },
+        ]);
+        let ring = suggest(&["notes.zzz"], &library, &ctx(reach));
+        assert_eq!(ids(&ring), ["to-pdf", "to-png", "same"]);
         for slice in &ring.slices {
             let reason = slice.disabled.as_ref().unwrap();
-            assert_eq!(reason.key, ErrorKey::UnsupportedSource);
+            assert_eq!(reason.key(), "error.unsupported_source");
             assert_eq!(reason.to_string(), "This file type isn't supported");
         }
     }
 
     #[test]
-    fn no_lists_means_an_empty_ring() {
-        let ring = suggest(&["a.png"], &[], all_ready);
-        assert_eq!(ring.list, None);
-        assert!(ring.slices.is_empty());
-        assert_eq!(ring.title, "1 × PNG");
-    }
-
-    #[test]
     fn reason_messages_match_the_cli_report() {
-        let reason = |key| DisabledReason { key, detail: None }.to_string();
+        let reason = |key| DisabledReason::error(key, None).to_string();
         assert_eq!(
             reason(ErrorKey::NoRoute),
             "No engine can do this conversion"
@@ -693,6 +658,14 @@ mod tests {
         assert_eq!(
             reason(ErrorKey::ConversionFailed),
             "The engine reported an error"
+        );
+        assert_eq!(
+            DisabledReason::NeedsSeveralFiles.to_string(),
+            "Select two or more files to merge"
+        );
+        assert_eq!(
+            DisabledReason::NoMerger.to_string(),
+            "No installed program can merge files"
         );
     }
 }

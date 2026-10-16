@@ -42,7 +42,8 @@ use morphring_core::job::{self, JobEvent};
 use morphring_core::output::OutputRule;
 use morphring_core::planner::Planner;
 use morphring_core::preset::{self, Preset};
-use morphring_core::slices::{self, DisabledReason, Reach};
+use morphring_core::profiles::Library;
+use morphring_core::slices::{self, DisabledReason, Reach, ReachCtx};
 use morphring_core::{
     CancelToken, ConvertOptions, Converter, EngineStatus, ErrorKey, FileResult, FileState,
     FormatId, JobState, Target,
@@ -194,7 +195,7 @@ pub struct ConvertSummary {
     pub message: Option<String>,
 }
 
-/// Builds the ring for `files` from the built-in favourites.
+/// Builds the ring for `files` from the built-in presets and profiles.
 ///
 /// A slice is enabled when at least one file can be converted to its target
 /// with the installed `engines`; a disabled slice says why, naming the
@@ -204,9 +205,15 @@ pub fn ring_model(files: &[PathBuf], engines: &[&dyn Converter]) -> RingModel {
     // every engine were installed. The second one turns "no" into "not yet".
     let installed = Planner::new(engines, false);
     let every = Planner::new(engines, true);
-    let suggestion = slices::suggest(files, &slices::default_favourites(), |from, to| {
-        reach(&installed, &every, engines, from, to)
-    });
+    // P2-50 swaps the built-in library for the user's own; for now the
+    // factory one keeps the ring honest.
+    let ctx = ReachCtx {
+        reach: |from, to| reach(&installed, &every, engines, from, to),
+        can_merge: engines
+            .iter()
+            .any(|e| e.status().is_available() && e.merger().is_some()),
+    };
+    let suggestion = slices::suggest(files, &Library::builtin(), &ctx);
     RingModel {
         files: files.iter().map(|p| display(p)).collect(),
         title: suggestion.title,
@@ -568,10 +575,7 @@ fn failure_message(total: usize, failures: &[(&Path, ErrorKey, &str)]) -> String
     let Some((source, key, detail)) = failures.first() else {
         return "The conversion failed.".into();
     };
-    let reason = DisabledReason {
-        key: *key,
-        detail: (!detail.is_empty()).then(|| (*detail).to_owned()),
-    };
+    let reason = DisabledReason::error(*key, (!detail.is_empty()).then(|| (*detail).to_owned()));
     let name = source
         .file_name()
         .map_or_else(|| display(source), |n| n.to_string_lossy().into_owned());
@@ -857,10 +861,9 @@ mod tests {
         assert_eq!(model.title, "2 × PNG");
         assert_eq!(model.files, ["/a/one.png", "/a/two.PNG"]);
         assert!(model.slices.len() <= slices::MAX_SLICES);
-        assert!(
-            model.slices.iter().all(|s| s.target != "png"),
-            "no png→png slice"
-        );
+        // Presets come as the profile lists them, own format included; with
+        // no png self edge in these fakes, that slice simply has no route.
+        assert!(!slice(&model, "png").enabled);
 
         let jpg = slice(&model, "jpg");
         assert!(jpg.enabled);
@@ -891,8 +894,10 @@ mod tests {
         assert!(!model.slices.is_empty());
         for s in &model.slices {
             assert!(!s.enabled);
+        }
+        for target in ["png", "txt"] {
             assert_eq!(
-                s.disabled_reason.as_deref(),
+                slice(&model, target).disabled_reason.as_deref(),
                 Some("This file type isn't supported")
             );
         }
