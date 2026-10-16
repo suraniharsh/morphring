@@ -2,8 +2,7 @@
 //! Rust.
 //!
 //! Each job lives in its own part: `extract` and `pack`, with the path checks
-//! that keep an archive from writing outside its folder in `safety`. This is
-//! the skeleton: every part is a stub, so the engine has no edges yet.
+//! that keep an archive from writing outside its folder in `safety`.
 
 mod extract;
 mod pack;
@@ -81,11 +80,16 @@ mod tests {
     use crate::parts::test_support::{NoOutputs, step};
 
     #[test]
-    fn the_skeleton_has_an_id_and_no_edges() {
+    fn the_engine_has_an_id_and_the_extract_edges() {
         let engine = ArchiveEngine::new();
         assert_eq!(engine.id(), "archive");
         assert_eq!(engine.display_name(), "Built-in archives");
-        assert!(engine.edges().is_empty());
+        assert!(
+            engine
+                .edges()
+                .iter()
+                .any(|e| e.from.as_str() == "zip" && e.to.as_str() == "folder")
+        );
     }
 
     #[test]
@@ -105,8 +109,8 @@ mod tests {
     }
 
     #[test]
-    fn every_part_is_a_stub_for_now() {
-        let parts: [crate::parts::ConvertFn; 2] = [extract::convert, pack::convert];
+    fn the_pack_part_is_still_a_stub() {
+        let parts: [crate::parts::ConvertFn; 1] = [pack::convert];
         for convert in parts {
             let err = convert(
                 &step("pdf", "png"),
