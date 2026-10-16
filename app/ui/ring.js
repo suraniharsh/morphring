@@ -67,7 +67,13 @@
   let job = 0;
   let failureText = "";
   let sliceEls = [];
-  let hadFocus = false;
+  // Focus-follows-mouse compositors (hello, Hyprland) hand focus to whatever
+  // sits under the cursor, so a ring that pops up away from the mouse loses
+  // focus on its first frame. We only treat blur as "clicked away" once the
+  // pointer has actually visited the ring, and even then give it a moment.
+  let pointerVisited = false;
+  let blurTimer = 0;
+  const BLUR_GRACE_MS = 400;
 
   // ───────────── static layout ─────────────
 
@@ -235,7 +241,8 @@
     chosen = -1;
     job++;
     hover = model.slices.map(() => ({ value: 0, velocity: 0 }));
-    hadFocus = document.hasFocus();
+    pointerVisited = false;
+    clearTimeout(blurTimer);
     message.hidden = true;
     svg.removeAttribute("aria-busy");
     svg.removeAttribute("aria-activedescendant");
@@ -599,13 +606,22 @@
     }
   });
 
-  // Click mode closes when the window loses focus, but only once it actually
-  // had it: a ring shown without focus must not vanish on its first frame.
-  window.addEventListener("focus", () => {
-    hadFocus = true;
+  // Click mode closes when the window loses focus for real: the pointer has
+  // been on the ring, and focus stays gone past a short grace period (so a
+  // twitchy compositor or a mouse crossing the edge doesn't kill it).
+  document.addEventListener("pointerenter", () => {
+    pointerVisited = true;
   });
+  document.addEventListener("pointermove", () => {
+    pointerVisited = true;
+  });
+  window.addEventListener("focus", () => clearTimeout(blurTimer));
   window.addEventListener("blur", () => {
-    if (hadFocus && mode !== "hidden") requestClose();
+    if (!pointerVisited || mode === "hidden") return;
+    clearTimeout(blurTimer);
+    blurTimer = setTimeout(() => {
+      if (!document.hasFocus() && mode !== "hidden") requestClose();
+    }, BLUR_GRACE_MS);
   });
 
   // ───────────── backends ─────────────
