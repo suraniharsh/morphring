@@ -9,7 +9,9 @@
 use std::ffi::OsString;
 use std::path::Path;
 
-use morphring_core::{ConvertOptions, Edge, FormatId, QualityLevel};
+use morphring_core::{
+    ConvertOptions, Edge, FormatId, ImageOptions, QualityLevel, Resize, TiffCompression,
+};
 
 /// Raster formats `magick` reads in v0.1.0. No PDF, PS or EPS: reading those
 /// needs Ghostscript and a permissive policy (D4).
@@ -30,14 +32,12 @@ const MULTI_FRAME: [&str; 2] = ["tiff", "gif"];
 /// Formats whose frames are an animation (timing included).
 const ANIMATED: [&str; 2] = ["gif", "webp"];
 
-/// Targets with no alpha channel: transparency is flattened onto white.
+/// Targets with no alpha channel: transparency is flattened onto the preset's
+/// background (white by default).
 const NO_ALPHA: [&str; 3] = ["jpg", "ppm", "heic"];
 
 /// Targets that take `-quality`.
 const QUALITY_TARGETS: [&str; 5] = ["jpg", "webp", "avif", "heic", "jxl"];
-
-/// Icon sizes packed into one `.ico`, largest first (Filee's default `IcoSizes`).
-const ICO_SIZES: &str = "256,128,64,48,32,16";
 
 /// Every direct conversion the ImageMagick engine offers: each readable raster
 /// to each writable raster (self edges included, for re-encoding), and each
@@ -221,7 +221,6 @@ pub fn args(
         }
     }
     args.push(input_arg(input, from, frame));
-    let mut push = |s: &str| args.push(OsString::from(s));
 
     // Animation frames can be partial deltas. Coalescing turns each into a full
     // picture, which matters when frames change container (gif <-> webp) or get
@@ -229,10 +228,32 @@ pub fn args(
     // half-drawn delta frame is nobody's favourite PNG). gif -> gif and
     // webp -> webp keep their own optimised frames, so they skip it.
     if ANIMATED.contains(&from) && from != to {
-        push("-coalesce");
+        args.push(OsString::from("-coalesce"));
     }
 
+    apply_options(&mut args, to, opts);
+
+    let mut out = OsString::from(format!("{}:", coder(to)));
+    out.push(output.as_os_str());
+    args.push(out);
+    args
+}
+
+/// Filee's `ApplyOptions`, step for step and in the same order: orient,
+/// resize, fit the format's size limit, grayscale, DPI, metadata, flatten,
+/// then the per-format settings. Order matters to `magick` as much as it did
+/// to Magick.NET: operators run left to right, so a `-colorspace` before the
+/// `-resize` would make the resize slower and nobody happier.
+fn apply_options(args: &mut Vec<OsString>, to: &str, opts: &ConvertOptions) {
+    let image = &opts.image;
+    let mut push = |s: &str| args.push(OsString::from(s));
+
     push("-auto-orient");
+
+    if let Some(geometry) = resize_geometry(image) {
+        push("-resize");
+        push(&geometry);
+    }
 
     if let Some(side) = max_side(to) {
         // '>' means shrink only; small pictures are left alone.
@@ -240,13 +261,33 @@ pub fn args(
         push(&format!("{side}x{side}>"));
     }
 
-    // Filee strips metadata but keeps the colour profile, so colours don't shift.
-    push("+profile");
-    push("!icc,*");
+    if image.grayscale {
+        push("-colorspace");
+        push("Gray");
+    }
+
+    if let Some(dpi) = image.dpi.filter(|&d| d > 0) {
+        push("-units");
+        push("PixelsPerInch");
+        push("-density");
+        push(&dpi.to_string());
+    }
+
+    if !image.keep_metadata {
+        if image.keep_color_profile {
+            // Everything but the ICC profile goes, so colours don't shift.
+            push("+profile");
+            push("!icc,*");
+        } else {
+            push("-strip");
+        }
+    }
 
     if NO_ALPHA.contains(&to) {
+        // A no-op for opaque pictures, so there is no need to ask first whether
+        // the image has alpha the way Filee does.
         push("-background");
-        push("white");
+        push(background(&image.background));
         push("-alpha");
         push("remove");
         push("-alpha");
@@ -255,7 +296,11 @@ pub fn args(
 
     if QUALITY_TARGETS.contains(&to) {
         push("-quality");
-        push(&quality_value(opts.quality_level()).to_string());
+        push(&quality_for(opts).to_string());
+    }
+    if to == "webp" && image.webp_lossless {
+        push("-define");
+        push("webp:lossless=true");
     }
 
     match to {
@@ -275,19 +320,74 @@ pub fn args(
             ] {
                 push(a);
             }
-            push(&format!("icon:auto-resize={ICO_SIZES}"));
+            push(&format!("icon:auto-resize={}", ico_sizes(&image.ico_sizes)));
         }
         "tiff" => {
             push("-compress");
-            push("LZW");
+            push(match image.tiff_compression {
+                TiffCompression::None => "None",
+                TiffCompression::Lzw => "LZW",
+                TiffCompression::Zip => "Zip",
+            });
         }
         _ => {}
     }
+}
 
-    let mut out = OsString::from(format!("{}:", coder(to)));
-    out.push(output.as_os_str());
-    args.push(out);
-    args
+/// The `-resize` geometry for the preset's resize mode, or `None` to keep the
+/// size. Every mode only ever shrinks: a percentage of 100 or more is ignored
+/// and the box modes carry IM's '>' flag (shrink only if larger).
+fn resize_geometry(image: &ImageOptions) -> Option<String> {
+    match image.resize {
+        Resize::None => None,
+        Resize::Percent => (image.resize_percent > 0 && image.resize_percent < 100)
+            .then(|| format!("{}%", image.resize_percent)),
+        Resize::LongEdge => (image.long_edge > 0).then(|| format!("{0}x{0}>", image.long_edge)),
+        // "W>" with no height keeps the aspect ratio, same as Filee's hand-rolled
+        // round(h * W / w), minus the hand-rolling.
+        Resize::Width => (image.width > 0).then(|| format!("{}>", image.width)),
+    }
+}
+
+/// The `-quality` value: the explicit `-q` wins, then the preset's own
+/// quality when it differs from the default, then the engine default (85).
+pub fn quality_for(opts: &ConvertOptions) -> u8 {
+    let preset = opts.image.quality;
+    opts.quality
+        .or_else(|| (preset != ImageOptions::default().quality).then_some(preset))
+        .map_or_else(|| quality_value(QualityLevel::Normal), |q| q.clamp(1, 100))
+}
+
+/// The preset's background as a colour `magick` will parse, or white. Only
+/// `#RGB`, `#RGBA`, `#RRGGBB` and `#RRGGBBAA` get through; anything else
+/// falls back to white like Filee's `ParseColor`, instead of finding out what
+/// IM thinks "blurple" is.
+fn background(color: &str) -> &str {
+    let color = color.trim();
+    let valid = color.strip_prefix('#').is_some_and(|hex| {
+        matches!(hex.len(), 3 | 4 | 6 | 8) && hex.bytes().all(|b| b.is_ascii_hexdigit())
+    });
+    if valid { color } else { "#FFFFFF" }
+}
+
+/// Filee's `PrepareIcon` size list: 1 to 256 px, no duplicates, largest
+/// first, with `256,48,32,16` when nothing usable is left.
+fn ico_sizes(sizes: &[u32]) -> String {
+    let mut sizes: Vec<u32> = sizes
+        .iter()
+        .copied()
+        .filter(|s| (1..=256).contains(s))
+        .collect();
+    sizes.sort_unstable_by(|a, b| b.cmp(a));
+    sizes.dedup();
+    if sizes.is_empty() {
+        sizes = vec![256, 48, 32, 16];
+    }
+    sizes
+        .iter()
+        .map(u32::to_string)
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
 fn input_arg(input: &Path, from: &str, frame: Option<usize>) -> OsString {
@@ -362,6 +462,20 @@ mod tests {
         .collect()
     }
 
+    fn build_with(from: &'static str, to: &'static str, opts: &ConvertOptions) -> Vec<String> {
+        args(
+            Path::new("/in/a.src"),
+            Path::new("/out/a.dst"),
+            id(from),
+            id(to),
+            opts,
+            None,
+        )
+        .into_iter()
+        .map(|a| a.into_string().unwrap())
+        .collect()
+    }
+
     fn has_pair(args: &[String], a: &str, b: &str) -> bool {
         args.windows(2).any(|w| w[0] == a && w[1] == b)
     }
@@ -381,27 +495,197 @@ mod tests {
                 "-auto-orient",
                 "-resize",
                 "65500x65500>",
-                "+profile",
-                "!icc,*",
                 "-background",
-                "white",
+                "#FFFFFF",
                 "-alpha",
                 "remove",
                 "-alpha",
                 "off",
                 "-quality",
-                "85",
+                "80",
                 "JPEG:/out/a.dst",
             ]
         );
     }
 
     #[test]
-    fn quality_levels_map_to_92_85_70() {
-        assert!(has_pair(&build("png", "webp", Some(90)), "-quality", "92"));
+    fn quality_cli_wins_then_preset_then_default() {
+        assert!(has_pair(&build("png", "webp", Some(90)), "-quality", "90"));
         assert!(has_pair(&build("png", "webp", None), "-quality", "85"));
-        assert!(has_pair(&build("png", "avif", Some(30)), "-quality", "70"));
+        assert!(has_pair(&build("png", "avif", Some(30)), "-quality", "30"));
         assert!(!build("png", "png", Some(30)).contains(&"-quality".to_string()));
+
+        let mut opts = ConvertOptions::default();
+        opts.image.quality = 70;
+        assert!(has_pair(&build_with("png", "jpg", &opts), "-quality", "70"));
+        // The preset default (90) means "no opinion": the engine default stays.
+        opts.image.quality = ImageOptions::default().quality;
+        assert!(has_pair(&build_with("png", "jpg", &opts), "-quality", "85"));
+        opts.image.quality = 70;
+        opts.quality = Some(40);
+        assert!(has_pair(&build_with("png", "jpg", &opts), "-quality", "40"));
+        opts.quality = Some(0);
+        assert_eq!(quality_for(&opts), 1);
+        assert_eq!(quality_value(QualityLevel::High), 92);
+        assert_eq!(quality_value(QualityLevel::Small), 70);
+    }
+
+    fn with_image(f: impl FnOnce(&mut ImageOptions)) -> ConvertOptions {
+        let mut opts = ConvertOptions::default();
+        f(&mut opts.image);
+        opts
+    }
+
+    #[test]
+    fn default_options_add_nothing_beyond_the_format_needs() {
+        assert_eq!(
+            build("png", "png", None),
+            ["/in/a.src", "-auto-orient", "PNG:/out/a.dst"]
+        );
+    }
+
+    #[test]
+    fn resize_modes_only_shrink() {
+        let percent = |p| {
+            build_with(
+                "png",
+                "png",
+                &with_image(|i| {
+                    i.resize = Resize::Percent;
+                    i.resize_percent = p;
+                }),
+            )
+        };
+        assert!(has_pair(&percent(50), "-resize", "50%"));
+        assert!(!percent(100).contains(&"-resize".to_string()));
+        assert!(!percent(250).contains(&"-resize".to_string()));
+        assert!(!percent(0).contains(&"-resize".to_string()));
+
+        let long = build_with(
+            "png",
+            "png",
+            &with_image(|i| {
+                i.resize = Resize::LongEdge;
+                i.long_edge = 1920;
+            }),
+        );
+        assert!(has_pair(&long, "-resize", "1920x1920>"));
+
+        let width = build_with(
+            "png",
+            "png",
+            &with_image(|i| {
+                i.resize = Resize::Width;
+                i.width = 1200;
+            }),
+        );
+        assert!(has_pair(&width, "-resize", "1200>"));
+
+        // The user's resize runs before the format's size cap.
+        let jpg = build_with("png", "jpg", &with_image(|i| i.resize = Resize::Percent));
+        let first = jpg.iter().position(|a| a == "50%").unwrap();
+        let cap = jpg.iter().position(|a| a == "65500x65500>").unwrap();
+        assert!(first < cap);
+    }
+
+    #[test]
+    fn grayscale_and_dpi() {
+        let a = build_with(
+            "png",
+            "png",
+            &with_image(|i| {
+                i.grayscale = true;
+                i.dpi = Some(300);
+            }),
+        );
+        assert!(has_pair(&a, "-colorspace", "Gray"));
+        assert!(has_pair(&a, "-units", "PixelsPerInch"));
+        assert!(has_pair(&a, "-density", "300"));
+        let gray = a.iter().position(|x| x == "-colorspace").unwrap();
+        let dpi = a.iter().position(|x| x == "-units").unwrap();
+        assert!(gray < dpi);
+        let zero = build_with("png", "png", &with_image(|i| i.dpi = Some(0)));
+        assert!(!zero.contains(&"-density".to_string()));
+    }
+
+    #[test]
+    fn metadata_strip_keeps_icc_when_asked() {
+        let keep_icc = build_with("png", "png", &with_image(|i| i.keep_metadata = false));
+        assert!(has_pair(&keep_icc, "+profile", "!icc,*"));
+        assert!(!keep_icc.contains(&"-strip".to_string()));
+
+        let all = build_with(
+            "png",
+            "png",
+            &with_image(|i| {
+                i.keep_metadata = false;
+                i.keep_color_profile = false;
+            }),
+        );
+        assert!(all.contains(&"-strip".to_string()));
+        assert!(!all.contains(&"+profile".to_string()));
+
+        let kept = build("png", "png", None);
+        assert!(!kept.contains(&"-strip".to_string()));
+        assert!(!kept.contains(&"+profile".to_string()));
+    }
+
+    #[test]
+    fn background_colour_is_used_or_falls_back_to_white() {
+        let colour =
+            |c: &str| build_with("png", "jpg", &with_image(|i| i.background = c.to_owned()));
+        assert!(has_pair(&colour("#123abc"), "-background", "#123abc"));
+        assert!(has_pair(&colour(" #000 "), "-background", "#000"));
+        assert!(has_pair(&colour("blurple"), "-background", "#FFFFFF"));
+        assert!(has_pair(&colour("#12345"), "-background", "#FFFFFF"));
+        assert!(has_pair(&colour(""), "-background", "#FFFFFF"));
+        // Targets with alpha keep it, background or not.
+        let png = build_with("png", "png", &with_image(|i| i.background = "#000".into()));
+        assert!(!png.contains(&"-background".to_string()));
+    }
+
+    #[test]
+    fn tiff_compression_modes() {
+        for (mode, arg) in [
+            (TiffCompression::None, "None"),
+            (TiffCompression::Lzw, "LZW"),
+            (TiffCompression::Zip, "Zip"),
+        ] {
+            let a = build_with("png", "tiff", &with_image(|i| i.tiff_compression = mode));
+            assert!(has_pair(&a, "-compress", arg), "{mode:?}");
+        }
+    }
+
+    #[test]
+    fn webp_lossless_define_only_for_webp() {
+        let lossless = with_image(|i| i.webp_lossless = true);
+        assert!(has_pair(
+            &build_with("png", "webp", &lossless),
+            "-define",
+            "webp:lossless=true"
+        ));
+        assert!(!build_with("png", "avif", &lossless).contains(&"-define".to_string()));
+        assert!(!build("png", "webp", None).contains(&"-define".to_string()));
+    }
+
+    #[test]
+    fn ico_sizes_are_filtered_sorted_and_deduplicated() {
+        let ico = |sizes: Vec<u32>| build_with("png", "ico", &with_image(|i| i.ico_sizes = sizes));
+        assert!(has_pair(
+            &ico(vec![16, 512, 32, 32, 0, 64]),
+            "-define",
+            "icon:auto-resize=64,32,16"
+        ));
+        assert!(has_pair(
+            &ico(vec![]),
+            "-define",
+            "icon:auto-resize=256,48,32,16"
+        ));
+        assert!(has_pair(
+            &ico(vec![1000]),
+            "-define",
+            "icon:auto-resize=256,48,32,16"
+        ));
     }
 
     #[test]
@@ -420,7 +704,7 @@ mod tests {
     fn jpg_target_always_flattens_onto_white() {
         for from in READABLE {
             let a = build(from, "jpg", None);
-            assert!(has_pair(&a, "-background", "white"), "{from}");
+            assert!(has_pair(&a, "-background", "#FFFFFF"), "{from}");
             assert!(has_pair(&a, "-alpha", "remove"), "{from}");
         }
         assert!(has_pair(&build("png", "ppm", None), "-alpha", "remove"));

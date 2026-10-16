@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use morphring_core::{
-    CancelToken, ConvertOptions, Converter, EngineError, FormatId, OutputAllocator, Step,
+    CancelToken, ConvertOptions, Converter, EngineError, FormatId, OutputAllocator, Resize, Step,
 };
 use morphring_engines::magick::MagickEngine;
 use tempfile::TempDir;
@@ -56,6 +56,12 @@ fn step(tmp: &Path, input: &str, from: &'static str, to: &'static str) -> Step {
 }
 
 fn convert(input: &str, from: &'static str, to: &'static str) -> Run {
+    convert_with(input, from, to, ConvertOptions::default())
+}
+
+/// [`convert`] with preset options. Calls the engine directly, so whichever
+/// engine the router would pick for the edge doesn't get a vote.
+fn convert_with(input: &str, from: &'static str, to: &'static str, options: ConvertOptions) -> Run {
     let tmp = TempDir::new().unwrap_or_else(|e| panic!("temp dir: {e}"));
     let out_dir = tmp.path().join("out");
     fs::create_dir(&out_dir).unwrap_or_else(|e| panic!("out dir: {e}"));
@@ -68,8 +74,10 @@ fn convert(input: &str, from: &'static str, to: &'static str) -> Run {
         stem,
     };
     let progress = RefCell::new(Vec::new());
+    let mut s = step(tmp.path(), input, from, to);
+    s.options = options;
     let result = MagickEngine::new().convert(
-        &step(tmp.path(), input, from, to),
+        &s,
         &mut alloc,
         &|p| progress.borrow_mut().push(p),
         &CancelToken::new(),
@@ -86,6 +94,20 @@ fn magick_format(path: &Path) -> String {
     let first = format!("{}[0]", path.display());
     let out = Command::new("magick")
         .args(["identify", "-format", "%m", &first])
+        .output()
+        .unwrap_or_else(|e| panic!("failed to run magick identify: {e}"));
+    assert!(
+        out.status.success(),
+        "identify failed on {}",
+        path.display()
+    );
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
+fn colorspace(path: &Path) -> String {
+    let first = format!("{}[0]", path.display());
+    let out = Command::new("magick")
+        .args(["identify", "-format", "%[colorspace]", &first])
         .output()
         .unwrap_or_else(|e| panic!("failed to run magick identify: {e}"));
     assert!(
@@ -247,4 +269,59 @@ fn unreadable_input_fails_with_detail() {
     assert!(listing(&out_dir).is_empty());
     // The temp subdir went with the failure.
     assert!(listing(&tmp.path().join("work")).is_empty());
+}
+
+#[test]
+fn half_size_preset_halves_the_width() {
+    require_engine!("magick");
+    let mut options = ConvertOptions::default();
+    options.image.resize = Resize::Percent;
+    options.image.resize_percent = 50;
+    let run = convert_with("sample.png", "png", "png", options);
+    let written = run.result.expect("png -> png at 50%");
+    assert_eq!(image_size(&written[0]), (32, 24));
+}
+
+#[test]
+fn long_edge_never_upscales() {
+    require_engine!("magick");
+    let mut options = ConvertOptions::default();
+    options.image.resize = Resize::LongEdge;
+    options.image.long_edge = 1920;
+    let run = convert_with("sample.png", "png", "jpg", options);
+    let written = run.result.expect("png -> jpg, long edge 1920");
+    assert_eq!(image_size(&written[0]), (64, 48));
+}
+
+#[test]
+fn grayscale_preset_writes_gray() {
+    require_engine!("magick");
+    let mut options = ConvertOptions::default();
+    options.image.grayscale = true;
+    for to in ["png", "jpg"] {
+        let run = convert_with("sample.png", "png", to, options.clone());
+        let written = run
+            .result
+            .unwrap_or_else(|e| panic!("png -> {to} gray: {e}"));
+        assert_eq!(colorspace(&written[0]), "Gray", "{to}");
+    }
+}
+
+#[test]
+fn dpi_and_stripped_metadata_still_write() {
+    require_engine!("magick");
+    let mut options = ConvertOptions::default();
+    options.image.dpi = Some(300);
+    options.image.keep_metadata = false;
+    options.image.keep_color_profile = false;
+    let run = convert_with("sample.png", "png", "jpg", options);
+    let written = run.result.expect("png -> jpg at 300 dpi");
+    let first = format!("{}[0]", written[0].display());
+    let out = Command::new("magick")
+        .args(["identify", "-format", "%x %U", &first])
+        .output()
+        .expect("magick identify");
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.starts_with("300"), "{text}");
+    assert!(text.contains("PixelsPerInch"), "{text}");
 }
