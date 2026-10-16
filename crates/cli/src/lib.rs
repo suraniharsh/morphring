@@ -436,15 +436,12 @@ mod tests {
     }
 
     #[test]
-    fn watch_reaches_its_stub_and_presets_lists() {
-        assert_eq!(
-            run_args(&["watch", "inbox", "--to", "pdf"]),
-            (
-                2,
-                String::new(),
-                "morphring: watch is not available yet\n".into()
-            )
-        );
+    fn watch_wants_its_folder_and_presets_lists() {
+        // No /inbox here (we hope), so the watch stops before it starts.
+        let (code, out, err) = run_args(&["watch", "inbox", "--to", "pdf"]);
+        assert_eq!((code, out.as_str()), (2, ""));
+        assert!(err.starts_with("morphring: Folder not found: "), "{err}");
+        assert!(err.ends_with("inbox\n"), "{err}");
         // No config dir here, so it is the built-ins and a clean exit.
         let (code, out, err) = run_args(&["presets"]);
         assert_eq!((code, err.as_str()), (0, ""));
