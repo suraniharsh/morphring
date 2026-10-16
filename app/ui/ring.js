@@ -94,6 +94,10 @@
   let pointerVisited = false;
   let blurTimer = 0;
   const BLUR_GRACE_MS = 400;
+  // Ctrl+drag: the ring opened mid-drag. Until the drop, the pointer belongs to
+  // the file manager, so hover and drop come in as backend events instead of
+  // pointer events. Like watching a mime through a window, but with slices.
+  let dragMode = false;
 
   // ───────────── static layout ─────────────
 
@@ -291,11 +295,64 @@
 
   function hide() {
     mode = "hidden";
+    dragMode = false;
     job++;
     message.hidden = true;
     svg.classList.remove("cancelling", "pointing");
     svg.classList.add("off");
     backend.close().catch((err) => console.warn("ring_close failed:", err));
+  }
+
+  // ───────────── Ctrl+drag ─────────────
+
+  function dragHint(slice) {
+    if (!slice) return "Drop on a format";
+    return slice.enabled ? `Drop → ${slice.label}` : M.hintFor(slice);
+  }
+
+  function dragAt(p) {
+    if (mode !== "menu" || model.slices.length === 0 || !p) return { kind: "outside" };
+    return hitAt({ clientX: Number(p.x), clientY: Number(p.y) });
+  }
+
+  function armRing() {
+    openRing({ files: [], title: "Drop here", slices: [] });
+    dragMode = true;
+    setHub("Drop here", "Then pick a format");
+  }
+
+  function dragEnter(payload) {
+    if (!dragMode) return;
+    openRing(payload);
+    setHub(model.title, dragHint(null));
+  }
+
+  function dragOver(p) {
+    if (!dragMode || mode !== "menu") return;
+    const hit = dragAt(p);
+    setHover(hit.kind === "segment" ? hit.index : -1);
+    setHub(model.title, dragHint(model.slices[hoverIndex]));
+  }
+
+  function dragLeave() {
+    if (!dragMode || mode !== "menu") return;
+    setHover(-1);
+    setHub(model.title, dragHint(null));
+  }
+
+  function dragDrop(p) {
+    if (!dragMode) return;
+    dragMode = false;
+    const hit = dragAt(p);
+    const slice = hit.kind === "segment" ? model.slices[hit.index] : null;
+    if (slice && slice.enabled) invoke(hit.index);
+    else requestClose();
+  }
+
+  function dragDismiss() {
+    if (!dragMode) return;
+    dragMode = false;
+    requestClose();
   }
 
   // ───────────── converting ─────────────
@@ -701,7 +758,16 @@
       tauri.event.listen(name, (event) => handler(event.payload)).catch((err) => {
         console.warn(`could not listen for ${name}:`, err);
       });
-    on("ring-open", openRing);
+    on("ring-open", (payload) => {
+      dragMode = false;
+      openRing(payload);
+    });
+    on("ring-arm", armRing);
+    on("ring-drag-enter", dragEnter);
+    on("ring-drag-over", dragOver);
+    on("ring-drag-leave", dragLeave);
+    on("ring-drag-drop", dragDrop);
+    on("ring-drag-dismiss", dragDismiss);
     on("ring-progress", (p) => {
       if (mode !== "progress" || !progress) return;
       const id = Number(p && p.jobId);

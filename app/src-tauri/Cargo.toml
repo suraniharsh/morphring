@@ -44,6 +44,10 @@ anyhow = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
+# Ctrl+drag on Linux: keyboards and mice straight from /dev/input.
+[target.'cfg(target_os = "linux")'.dependencies]
+evdev = "0.13"
+
 [dev-dependencies]
 # The FakeConverter, for jobs slow enough to cancel on purpose.
 morphring-core = { path = "../../crates/core", features = ["test-support"] }

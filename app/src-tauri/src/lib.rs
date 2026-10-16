@@ -6,8 +6,13 @@
 use anyhow::Context as _;
 
 pub mod commands;
+pub mod drag_ring;
 pub mod dropzone;
+#[cfg(target_os = "linux")]
+mod gesture_linux;
 pub mod history;
+#[cfg(unix)]
+pub mod hyprland;
 pub mod instance;
 pub mod lifecycle;
 pub mod ring_window;
@@ -29,6 +34,7 @@ pub fn run() -> anyhow::Result<()> {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .manage(lifecycle::PendingOpen::default())
+        .manage(drag_ring::GestureActive::default())
         .invoke_handler(tauri::generate_handler![
             commands::convert,
             commands::ring_close,
@@ -46,15 +52,35 @@ pub fn run() -> anyhow::Result<()> {
         ])
         .setup(|app| {
             tray::setup(app)?;
+            // Before on_startup: whether the gesture runs decides whether the main
+            // window shows at all.
+            start_gesture(app.handle());
             instance::on_startup(app.handle(), std::env::args().collect());
             lifecycle::setup(app)?;
             Ok(())
         })
-        .on_window_event(dropzone::on_window_event)
+        .on_window_event(|window, event| {
+            dropzone::on_window_event(window, event);
+            drag_ring::on_window_event(window, event);
+        })
         .build(tauri::generate_context!())
         .context("while building the MorphRing app")?;
     // build + run instead of plain run, so the lifecycle module gets to see run
     // events (macOS hands over Finder's files through one of them).
     app.run(|app, event| lifecycle::on_run_event(app, &event));
     Ok(())
+}
+
+/// Starts the Ctrl+drag watcher where we have one, and remembers whether it runs.
+fn start_gesture<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
+    use tauri::Manager as _;
+    #[cfg(target_os = "linux")]
+    let running = gesture_linux::start(app);
+    // Windows hooks and the macOS event tap come later; until then the drop
+    // zone and the file manager menus are the way in there.
+    #[cfg(not(target_os = "linux"))]
+    let running = false;
+    app.state::<drag_ring::GestureActive>()
+        .0
+        .store(running, std::sync::atomic::Ordering::Relaxed);
 }

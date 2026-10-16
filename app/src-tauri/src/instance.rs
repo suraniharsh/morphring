@@ -191,8 +191,14 @@ pub fn on_startup<R: Runtime>(app: &AppHandle<R>, argv: Vec<String>) {
             enqueue(app, files);
         }
         Launch::Background => hide_main(app),
-        // The main window is visible from the config already.
-        Launch::ShowMain => {}
+        // With Ctrl+drag running the app lives in the tray, out of the way; the
+        // tray's Open brings the window back. Without it, the drop zone is the
+        // only way in, so show it.
+        Launch::ShowMain => {
+            if !crate::drag_ring::gesture_active(app) {
+                crate::tray::show_main(app);
+            }
+        }
     }
 }
 

@@ -902,6 +902,11 @@ fn on_job_notice<R: Runtime>(app: &AppHandle<R>, notice: JobNotice) {
     }
 }
 
+/// The ring model for `files`, as [`open_ring`] would show it.
+pub fn ring_model_for<R: Runtime>(app: &AppHandle<R>, files: &[PathBuf]) -> RingModel {
+    conversions(app).ring_model(files)
+}
+
 /// Builds the ring for `files`, sends it to the ring window and shows it.
 ///
 /// Returns at once; the work happens on a blocking thread, because the first
