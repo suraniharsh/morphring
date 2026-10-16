@@ -1,6 +1,7 @@
 # Draft release for v* tags. Build jobs, one per OS, each test or smoke-test what they make and upload it:
 #   linux        the x86_64 CLI tarball plus the ring app as .deb and .AppImage
 #   windows-cli  the x86_64 CLI as a zip
+#   windows-app  the ring app as a per-user NSIS installer
 #   macos-cli    the arm64 CLI, ad-hoc signed, as a tarball
 # Then `publish` collects every dist/* file, writes one SHA256SUMS.txt and opens a *draft* GitHub release whose notes
 # are the tag's CHANGELOG.md section. A human publishes the draft after a look. A tag push does not wait for ci.yml,
@@ -334,11 +335,107 @@ jobs:
           retention-days: 7
           path: dist/*
 
+  # The ring app for Windows as a per-user NSIS installer: no admin prompt, and it fetches WebView2 if a stripped-down
+  # Windows lacks it. Unsigned, so SmartScreen says "Windows protected your PC" once; More info -> Run anyway.
+  windows-app:
+    runs-on: windows-2025
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Runner check
+        shell: pwsh
+        run: |
+          [Environment]::OSVersion
+          $env:PROCESSOR_ARCHITECTURE
+
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        run: rustup toolchain install && rustup show active-toolchain
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: app/src-tauri -> target
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Check Tauri CLI
+        working-directory: app
+        run: |
+          set -euo pipefail
+          want="$(grep -A1 '^name = "tauri"$' src-tauri/Cargo.lock | sed -nE 's/^version = "([^"]+)"$/\1/p')" || true
+          info="$(npx --yes "@tauri-apps/cli@$TAURI_CLI_VERSION" info 2>&1)" || true
+          got="$(printf '%s\n' "$info" | sed -nE 's/^[[:space:]]*- tauri [^:]*: ([0-9][^,[:space:]]*).*/\1/p' | head -n1)"
+          if [ -z "$want" ] || [ "$got" != "$want" ]; then
+            printf '%s\n' "$info"
+            echo "::error::Tauri CLI $TAURI_CLI_VERSION reports tauri crate '$got', app/src-tauri/Cargo.lock has '$want'"
+            exit 1
+          fi
+          echo "Tauri CLI $TAURI_CLI_VERSION, tauri crate $got"
+
+      # hooks.nsh hand-copies the registry keys and the Send To path from explorer.rs. A const renamed on one side and
+      # not the other would ship an installer whose uninstaller leaves litter behind, so match them up before building.
+      - name: Check hooks.nsh against explorer.rs
+        run: |
+          set -euo pipefail
+          src=crates/platform/src/explorer.rs
+          hooks=app/src-tauri/windows/hooks.nsh
+          paths="$(sed -nE 's/^pub const ([A-Z_]+): &str = r"([^"]*\\[^"]*)";$/\1 \2/p' "$src" | grep -v '^CLASSES_ROOT ')"
+          marker="$(sed -nE 's/^pub const MARKER: &str = "([^"]+)";$/MARKER \1/p' "$src")"
+          if [ -z "$paths" ] || [ -z "$marker" ]; then
+            echo "::error::found no key-path consts in $src; did their format change?"
+            exit 1
+          fi
+          missing=0
+          while read -r name value; do
+            if grep -qF -- "$value" "$hooks"; then
+              echo "ok      $name = $value"
+            else
+              echo "::error::$hooks does not mention $name ($value) from $src"
+              missing=1
+            fi
+          done <<< "$paths"$'\n'"$marker"
+          exit "$missing"
+
+      - name: Build installer
+        working-directory: app
+        run: npx --yes "@tauri-apps/cli@$TAURI_CLI_VERSION" build --bundles nsis --ci
+
+      - name: Package
+        run: |
+          set -euo pipefail
+          setup=(app/src-tauri/target/release/bundle/nsis/*-setup.exe)
+          if [ ! -f "${setup[0]}" ]; then
+            echo "::error::no NSIS setup.exe was built"
+            ls -R app/src-tauri/target/release/bundle || true
+            exit 1
+          fi
+          # Same guard as the CLI: the app must not need the Visual C++ Redistributable.
+          exe=app/src-tauri/target/release/morphring-app.exe
+          if grep -qai 'vcruntime140' "$exe"; then
+            echo "::error::$exe still imports VCRUNTIME140.dll; the static CRT setting did not apply"
+            exit 1
+          fi
+          mkdir -p dist
+          cp "${setup[0]}" dist/
+          ls -la dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-windows-app
+          if-no-files-found: error
+          retention-days: 7
+          path: dist/*
+
   publish:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     # Every build job, so this runs only when all of them succeeded. XP-09 and XP-12 add their jobs here.
-    needs: [linux, windows-cli, macos-cli]
+    needs: [linux, windows-cli, windows-app, macos-cli]
     steps:
       - uses: actions/checkout@v4
 
