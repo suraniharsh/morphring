@@ -10,11 +10,58 @@ repository.workspace = true
 [features]
 # The native engines. Turn them all off and you get the v0.1 build: every
 # conversion goes through the external tools, and the binary stays svelte.
-default = ["img", "svg", "pdf", "archive"]
+# Everything is on by default except `download`, which talks to the internet
+# and therefore has to be asked for by name.
+default = [
+    "img",
+    "svg",
+    "pdf",
+    "archive",
+    "subtitles",
+    "data",
+    "model3d",
+    "fonts",
+    "cad",
+    "doc",
+    "ebook",
+    "email",
+    "sheets",
+    "markdown",
+    "icns",
+    "trace",
+    "pdf-native-render",
+]
 img = ["dep:image"]
 svg = ["dep:resvg", "dep:usvg", "dep:flate2"]
 pdf = ["dep:lopdf", "dep:krilla", "dep:krilla-svg", "dep:usvg", "dep:image"]
-archive = ["dep:zip", "dep:tar", "dep:flate2"]
+archive = ["dep:zip", "dep:tar", "dep:flate2", "dep:bzip2", "dep:lzma-rust2", "dep:sevenz-rust2", "dep:encoding_rs"]
+subtitles = ["dep:encoding_rs", "dep:chardetng", "dep:quick-xml"]
+data = ["dep:saphyr", "dep:toml", "dep:quick-xml", "dep:csv", "dep:encoding_rs", "dep:chardetng"]
+model3d = ["dep:gltf", "dep:stl_io", "dep:tobj", "dep:ply-rs-bw", "dep:zip", "dep:quick-xml"]
+fonts = ["dep:ttf-parser", "dep:write-fonts", "dep:fontdb", "dep:flate2", "dep:brotli"]
+cad = ["dep:dxf"]
+doc = [
+    "dep:docx-rs",
+    "dep:pulldown-cmark",
+    "dep:html5ever",
+    "dep:markup5ever_rcdom",
+    "dep:htmd",
+    "dep:quick-xml",
+    "dep:zip",
+    "dep:encoding_rs",
+    "dep:chardetng",
+    "dep:pdf-extract",
+    "dep:image",
+]
+ebook = ["dep:zip", "dep:tar", "dep:quick-xml", "dep:mobi", "dep:html5ever", "dep:markup5ever_rcdom", "dep:image"]
+email = ["dep:mail-parser", "dep:cfb", "dep:encoding_rs", "dep:zip"]
+sheets = ["dep:calamine", "dep:rust_xlsxwriter", "dep:csv", "dep:encoding_rs", "dep:zip", "dep:quick-xml"]
+markdown = ["dep:pulldown-cmark", "dep:html5ever", "dep:markup5ever_rcdom", "dep:htmd"]
+icns = ["dep:icns", "dep:image"]
+trace = ["dep:visioncortex", "dep:image"]
+# Off by default, in the CLI too: fetching engines is something you opt into.
+download = ["dep:ureq", "dep:sha2"]
+pdf-native-render = ["dep:hayro", "dep:pdf-extract", "dep:image"]
 
 [dependencies]
 morphring-core = { path = "../core", version = "0.1.0" }
@@ -37,6 +84,40 @@ lopdf = { workspace = true, optional = true }
 zip = { workspace = true, optional = true }
 tar = { workspace = true, optional = true }
 flate2 = { workspace = true, optional = true }
+bzip2 = { workspace = true, optional = true }
+lzma-rust2 = { workspace = true, optional = true }
+sevenz-rust2 = { workspace = true, optional = true }
+encoding_rs = { workspace = true, optional = true }
+chardetng = { workspace = true, optional = true }
+saphyr = { workspace = true, optional = true }
+toml = { workspace = true, optional = true }
+quick-xml = { workspace = true, optional = true }
+csv = { workspace = true, optional = true }
+calamine = { workspace = true, optional = true }
+rust_xlsxwriter = { workspace = true, optional = true }
+docx-rs = { workspace = true, optional = true }
+pulldown-cmark = { workspace = true, optional = true }
+html5ever = { workspace = true, optional = true }
+markup5ever_rcdom = { workspace = true, optional = true }
+htmd = { workspace = true, optional = true }
+pdf-extract = { workspace = true, optional = true }
+hayro = { workspace = true, optional = true }
+mobi = { workspace = true, optional = true }
+mail-parser = { workspace = true, optional = true }
+cfb = { workspace = true, optional = true }
+brotli = { workspace = true, optional = true }
+ttf-parser = { workspace = true, optional = true }
+write-fonts = { workspace = true, optional = true }
+fontdb = { workspace = true, optional = true }
+gltf = { workspace = true, optional = true }
+stl_io = { workspace = true, optional = true }
+tobj = { workspace = true, optional = true }
+ply-rs-bw = { workspace = true, optional = true }
+dxf = { workspace = true, optional = true }
+visioncortex = { workspace = true, optional = true }
+icns = { workspace = true, optional = true }
+ureq = { workspace = true, optional = true }
+sha2 = { workspace = true, optional = true }
 
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true

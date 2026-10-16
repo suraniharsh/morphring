@@ -8,7 +8,7 @@ exclude = ["app"]
 [workspace.package]
 version = "0.1.1"
 edition = "2024"
-rust-version = "1.92"
+rust-version = "1.93"
 license = "MIT"
 repository = "https://github.com/suraniharsh/morphring"
 
@@ -57,13 +57,117 @@ windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Syste
 winreg = "0.56"
 mslnk = "0.1.8"
 
+# v0.2 parity (PX-05): every crate the remaining Filee engines and platform
+# hooks need, declared in one commit so the ~180 tasks behind it never touch a
+# manifest again. Checked against crates.io on 2026-10-17. Minor versions are
+# pinned on purpose: on 0.x crates the minor *is* the major, and we would like
+# exactly one quick-xml, thank you.
+
+# Structured data and text.
+# YAML via saphyr: pure Rust, keeps key order, and maintained, unlike the
+# serde_yaml family, which all sit on the archived unsafe-libyaml. Its
+# `encoding` feature pins encoding_rs below 0.8.40, so it stays off; we decode
+# before we parse anyway.
+saphyr = { version = "0.2.2", default-features = false }
+toml = { version = "1.1.8", default-features = false, features = ["std", "serde", "parse", "display", "preserve_order"] }
+# 0.41, not 0.42: calamine and docx-rs both sit on 0.41, and the acceptance
+# test for this task is literally "only one quick-xml". Bump all three together.
+quick-xml = "0.41"
+csv = "1.4.0"
+encoding_rs = "0.8.42"
+chardetng = "1.0.0"
+
+# Spreadsheets. calamine reads xlsx/xls/ods; rust_xlsxwriter writes xlsx. ODS is
+# written by hand (zip + quick-xml): spreadsheet-ods would drag in quick-xml
+# 0.38 and zip 6, which is two extra copies of things we already have.
+calamine = { version = "0.36.1", features = ["dates"] }
+rust_xlsxwriter = "0.99.1"
+
+# Documents, Markdown and HTML. docx-rs loses its `image` feature: we measure
+# pictures with our own `image` and hand it the dimensions.
+docx-rs = { version = "0.4.22", default-features = false }
+pulldown-cmark = { version = "0.13.4", default-features = false, features = ["html"] }
+# html5ever 0.38 rather than scraper: scraper wants 0.39, htmd wants 0.38, and
+# one HTML parser per binary is plenty.
+html5ever = "0.38.0"
+markup5ever_rcdom = "0.38.0"
+htmd = "0.5.6"
+pdf-extract = "0.12.1"
+# Pure-Rust PDF renderer, so pdf -> png works on machines without Poppler.
+hayro = "0.8.0"
+
+# E-books and mail. mobi is old but does the PalmDOC/HUFF dance correctly.
+mobi = "0.8.0"
+mail-parser = { version = "0.11.9", features = ["full_encoding"] }
+cfb = "0.15.0"
+
+# More archive formats. bzip2 uses the pure-Rust libbz2-rs-sys backend by
+# default; lzma-rust2 handles xz and lzip and is already what sevenz-rust2 uses,
+# so it costs nothing extra (xz2 would bring liblzma and a C compiler, lzma-rs a
+# toy encoder). sevenz-rust2 skips AES: encrypted archives are refused anyway.
+bzip2 = "0.6.1"
+lzma-rust2 = "0.22.0"
+sevenz-rust2 = { version = "0.24.0", default-features = false, features = ["compress", "util", "bzip2", "deflate"] }
+brotli = "8.0.4"
+
+# Fonts. ttf-parser reads, write-fonts writes (woff/woff2 are flate2/brotli
+# around the same tables). fontdb stays on 0.23 to match usvg, brotli on 8 to
+# match hayro.
+ttf-parser = "0.25.1"
+write-fonts = "0.54.1"
+fontdb = "0.23.0"
+
+# 3D and CAD. gltf without `import`: we resolve buffers ourselves, which keeps
+# base64 0.13 and a second image config out of the tree. ply-rs-bw is the
+# maintained fork of ply-rs (which still pins peg 0.6 and linked-hash-map).
+gltf = { version = "1.4.1", default-features = false, features = ["names", "utils", "extras"] }
+stl_io = "0.11.0"
+tobj = { version = "4.0.5", default-features = false }
+ply-rs-bw = "4.0.1"
+dxf = "0.6.2"
+
+# Images, extra edition. visioncortex is the tracing core under vtracer; vtracer
+# itself pins image 0.23 and clap 2, so we call the library it wraps and keep
+# exactly one `image` in the build.
+visioncortex = "0.8.8"
+icns = { version = "0.5.0", default-features = false, features = ["pngio"] }
+
+# The opt-in tool downloader. rustls with ring, Mozilla's roots baked in: no
+# OpenSSL to find on Windows, no surprises on Linux.
+ureq = "3.4.2"
+sha2 = "0.11.1"
+
+# Platform hooks for the Ctrl+drag ring, Finder/Explorer selection and friends.
+windows = { version = "0.62.2", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_System_Com",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Ole",
+    "Win32_System_ProcessStatus",
+    "Win32_System_Registry",
+    "Win32_System_Threading",
+    "Win32_System_Variant",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_Shell",
+    "Win32_UI_Shell_Common",
+    "Win32_UI_WindowsAndMessaging",
+] }
+objc2 = "0.6.5"
+objc2-foundation = "0.3.2"
+objc2-app-kit = "0.3.2"
+objc2-core-graphics = "0.3.2"
+objc2-core-foundation = "0.3.2"
+x11rb = { version = "0.14.0", features = ["xinput", "record"] }
+
 [workspace.lints.rust]
 unsafe_code = "deny"
 
 [workspace.lints.clippy]
 unwrap_used = "warn"
 expect_used = "warn"
-# With the MSRV at 1.92, clippy suddenly wants every nested `if let` turned into
+# With the MSRV at 1.92 (now 1.93), clippy suddenly wants every nested `if let` turned into
 # a let chain. Fair, but rewriting src/ is not this commit's job, and a dozen
 # parallel branches would trip over it the moment they rebase. Opt back in later.
 collapsible_if = "allow"

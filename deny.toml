@@ -27,6 +27,20 @@ ignore = [
     # they are on it. Not a vulnerability; drop these once krilla/usvg ship it.
     { id = "RUSTSEC-2026-0206", reason = "rustybuzz unmaintained; transitive via krilla/usvg, awaiting upstream migration" },
     { id = "RUSTSEC-2026-0192", reason = "ttf-parser unmaintained; transitive via fontdb/usvg, awaiting upstream migration" },
+    # `encoding` (2016) comes in through the mobi crate, which uses it to decode
+    # the codepage named in old MOBI headers. Unmaintained, not unsound, and
+    # it only ever sees bytes we already read from a local e-book. If mobi
+    # stays quiet much longer, the reader gets ported onto encoding_rs.
+    { id = "RUSTSEC-2021-0153", reason = "encoding unmaintained; transitive via mobi (MOBI codepage decoding), no known vulnerability" },
+    # zip 8 rides in with calamine, docx-rs and rust_xlsxwriter, none of which
+    # has a zip 9 release yet. All three advisories live in ZipArchive::extract,
+    # and those crates only ever read or write single named entries, so the
+    # buggy code path is never reached. Our own archive engine, the one that
+    # does unpack user archives, is on zip 9.0.3. Drop these once the office
+    # crates move up.
+    { id = "RUSTSEC-2026-0367", reason = "zip 8 extract() keeps SUID/SGID; only via calamine/docx-rs/rust_xlsxwriter, which never call extract (archive engine uses zip 9.0.3)" },
+    { id = "RUSTSEC-2026-0368", reason = "zip 8 extract() symlink escape; only via calamine/docx-rs/rust_xlsxwriter, which never call extract (archive engine uses zip 9.0.3)" },
+    { id = "RUSTSEC-2026-0369", reason = "zip 8 extract() follows symlinks for permissions; only via calamine/docx-rs/rust_xlsxwriter, which never call extract (archive engine uses zip 9.0.3)" },
 ]
 
 [licenses]
@@ -47,6 +61,13 @@ allow = [
     # notify (watch folders) is public domain via CC0. Nothing to attribute,
     # nothing to worry about; it just needs to be on the list.
     "CC0-1.0",
+    # webpki-roots (Mozilla's CA list, for the opt-in tool downloader) ships
+    # under CDLA-Permissive-2.0: a permissive data licence, no copyleft, and the
+    # only obligation is to keep the licence text with the data.
+    "CDLA-Permissive-2.0",
+    # libbz2-rs-sys, the pure-Rust bzip2, keeps the original bzip2 licence, a
+    # BSD-style one with an extra "don't misrepresent the origin" clause.
+    "bzip2-1.0.6",
 ]
 confidence-threshold = 0.8
 # The list is policy, not an inventory: a licence nobody uses yet is fine.

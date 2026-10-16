@@ -15,6 +15,23 @@ tempfile.workspace = true
 [target.'cfg(windows)'.dependencies]
 winreg.workspace = true
 mslnk.workspace = true
+# The low-level mouse hook (WH_MOUSE_LL) for the Ctrl+drag ring, Shell COM for
+# the Explorer selection, the registry, and process enumeration (ToolHelp).
+windows.workspace = true
+
+# macOS: CGEventTap for the drag gesture, AppKit/Foundation for Finder and
+# NSWorkspace. objc2 is the Rust-side Objective-C runtime glue.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2.workspace = true
+objc2-foundation.workspace = true
+objc2-app-kit.workspace = true
+objc2-core-graphics.workspace = true
+objc2-core-foundation.workspace = true
+
+# Linux and the BSDs: X11 (and XWayland) through x11rb, with XInput2 for raw
+# pointer events and RECORD for watching drags without grabbing them.
+[target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
+x11rb.workspace = true
 
 [lints]
 workspace = true
