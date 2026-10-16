@@ -115,7 +115,7 @@ use Category::*;
 // Copied line for line from FormatRegistry.cs. The order is the order users
 // see in listings, so resist the urge to alphabetise it; I already resisted for you.
 // To add a format: one line here, plus an edge in at least one engine.
-static FORMATS: [Format; 172] = [
+static FORMATS: [Format; 173] = [
     // Raster images
     rw("png", "PNG", Image, &["png"]),
     rw("jpg", "JPG", Image, &["jpg", "jpeg", "jpe", "jfif"]),
@@ -131,6 +131,10 @@ static FORMATS: [Format; 172] = [
     rw("psd", "PSD", Image, &["psd"]),
     rw("psb", "PSB", Image, &["psb"]),
     rw("tga", "TGA", Image, &["tga", "icb", "vda", "vst"]),
+    rw("qoi", "QOI", Image, &["qoi"]),
+    // One id for the whole Netpbm family: pgm, pbm and pnm are extension
+    // aliases of ppm, since one PNM encoder writes them all. Splitting it would
+    // be four ids doing one job.
     rw("ppm", "PPM", Image, &["ppm", "pgm", "pbm", "pnm"]),
     rw("icns", "ICNS", Image, &["icns"]),
     ro("xcf", "XCF", Image, &["xcf"]),
@@ -474,8 +478,9 @@ mod tests {
     fn table_matches_filee() {
         // PLAN.md and docs/reverse-engineering/07 say 171 and 56, but counting
         // FormatRegistry.cs itself (and doc 07's own table) gives 171 real
-        // formats plus folder, 57 of them read-only. The source wins.
-        assert_eq!(all().len(), 172);
+        // formats plus folder, 57 of them read-only. The source wins. MorphRing
+        // adds one of its own on top (qoi), hence 173.
+        assert_eq!(all().len(), 173);
         assert_eq!(all().iter().filter(|f| !f.writable).count(), 57);
         assert_eq!(all()[0].id.as_str(), "png");
         assert_eq!(all().last().map(|f| f.id.as_str()), Some("eot"));
@@ -562,6 +567,37 @@ mod tests {
         assert_eq!(id(detect("x.xyz")), None);
         assert_eq!(id(detect("README")), None);
         assert_eq!(id(detect(".md")), None);
+    }
+
+    #[test]
+    fn qoi_is_a_writable_image() {
+        assert_eq!(id(detect("x.qoi")), Some("qoi"));
+        assert_eq!(id(detect("X.QOI")), Some("qoi"));
+        let qoi = find_by_id("qoi").unwrap();
+        assert!(qoi.writable);
+        assert_eq!(qoi.category, Category::Image);
+    }
+
+    #[test]
+    fn pnm_family_shares_the_ppm_id() {
+        for ext in ["ppm", "pgm", "pbm", "pnm"] {
+            assert_eq!(id(detect(format!("x.{ext}"))), Some("ppm"), "{ext}");
+        }
+    }
+
+    #[test]
+    fn engine_route_ids_have_the_right_access() {
+        // The v0.2 engines route to these ids; a typo or a flipped flag here
+        // would only show up as a missing ring entry much later.
+        for rw_id in [
+            "eps", "ps", "svgz", "tgz", "rst", "tex", "md", "txt", "html", "rtf", "odt", "docx",
+            "tar", "zip", "folder", "qoi", "ppm",
+        ] {
+            let format = find_by_id(rw_id).unwrap_or_else(|| panic!("{rw_id} is missing"));
+            assert!(format.writable, "{rw_id} should be writable");
+        }
+        let ai = find_by_id("ai").unwrap();
+        assert!(!ai.writable, "ai is read-only");
     }
 
     #[test]
