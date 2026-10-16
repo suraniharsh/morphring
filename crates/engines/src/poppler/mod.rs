@@ -1,8 +1,7 @@
 //! The Poppler engine: PDF pages rendered to images with `pdftoppm`, and text
 //! pulled out with `pdftotext`.
 //!
-//! Each job lives in its own part: `render` and `text`. This is the skeleton:
-//! both parts are stubs, so the engine has no edges yet.
+//! Each job lives in its own part: `render` and `text`.
 
 mod render;
 mod text;
@@ -79,11 +78,16 @@ mod tests {
     use crate::parts::test_support::{NoOutputs, step};
 
     #[test]
-    fn the_skeleton_has_an_id_and_no_edges() {
+    fn the_engine_has_an_id_and_the_text_edge() {
         let engine = PopplerEngine::new();
         assert_eq!(engine.id(), "poppler");
         assert_eq!(engine.display_name(), "Poppler");
-        assert!(engine.edges().is_empty());
+        assert!(
+            engine
+                .edges()
+                .iter()
+                .any(|e| e.from.as_str() == "pdf" && e.to.as_str() == "txt")
+        );
     }
 
     #[test]
@@ -100,8 +104,8 @@ mod tests {
     }
 
     #[test]
-    fn every_part_is_a_stub_for_now() {
-        let parts: [crate::parts::ConvertFn; 2] = [render::convert, text::convert];
+    fn the_stub_parts_say_so() {
+        let parts: [crate::parts::ConvertFn; 1] = [render::convert];
         for convert in parts {
             let err = convert(
                 &step("pdf", "png"),
