@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "What the main window and the ring may do: core events, window control and opening converted files.",
-  "windows": ["main", "ring"],
-  "permissions": ["core:default", "opener:default"]
+  "description": "What the app's windows may do: core events, window control, opening converted files, and the folder picker on the settings page.",
+  "windows": ["main", "ring", "settings", "history", "toast"],
+  "permissions": ["core:default", "opener:default", "dialog:default"]
 }

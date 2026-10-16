@@ -35,6 +35,39 @@
         "resizable": false,
         "focus": false,
         "shadow": false
+      },
+      {
+        "label": "settings",
+        "title": "MorphRing settings",
+        "url": "settings.html",
+        "width": 640,
+        "height": 560,
+        "center": true,
+        "visible": false
+      },
+      {
+        "label": "history",
+        "title": "MorphRing history",
+        "url": "history.html",
+        "width": 640,
+        "height": 520,
+        "center": true,
+        "visible": false
+      },
+      {
+        "label": "toast",
+        "title": "MorphRing jobs",
+        "url": "toast.html",
+        "width": 360,
+        "height": 120,
+        "visible": false,
+        "decorations": false,
+        "transparent": true,
+        "alwaysOnTop": true,
+        "skipTaskbar": true,
+        "resizable": false,
+        "focus": false,
+        "shadow": false
       }
     ],
     "security": {

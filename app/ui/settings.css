@@ -1,0 +1,16 @@
+/* The settings window. Plain on purpose until the real page moves in. */
+:root {
+  color-scheme: light dark;
+  font-family: "Noto Sans", system-ui, sans-serif;
+}
+
+body {
+  margin: 0;
+  padding: 24px;
+}
+
+h1 {
+  font-size: 20px;
+  font-weight: 600;
+  margin: 0 0 16px;
+}

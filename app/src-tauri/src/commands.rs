@@ -9,6 +9,27 @@
 //!
 //! Everything that can be tested without a window lives in [`Conversions`] and
 //! [`ring_model`]; the Tauri commands are thin wrappers around them.
+//!
+//! # Job events
+//!
+//! Every queued conversion is a job with a `jobId` (a `u64`, starting at 1 and
+//! going up by one per job, never reused while the app runs). Besides the ring
+//! events above, which only reach the ring and only for the job it shows, every
+//! job sends three app-wide events that any window may listen for (the toast
+//! and history windows do):
+//!
+//! | event          | payload                                  | when                          |
+//! |----------------|------------------------------------------|-------------------------------|
+//! | `job-started`  | [`JobStarted`] `{ jobId, files, label }` | the worker starts the job     |
+//! | `job-progress` | [`JobProgress`] `{ jobId, progress }`    | progress moved by 1 % or more |
+//! | `job-finished` | [`JobFinished`] `{ jobId, summary }`     | the job ended, any outcome    |
+//!
+//! `files` are the source paths, `label` is what the job converts to (the
+//! preset's display name, e.g. `JPG`), `progress` is `0.0..=1.0` and only goes
+//! up, and `summary` is the [`ConvertSummary`] that [`convert`] answers with.
+//! `job-started` comes first and `job-finished` last for each job; jobs run one
+//! at a time, so their events never interleave. After `job-finished` the job
+//! is also handed to [`crate::history::record`].
 
 use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
@@ -20,6 +41,7 @@ use morphring_core::formats;
 use morphring_core::job::{self, JobEvent};
 use morphring_core::output::OutputRule;
 use morphring_core::planner::Planner;
+use morphring_core::preset::{self, Preset};
 use morphring_core::slices::{self, DisabledReason, Reach};
 use morphring_core::{
     CancelToken, ConvertOptions, Converter, EngineStatus, ErrorKey, FileResult, FileState,
@@ -27,6 +49,8 @@ use morphring_core::{
 };
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, Runtime};
+
+use crate::history::JobRecord;
 
 /// Label of the hidden window that shows the conversion ring.
 pub const RING_WINDOW: &str = "ring";
@@ -42,6 +66,15 @@ pub const RING_PROGRESS: &str = "ring-progress";
 /// Event sent to the ring window with a [`RingDone`] payload when the job it
 /// shows has ended.
 pub const RING_DONE: &str = "ring-done";
+
+/// App-wide event sent with a [`JobStarted`] payload when a job starts running.
+pub const JOB_STARTED: &str = "job-started";
+
+/// App-wide event sent with a [`JobProgress`] payload while a job runs.
+pub const JOB_PROGRESS: &str = "job-progress";
+
+/// App-wide event sent with a [`JobFinished`] payload when a job has ended.
+pub const JOB_FINISHED: &str = "job-finished";
 
 /// What the ring shows for a set of files: the payload of [`RING_OPEN`].
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -98,6 +131,44 @@ pub struct RingDone {
     /// What went wrong, for a failed job.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
+}
+
+/// Payload of [`JOB_STARTED`].
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct JobStarted {
+    pub job_id: u64,
+    /// The source files, in input order.
+    pub files: Vec<String>,
+    /// What the job converts to, e.g. `JPG`.
+    pub label: String,
+}
+
+/// Payload of [`JOB_PROGRESS`].
+#[derive(Debug, Clone, Copy, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct JobProgress {
+    pub job_id: u64,
+    /// Progress of the whole job, `0.0..=1.0`. Only goes up.
+    pub progress: f32,
+}
+
+/// Payload of [`JOB_FINISHED`].
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct JobFinished {
+    pub job_id: u64,
+    pub summary: ConvertSummary,
+}
+
+/// Something the whole app should be told about a job.
+#[derive(Debug, Clone, PartialEq)]
+pub enum JobNotice {
+    Started(JobStarted),
+    Progress(JobProgress),
+    /// The event payload, plus the full record for the history. Boxed, because
+    /// a preset is a hefty thing to haul around in every progress tick.
+    Finished(JobFinished, Box<JobRecord>),
 }
 
 /// Something the ring window should be told about.
@@ -184,6 +255,10 @@ fn reach(
 /// Where ring events go. The app sends them to the ring window; tests collect them.
 pub type EventSink = Arc<dyn Fn(RingEvent) + Send + Sync>;
 
+/// Where job notices go. The app emits them app-wide and records history;
+/// tests collect them.
+pub type JobSink = Arc<dyn Fn(JobNotice) + Send + Sync>;
+
 type Engines = Arc<Vec<Box<dyn Converter>>>;
 
 /// One conversion waiting in the queue.
@@ -191,6 +266,7 @@ struct Request {
     id: u64,
     files: Vec<PathBuf>,
     target: FormatId,
+    preset: Preset,
     reply: mpsc::Sender<ConvertSummary>,
 }
 
@@ -208,6 +284,13 @@ impl Conversions {
     /// Starts the worker thread. `sink` receives the events of the job the
     /// ring is showing, from the worker thread.
     pub fn new(engines: Vec<Box<dyn Converter>>, sink: EventSink) -> Self {
+        // Nobody listening for job notices? Then they fall on the floor, softly.
+        Self::with_job_sink(engines, sink, Arc::new(|_| {}))
+    }
+
+    /// Like [`Conversions::new`], and every job also reports to `jobs`, from
+    /// the worker thread, whether the ring shows it or not.
+    pub fn with_job_sink(engines: Vec<Box<dyn Converter>>, sink: EventSink, jobs: JobSink) -> Self {
         let engines: Engines = Arc::new(engines);
         let showing = Arc::new(AtomicU64::new(0));
         let (queue, requests) = mpsc::channel::<Request>();
@@ -215,6 +298,7 @@ impl Conversions {
             engines: Arc::clone(&engines),
             showing: Arc::clone(&showing),
             sink,
+            jobs,
         };
         // One thread, one channel, FIFO for free. Jobs already run their files in
         // parallel, so a second job running alongside would only fight the first
@@ -269,6 +353,7 @@ impl Conversions {
                 id,
                 files,
                 target: target.id,
+                preset: preset::for_target(target),
                 reply,
             })
             .map_err(|_| "The conversion queue has stopped. Restart MorphRing.".to_owned())?;
@@ -292,6 +377,7 @@ struct Worker {
     engines: Engines,
     showing: Arc<AtomicU64>,
     sink: EventSink,
+    jobs: JobSink,
 }
 
 impl Worker {
@@ -303,10 +389,28 @@ impl Worker {
         }
         for request in requests {
             let id = request.id;
+            (self.jobs)(JobNotice::Started(JobStarted {
+                job_id: id,
+                files: request.files.iter().map(|p| display(p)).collect(),
+                label: request.preset.display_name(),
+            }));
             // run_job already catches panics per file; this is the belt to its
             // braces, so one cursed job never takes the whole queue down with it.
-            let summary = panic::catch_unwind(AssertUnwindSafe(|| self.run_job(&request)))
-                .unwrap_or_else(|_| failed_summary("The conversion stopped unexpectedly."));
+            let (summary, record) =
+                panic::catch_unwind(AssertUnwindSafe(|| self.run_job(&request))).unwrap_or_else(
+                    |_| {
+                        let record = JobRecord {
+                            job_id: id,
+                            preset: request.preset.clone(),
+                            state: JobState::Failed,
+                            results: Vec::new(),
+                        };
+                        (
+                            failed_summary("The conversion stopped unexpectedly."),
+                            record,
+                        )
+                    },
+                );
             if let Some(message) = &summary.message {
                 tracing::warn!(job = id, "conversion failed: {message}");
             }
@@ -317,13 +421,20 @@ impl Worker {
                     message: summary.message.clone(),
                 }),
             );
+            (self.jobs)(JobNotice::Finished(
+                JobFinished {
+                    job_id: id,
+                    summary: summary.clone(),
+                },
+                Box::new(record),
+            ));
             // The caller may have stopped listening (the ring was closed); the
             // files are converted either way, so that is not an error.
             let _ = request.reply.send(summary);
         }
     }
 
-    fn run_job(&self, request: &Request) -> ConvertSummary {
+    fn run_job(&self, request: &Request) -> (ConvertSummary, JobRecord) {
         let engines: Vec<&dyn Converter> = self.engines.iter().map(|e| e.as_ref()).collect();
         let cancel = CancelToken::new();
         let progress = Mutex::new(Progress::new(request.files.len()));
@@ -333,6 +444,12 @@ impl Worker {
                 .unwrap_or_else(PoisonError::into_inner)
                 .apply(&event);
             if let Some(value) = update {
+                // Same coalescing for both audiences: the ring and the toast print
+                // whole percents, so they want exactly the same updates.
+                (self.jobs)(JobNotice::Progress(JobProgress {
+                    job_id: request.id,
+                    progress: value,
+                }));
                 self.emit(
                     request.id,
                     RingEvent::Progress(RingProgress { progress: value }),
@@ -354,7 +471,15 @@ impl Worker {
             &cancel,
             &on_event,
         );
-        summarize(&results, cancel.is_cancelled())
+        let cancelled = cancel.is_cancelled();
+        let summary = summarize(&results, cancelled);
+        let record = JobRecord {
+            job_id: request.id,
+            preset: request.preset.clone(),
+            state: JobState::from_files(&results, cancelled),
+            results,
+        };
+        (summary, record)
     }
 
     fn emit(&self, id: u64, event: RingEvent) {
@@ -485,7 +610,13 @@ fn conversions<R: Runtime>(app: &AppHandle<R>) -> tauri::State<'_, Conversions> 
     if app.try_state::<Conversions>().is_none() {
         let handle = app.clone();
         let sink: EventSink = Arc::new(move |event| send_to_ring(&handle, event));
-        app.manage(Conversions::new(morphring_engines::registry::all(), sink));
+        let handle = app.clone();
+        let jobs: JobSink = Arc::new(move |notice| on_job_notice(&handle, notice));
+        app.manage(Conversions::with_job_sink(
+            morphring_engines::registry::all(),
+            sink,
+            jobs,
+        ));
     }
     app.state::<Conversions>()
 }
@@ -497,6 +628,20 @@ fn send_to_ring<R: Runtime>(app: &AppHandle<R>, event: RingEvent) {
     };
     if let Err(e) = sent {
         tracing::warn!("could not send progress to the ring: {e}");
+    }
+}
+
+fn on_job_notice<R: Runtime>(app: &AppHandle<R>, notice: JobNotice) {
+    let sent = match &notice {
+        JobNotice::Started(started) => app.emit(JOB_STARTED, started),
+        JobNotice::Progress(progress) => app.emit(JOB_PROGRESS, progress),
+        JobNotice::Finished(finished, _) => app.emit(JOB_FINISHED, finished),
+    };
+    if let Err(e) = sent {
+        tracing::warn!("could not send a job event: {e}");
+    }
+    if let JobNotice::Finished(_, record) = &notice {
+        crate::history::record(app, record);
     }
 }
 
@@ -526,18 +671,7 @@ pub fn open_ring<R: Runtime>(app: &AppHandle<R>, files: Vec<PathBuf>) {
             tracing::warn!("could not send the files to the ring: {e}");
             return;
         }
-        // Filee opens the ring under the cursor. On Wayland nobody gets to know
-        // where the cursor is, so the ring sits in the middle of the screen.
-        if let Err(e) = ring.center() {
-            tracing::debug!("could not center the ring: {e}");
-        }
-        if let Err(e) = ring.show() {
-            tracing::warn!("could not show the ring: {e}");
-            return;
-        }
-        if let Err(e) = ring.set_focus() {
-            tracing::debug!("could not focus the ring: {e}");
-        }
+        crate::ring_window::show(&ring);
     });
 }
 
@@ -574,6 +708,15 @@ pub fn ring_close<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
             .map_err(|e| format!("Could not hide the ring: {e}")),
         None => Ok(()),
     }
+}
+
+/// Cancels job `job_id`. Does nothing for a job that already ended.
+#[tauri::command]
+pub fn cancel_job(job_id: u64) -> Result<(), String> {
+    // Not wired up yet: the queue learns to cancel in P2-51. Until then the
+    // job simply finishes, which is at least a well-behaved kind of stubborn.
+    let _ = job_id;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1001,6 +1144,124 @@ mod tests {
         assert_eq!(p.apply(&finished), Some(1.0));
         assert_eq!(p.apply(&finished), None);
         assert_eq!(p.apply(&at(7, 1.0)), None, "unknown index is ignored");
+    }
+
+    fn job_recorder() -> (JobSink, Arc<Mutex<Vec<JobNotice>>>) {
+        let notices = Arc::new(Mutex::new(Vec::new()));
+        let seen = Arc::clone(&notices);
+        let sink: JobSink = Arc::new(move |n| seen.lock().unwrap().push(n));
+        (sink, notices)
+    }
+
+    #[test]
+    fn job_ids_count_up_from_one_and_every_job_reports_in_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ring, ring_events) = recorder();
+        let (jobs, notices) = job_recorder();
+        let conv = Conversions::with_job_sink(vec![Box::new(images())], ring, jobs);
+
+        let pending: Vec<_> = ["a.png", "b.png", "c.png"]
+            .iter()
+            .map(|name| conv.submit(vec![touch(dir.path(), name)], "jpg").unwrap())
+            .collect();
+        // A refused request must not burn an id.
+        assert!(conv.submit(Vec::new(), "jpg").is_err());
+        let last = conv
+            .submit(vec![touch(dir.path(), "d.png")], "jpg")
+            .unwrap();
+        for summary in pending.into_iter().chain([last]) {
+            assert_eq!(summary.recv().unwrap().outcome, Outcome::Succeeded);
+        }
+
+        let notices = notices.lock().unwrap();
+        let mut expected_id = 1;
+        let mut current = None;
+        for notice in notices.iter() {
+            match notice {
+                JobNotice::Started(started) => {
+                    assert_eq!(current, None, "jobs overlapped: {notices:?}");
+                    assert_eq!(started.job_id, expected_id);
+                    assert_eq!(started.label, "JPG");
+                    assert_eq!(started.files.len(), 1);
+                    current = Some(started.job_id);
+                }
+                JobNotice::Progress(progress) => {
+                    assert_eq!(Some(progress.job_id), current);
+                }
+                JobNotice::Finished(finished, record) => {
+                    assert_eq!(Some(finished.job_id), current);
+                    assert_eq!(record.job_id, finished.job_id);
+                    assert_eq!(record.state, JobState::Completed);
+                    assert_eq!(record.preset.target, "jpg");
+                    assert_eq!(record.results.len(), 1);
+                    assert_eq!(finished.summary.outcome, Outcome::Succeeded);
+                    current = None;
+                    expected_id += 1;
+                }
+            }
+        }
+        assert_eq!(expected_id, 5, "four jobs finished: {notices:?}");
+        // Each job reached 100 % exactly once on the app-wide channel.
+        let full = notices
+            .iter()
+            .filter(|n| matches!(n, JobNotice::Progress(p) if p.progress == 1.0))
+            .count();
+        assert_eq!(full, 4);
+        // The ring heard only about the last job it was shown.
+        assert!(matches!(
+            ring_events.lock().unwrap().last(),
+            Some(RingEvent::Done(_))
+        ));
+    }
+
+    #[test]
+    fn a_failed_job_is_finished_and_recorded_too() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ring, _) = recorder();
+        let (jobs, notices) = job_recorder();
+        let conv = Conversions::with_job_sink(vec![Box::new(images())], ring, jobs);
+        let bad = touch(dir.path(), "bad.txt");
+        let summary = conv.submit(vec![bad], "png").unwrap().recv().unwrap();
+        assert_eq!(summary.outcome, Outcome::Failed);
+        let notices = notices.lock().unwrap();
+        let Some(JobNotice::Finished(finished, record)) = notices.last() else {
+            panic!("no finish in {notices:?}");
+        };
+        assert_eq!(finished.summary, summary);
+        assert_eq!(record.state, JobState::Failed);
+    }
+
+    #[test]
+    fn job_events_are_the_camel_case_json_the_ui_reads() {
+        let started = JobStarted {
+            job_id: 3,
+            files: vec!["/a.png".into()],
+            label: "JPG".into(),
+        };
+        assert_eq!(
+            serde_json::to_value(&started).unwrap(),
+            serde_json::json!({ "jobId": 3, "files": ["/a.png"], "label": "JPG" })
+        );
+        assert_eq!(
+            serde_json::to_value(JobProgress {
+                job_id: 3,
+                progress: 0.5
+            })
+            .unwrap(),
+            serde_json::json!({ "jobId": 3, "progress": 0.5 })
+        );
+        let finished = JobFinished {
+            job_id: 3,
+            summary: failed_summary("nope"),
+        };
+        assert_eq!(
+            serde_json::to_value(&finished).unwrap(),
+            serde_json::json!({
+                "jobId": 3,
+                "summary": { "outcome": "failed", "outputs": [], "done": 0, "failed": 0, "message": "nope" }
+            })
+        );
+        assert_eq!(cancel_job(3), Ok(()));
     }
 
     #[test]

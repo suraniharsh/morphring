@@ -80,6 +80,121 @@ fn ui_scripts_and_styles_referenced_by_index_exist() {
     }
 }
 
+/// Every window the app declares, with the page it loads.
+const WINDOWS: [(&str, &str); 5] = [
+    ("main", "index.html"),
+    ("ring", "ring.html"),
+    ("settings", "settings.html"),
+    ("history", "history.html"),
+    ("toast", "toast.html"),
+];
+
+#[test]
+fn every_window_is_declared_with_its_page() {
+    let config = config();
+    let windows = config["app"]["windows"].as_array().unwrap();
+    assert_eq!(windows.len(), WINDOWS.len(), "unexpected windows");
+    for (label, page) in WINDOWS {
+        assert_eq!(window(&config, label)["url"], page, "{label}");
+    }
+}
+
+#[test]
+fn every_window_has_the_default_capability() {
+    let text = std::fs::read_to_string(manifest_dir().join("capabilities/default.json")).unwrap();
+    let caps: Value = serde_json::from_str(&text).unwrap();
+    let labels: Vec<&str> = caps["windows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|w| w.as_str().unwrap())
+        .collect();
+    for (label, _) in WINDOWS {
+        assert!(labels.contains(&label), "{label} has no capability");
+    }
+    let permissions = caps["permissions"].as_array().unwrap();
+    assert!(
+        permissions.iter().any(|p| p == "dialog:default"),
+        "the settings page needs the folder picker"
+    );
+}
+
+#[test]
+fn every_page_exists_and_loads_only_its_own_scripts() {
+    let config = config();
+    let dir = frontend_dir(&config);
+    for (label, page) in WINDOWS {
+        let html = std::fs::read_to_string(dir.join(page))
+            .unwrap_or_else(|e| panic!("{label}: cannot read {page}: {e}"));
+        let scripts = script_sources(&html, page);
+        assert!(!scripts.is_empty(), "{page} loads no script");
+        for src in scripts {
+            // The CSP says script-src 'self': anything from elsewhere would be a
+            // blank window at runtime, so it is a failed test here.
+            assert!(
+                !src.contains("://") && !src.starts_with("//") && !src.starts_with("data:"),
+                "{page} loads a script from elsewhere: {src}"
+            );
+            assert!(
+                is_non_empty(&dir.join(&src)),
+                "{page} loads {src}, which is missing"
+            );
+        }
+    }
+}
+
+#[test]
+fn settings_and_history_start_hidden() {
+    let config = config();
+    for (label, width, height) in [("settings", 640, 560), ("history", 640, 520)] {
+        let w = window(&config, label);
+        assert_eq!(w["visible"], false, "{label}");
+        assert_eq!(
+            (w["width"].as_u64(), w["height"].as_u64()),
+            (Some(width), Some(height))
+        );
+    }
+}
+
+#[test]
+fn toast_window_never_steals_the_focus() {
+    let config = config();
+    let toast = window(&config, "toast");
+    for (key, value) in [
+        ("visible", false),
+        ("decorations", false),
+        ("transparent", true),
+        ("alwaysOnTop", true),
+        ("skipTaskbar", true),
+        ("focus", false),
+        ("shadow", false),
+    ] {
+        assert_eq!(toast[key], value, "toast {key}");
+    }
+    assert_eq!(toast["width"], 360);
+    assert_eq!(toast["height"], 120);
+}
+
+/// The `src` of every `<script>` in `html`. Panics on an inline script, which
+/// the CSP would refuse to run anyway.
+fn script_sources(html: &str, page: &str) -> Vec<String> {
+    // A regex crate for a handful of hand-written pages would be overkill; a
+    // careful split on "<script" does the job and stays readable.
+    html.split("<script")
+        .skip(1)
+        .map(|rest| {
+            let (tag, after) = rest.split_once('>').unwrap();
+            let body = after.split("</script>").next().unwrap();
+            assert!(body.trim().is_empty(), "{page} has an inline script");
+            let src = tag
+                .split_once("src=\"")
+                .and_then(|(_, v)| v.split_once('"'))
+                .map(|(v, _)| v.to_owned());
+            src.unwrap_or_else(|| panic!("{page} has a script without src"))
+        })
+        .collect()
+}
+
 fn is_non_empty(path: &Path) -> bool {
     std::fs::metadata(path).is_ok_and(|m| m.is_file() && m.len() > 0)
 }

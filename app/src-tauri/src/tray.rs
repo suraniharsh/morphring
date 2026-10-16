@@ -1,4 +1,4 @@
-//! Tray icon and menu: open the main window, or quit the app.
+//! Tray icon and menu: open the main, settings or history window, or quit.
 //!
 //! Ported from Filee's `src/Filee.App/Services/TrayService.cs`, minus the
 //! entries for features MorphRing does not have yet (pausing gestures and
@@ -21,18 +21,29 @@ pub const TOOLTIP: &str = "MorphRing";
 pub enum TrayAction {
     /// Show the main window, creating it again if it was closed.
     Open,
+    /// Show the settings window.
+    Settings,
+    /// Show the history window.
+    History,
     /// Exit the app.
     Quit,
 }
 
 impl TrayAction {
     /// Every entry, in menu order.
-    pub const ALL: [TrayAction; 2] = [TrayAction::Open, TrayAction::Quit];
+    pub const ALL: [TrayAction; 4] = [
+        TrayAction::Open,
+        TrayAction::Settings,
+        TrayAction::History,
+        TrayAction::Quit,
+    ];
 
     /// Menu item id of this entry.
     pub fn id(self) -> &'static str {
         match self {
             TrayAction::Open => "open",
+            TrayAction::Settings => "settings",
+            TrayAction::History => "history",
             TrayAction::Quit => "quit",
         }
     }
@@ -41,6 +52,8 @@ impl TrayAction {
     pub fn label(self) -> &'static str {
         match self {
             TrayAction::Open => "Open MorphRing",
+            TrayAction::Settings => "Settings",
+            TrayAction::History => "History",
             TrayAction::Quit => "Quit",
         }
     }
@@ -98,6 +111,8 @@ fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<TrayIcon<R>> {
 fn on_menu_event<R: Runtime>(app: &AppHandle<R>, event: MenuEvent) {
     match TrayAction::from_id(event.id().as_ref()) {
         Some(TrayAction::Open) => show_main(app),
+        Some(TrayAction::Settings) => crate::settings::open(app),
+        Some(TrayAction::History) => crate::history::open(app),
         Some(TrayAction::Quit) => app.exit(0),
         None => tracing::debug!(id = ?event.id(), "unknown tray menu item"),
     }
@@ -119,12 +134,18 @@ fn on_tray_icon_event<R: Runtime>(tray: &TrayIcon<R>, event: TrayIconEvent) {
 /// Brings the main window to the front, creating it again from the app config
 /// when it was closed.
 pub fn show_main<R: Runtime>(app: &AppHandle<R>) {
-    let window = match app.get_webview_window(MAIN_WINDOW) {
+    show_window(app, MAIN_WINDOW);
+}
+
+/// Brings the window labelled `label` to the front, creating it again from
+/// the app config when it was closed.
+pub fn show_window<R: Runtime>(app: &AppHandle<R>, label: &str) {
+    let window = match app.get_webview_window(label) {
         Some(window) => window,
-        None => match recreate_main(app) {
+        None => match recreate(app, label) {
             Ok(window) => window,
             Err(e) => {
-                tracing::warn!("could not open the main window: {e}");
+                tracing::warn!("could not open the {label} window: {e}");
                 return;
             }
         },
@@ -132,18 +153,18 @@ pub fn show_main<R: Runtime>(app: &AppHandle<R>) {
     // Each of these can fail on a compositor with opinions (hello, Wayland and
     // set_focus). None of the failures is worth more than a debug line.
     if let Err(e) = window.unminimize() {
-        tracing::debug!("could not unminimize the main window: {e}");
+        tracing::debug!("could not unminimize the {label} window: {e}");
     }
     if let Err(e) = window.show() {
-        tracing::debug!("could not show the main window: {e}");
+        tracing::debug!("could not show the {label} window: {e}");
     }
     if let Err(e) = window.set_focus() {
-        tracing::debug!("could not focus the main window: {e}");
+        tracing::debug!("could not focus the {label} window: {e}");
     }
 }
 
-fn recreate_main<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<tauri::WebviewWindow<R>> {
-    // Closing the main window destroys it, but the hidden ring window keeps the app
+fn recreate<R: Runtime>(app: &AppHandle<R>, label: &str) -> tauri::Result<tauri::WebviewWindow<R>> {
+    // Closing a window destroys it, but the hidden ring window keeps the app
     // alive, so the tray may be asked to open a window that no longer exists. The
     // config still knows what it looked like; build it again from there.
     let config = app
@@ -151,7 +172,7 @@ fn recreate_main<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<tauri::Webview
         .app
         .windows
         .iter()
-        .find(|w| w.label == MAIN_WINDOW)
+        .find(|w| w.label == label)
         .cloned()
         .ok_or_else(|| tauri::Error::WindowNotFound)?;
     WebviewWindowBuilder::from_config(app, &config)?.build()
@@ -189,6 +210,23 @@ mod tests {
         assert_eq!(TrayAction::ALL.first(), Some(&TrayAction::Open));
         assert_eq!(TrayAction::ALL.last(), Some(&TrayAction::Quit));
         assert!(TrayAction::Quit.separated());
-        assert!(!TrayAction::Open.separated());
+        for action in [TrayAction::Open, TrayAction::Settings, TrayAction::History] {
+            assert!(!action.separated(), "{action:?}");
+        }
+    }
+
+    #[test]
+    fn settings_and_history_sit_between_open_and_quit() {
+        assert_eq!(
+            TrayAction::ALL,
+            [
+                TrayAction::Open,
+                TrayAction::Settings,
+                TrayAction::History,
+                TrayAction::Quit
+            ]
+        );
+        assert_eq!(TrayAction::from_id("settings"), Some(TrayAction::Settings));
+        assert_eq!(TrayAction::from_id("history"), Some(TrayAction::History));
     }
 }

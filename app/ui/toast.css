@@ -1,0 +1,26 @@
+/* The toast window: transparent, so only the cards are visible. */
+:root {
+  color-scheme: light dark;
+  font-family: "Noto Sans", system-ui, sans-serif;
+}
+
+html,
+body {
+  margin: 0;
+  background: transparent;
+}
+
+#cards {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
