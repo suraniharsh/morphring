@@ -3,12 +3,13 @@
 //! `src/Filee.Engines/Media/MediaEncoding.cs`, remux matrix included.
 //!
 //! Everything here is pure: no processes, no file system. The engine (T24)
-//! probes the input, hands the facts in as a [`Source`] and runs the passes.
+//! probes the input, hands the facts in as a [`Source`] along with the user's
+//! [`ConvertOptions`], and runs the passes.
 
 use std::ffi::{OsStr, OsString};
 use std::path::Path;
 
-use morphring_core::{Edge, EngineError, QualityLevel};
+use morphring_core::{ConvertOptions, Edge, EngineError, MediaQuality, QualityLevel, WavFormat};
 
 /// Video formats ffmpeg reads and writes in v0.1.0.
 pub const VIDEO_FORMATS: [&str; 5] = ["mp4", "webm", "mkv", "mov", "avi"];
@@ -104,6 +105,8 @@ pub struct VideoSource<'a> {
     pub width: u32,
     /// Stored height in pixels (before rotation), 0 when unknown.
     pub height: u32,
+    /// Height as displayed (the stored width for a portrait phone clip), 0 when unknown.
+    pub display_height: u32,
     /// Average frame rate, `None` when unknown.
     pub fps: Option<f64>,
 }
@@ -117,6 +120,21 @@ pub struct AudioSource<'a> {
     pub codec_tag: Option<&'a str>,
     /// Channel count, 0 when unknown.
     pub channels: u32,
+}
+
+/// The quality bucket a conversion encodes at.
+///
+/// The command line's `-q` wins when it is given; otherwise the preset's media
+/// quality decides (Balanced is what everyone else calls Normal).
+pub fn quality_of(options: &ConvertOptions) -> QualityLevel {
+    if options.quality.is_some() {
+        return options.quality_level();
+    }
+    match options.media.quality {
+        MediaQuality::High => QualityLevel::High,
+        MediaQuality::Balanced => QualityLevel::Normal,
+        MediaQuality::Small => QualityLevel::Small,
+    }
 }
 
 /// One run of ffmpeg.
@@ -167,7 +185,8 @@ fn target_spec(format: &str) -> Option<Target> {
 /// The ffmpeg runs that turn `input` into `output` in format `to`.
 ///
 /// `palette` is a scratch path for the GIF colour palette; it is only used
-/// when `to` is `gif` and should sit in the job's work directory.
+/// when `to` is `gif` and should sit in the job's work directory. Of the
+/// options, GIFs and poster frames only care about the quality.
 ///
 /// # Errors
 ///
@@ -177,14 +196,14 @@ pub fn plan(
     input: &Path,
     output: &Path,
     to: &str,
-    quality: QualityLevel,
+    options: &ConvertOptions,
     source: &Source<'_>,
     palette: &Path,
 ) -> Result<Vec<FfmpegPass>, EngineError> {
     let single = |args| vec![FfmpegPass { args, weight: 1.0 }];
     match to {
         "gif" => {
-            let [first, second] = gif_args(input, output, quality, source, palette)?;
+            let [first, second] = gif_args(input, output, quality_of(options), source, palette)?;
             Ok(vec![
                 FfmpegPass {
                     args: first,
@@ -199,9 +218,9 @@ pub fn plan(
         "png" => Ok(single(poster_args(input, output, source)?)),
         _ => match target_spec(to) {
             Some(spec) if spec.video.is_some() => {
-                Ok(single(video_args(input, output, to, quality, source)?))
+                Ok(single(video_args(input, output, to, options, source)?))
             }
-            Some(_) => Ok(single(audio_args(input, output, to, quality, source)?)),
+            Some(_) => Ok(single(audio_args(input, output, to, options, source)?)),
             None => Err(EngineError::Failed(format!("FFmpeg cannot write '{to}'."))),
         },
     }
@@ -251,10 +270,15 @@ pub fn video_args(
     input: &Path,
     output: &Path,
     to: &str,
-    quality: QualityLevel,
+    options: &ConvertOptions,
     source: &Source<'_>,
 ) -> Result<Vec<OsString>, EngineError> {
     let video = source.video.as_ref().ok_or_else(no_video)?;
+    let quality = quality_of(options);
+    let media = &options.media;
+    // Asked to drop the soundtrack: as far as the rest of this function is
+    // concerned, there never was one.
+    let audio = source.audio.as_ref().filter(|_| !media.remove_audio);
     let spec = target_spec(to)
         .filter(|s| s.video.is_some())
         .ok_or_else(|| EngineError::Failed(format!("'{to}' is not a video format.")))?;
@@ -264,29 +288,37 @@ pub fn video_args(
     // 0:V (capital V) skips attached cover pictures, which ffmpeg otherwise
     // happily treats as a one-frame "video" stream.
     a.push("-i").push(input).extend(["-map", "0:V:0"]);
-    if source.audio.is_some() {
+    if audio.is_some() {
         a.extend(["-map", "0:a:0"]);
     }
 
-    if can_copy_video(to, video, quality) {
+    let shrink = needs_downscale(video, media.max_height);
+    if !shrink && can_copy_video(to, video, quality) {
         a.extend(["-c:v", "copy"]);
         a.extend(copy_tag(to, video));
     } else {
-        a.push("-vf").push(scale_filter());
+        let filter = if media.max_height > 0 {
+            downscale_filter(media.max_height)
+        } else {
+            scale_filter().to_owned()
+        };
+        a.push("-vf").push(filter);
         a.extend(video_codec_args(video_codec, quality, video));
     }
 
-    match &source.audio {
+    let overrides = AudioOverrides::from(media);
+    match audio {
         None => {
             a.push("-an");
         }
-        // Not wired to the user's bitrate and channel settings yet, so no overrides:
-        // the soundtrack is copied whenever the container takes it as it is.
-        Some(audio) if can_copy_audio(to, audio, quality, AudioOverrides::default()) => {
+        Some(audio) if can_copy_audio(to, audio, quality, overrides) => {
             a.extend(["-c:a", "copy"]);
         }
         Some(audio) => {
-            a.extend(audio_codec_args(spec.audio, quality, audio.channels, true));
+            a.extend(audio_codec_args(
+                spec.audio, quality, audio, overrides, true,
+            ));
+            a.extend(channel_args(overrides));
         }
     }
 
@@ -397,6 +429,22 @@ pub struct AudioOverrides {
     pub channels: u32,
 }
 
+impl From<&morphring_core::MediaOptions> for AudioOverrides {
+    fn from(media: &morphring_core::MediaOptions) -> Self {
+        Self {
+            bitrate_kbps: media.audio_bitrate_kbps,
+            channels: media.audio_channels,
+        }
+    }
+}
+
+impl AudioOverrides {
+    /// The channel count the user forced, if any (only mono and stereo count).
+    fn forced_channels(self) -> Option<u32> {
+        matches!(self.channels, 1 | 2).then_some(self.channels)
+    }
+}
+
 /// True when the audio stream is copied as is: the quality is not `Small`, no
 /// bitrate is forced, the channel count stays what it is, and the target
 /// container takes the codec.
@@ -435,6 +483,28 @@ fn copy_tag(to: &str, video: &VideoSource<'_>) -> &'static [&'static str] {
         }
         _ => &[],
     }
+}
+
+/// Smallest height a downscale goes to: below this even a thumbnail gives up.
+const MIN_HEIGHT: u32 = 16;
+
+/// True when `max_height` asks for a smaller picture than the source has, so
+/// the video has to be re-encoded even if it could otherwise be copied.
+pub fn needs_downscale(video: &VideoSource<'_>, max_height: u32) -> bool {
+    let shown = if video.display_height > 0 {
+        video.display_height
+    } else {
+        video.height
+    };
+    max_height > 0 && shown > max_height.max(MIN_HEIGHT)
+}
+
+/// Scales the picture down to at most `max_height` lines (never up), keeping
+/// the aspect ratio. `-2` lets ffmpeg pick an even width, and the height is
+/// truncated to even too, for the same 4:2:0 reasons as [`scale_filter`].
+pub fn downscale_filter(max_height: u32) -> String {
+    let h = max_height.max(MIN_HEIGHT);
+    format!("scale=w=-2:h='trunc(min(ih,{h})/2)*2'")
 }
 
 /// Makes both sides even, which 4:2:0 encoders insist on (an odd-sized phone
@@ -577,9 +647,11 @@ pub fn audio_args(
     input: &Path,
     output: &Path,
     to: &str,
-    quality: QualityLevel,
+    options: &ConvertOptions,
     source: &Source<'_>,
 ) -> Result<Vec<OsString>, EngineError> {
+    let quality = quality_of(options);
+    let media = &options.media;
     let audio = source
         .audio
         .as_ref()
@@ -590,7 +662,18 @@ pub fn audio_args(
 
     let mut a = Args::new();
     a.push("-i").push(input).extend(["-map", "0:a:0"]);
-    a.extend(audio_codec_args(spec.audio, quality, audio.channels, false));
+    let codec = if to == "wav" {
+        wav_codec(media.wav_format)
+    } else {
+        spec.audio
+    };
+    let overrides = AudioOverrides::from(media);
+    a.extend(audio_codec_args(codec, quality, audio, overrides, false));
+    a.extend(channel_args(overrides));
+    // Resampling is a WAV-only knob: the lossy encoders pick their own rates.
+    if to == "wav" && (8000..=192_000).contains(&media.audio_sample_rate) {
+        a.push("-ar").push(media.audio_sample_rate.to_string());
+    }
     a.extend(metadata_args());
     a.extend(container_args(to));
     a.extend(["-f", spec.muxer, "-progress", "pipe:1"])
@@ -598,39 +681,77 @@ pub fn audio_args(
     Ok(a.finish())
 }
 
+/// The PCM codec for each WAV sample format.
+pub fn wav_codec(format: WavFormat) -> &'static str {
+    match format {
+        WavFormat::Pcm16 => "pcm_s16le",
+        // 8-bit WAV is unsigned, because 1991 said so.
+        WavFormat::Pcm8 => "pcm_u8",
+        WavFormat::Pcm24 => "pcm_s24le",
+        WavFormat::Pcm32 => "pcm_s32le",
+        WavFormat::Float32 => "pcm_f32le",
+    }
+}
+
+/// `-ac N` when the user forced mono or stereo, nothing otherwise.
+fn channel_args(overrides: AudioOverrides) -> Vec<String> {
+    overrides
+        .forced_channels()
+        .map(|n| vec!["-ac".to_owned(), n.to_string()])
+        .unwrap_or_default()
+}
+
 /// Encoder options for one audio codec. `in_video` switches MP3 to CBR,
-/// because VBR MP3 confuses AVI players' audio sync.
+/// because VBR MP3 confuses AVI players' audio sync. A requested bitrate
+/// replaces the quality's default; 0 means "you pick".
 fn audio_codec_args(
     codec: &str,
     quality: QualityLevel,
-    channels: u32,
+    audio: &AudioSource<'_>,
+    overrides: AudioOverrides,
     in_video: bool,
 ) -> Vec<String> {
-    let channels = if channels > 0 { channels } else { 2 };
+    // Bitrates scale with the channels that come out, not the ones that went in:
+    // a 5.1 film squeezed to stereo does not need 576 k.
+    let channels = overrides
+        .forced_channels()
+        .unwrap_or(if audio.channels > 0 {
+            audio.channels
+        } else {
+            2
+        });
+    let requested = (overrides.bitrate_kbps > 0).then_some(overrides.bitrate_kbps);
     let mut args = vec!["-c:a".to_owned(), codec.to_owned()];
     match codec {
         // Per stereo pair: 256 k is transparent, 192 excellent, 128 fine for speech.
         "aac" => args.extend(bitrate(
-            scaled(choose(quality, 256, 192, 128), channels),
+            requested.unwrap_or_else(|| scaled(choose(quality, 256, 192, 128), channels)),
             16,
             256 * channels,
         )),
         // Opus is transparent around 128 k for stereo; 64 is still decent for music.
         "libopus" => args.extend(bitrate(
-            scaled(choose(quality, 160, 128, 64), channels),
+            requested.unwrap_or_else(|| scaled(choose(quality, 160, 128, 64), channels)),
             6,
             256 * channels,
         )),
-        // CBR inside video, snapped to a bitrate the MP3 table actually has.
-        "libmp3lame" if in_video => args.extend(bitrate(
-            snap(choose(quality, 256, 192, 128), &MP3_BITRATES),
+        // CBR inside video or when a bitrate was asked for, snapped to a
+        // bitrate the MP3 table actually has.
+        "libmp3lame" if in_video || requested.is_some() => args.extend(bitrate(
+            snap(
+                requested.unwrap_or_else(|| choose(quality, 256, 192, 128)),
+                &MP3_BITRATES,
+            ),
             32,
             320,
         )),
         // LAME's VBR presets: V0 ~ 245, V2 ~ 190, V5 ~ 130 kbit/s.
         "libmp3lame" => args.extend(["-q:a".to_owned(), choose(quality, 0, 2, 5).to_string()]),
-        // Vorbis quality 6 ~ 192, 4 ~ 128, 2 ~ 96 kbit/s.
-        "libvorbis" => args.extend(["-q:a".to_owned(), choose(quality, 6, 4, 2).to_string()]),
+        "libvorbis" => match requested {
+            Some(kbps) => args.extend(bitrate(kbps, 32, 500)),
+            // Vorbis quality 6 ~ 192, 4 ~ 128, 2 ~ 96 kbit/s.
+            None => args.extend(["-q:a".to_owned(), choose(quality, 6, 4, 2).to_string()]),
+        },
         // flac and PCM are lossless: nothing to tune, nothing to break.
         _ => {}
     }
@@ -806,6 +927,7 @@ mod tests {
                 codec_tag: None,
                 width: 1920,
                 height: 1080,
+                display_height: 1080,
                 fps: Some(30.0),
             }),
             audio: Some(AudioSource {
@@ -829,8 +951,26 @@ mod tests {
         }
     }
 
+    /// Default options at one quality, set the way a preset sets it.
+    fn opts(quality: QualityLevel) -> ConvertOptions {
+        let mut options = ConvertOptions::default();
+        options.media.quality = match quality {
+            QualityLevel::High => MediaQuality::High,
+            QualityLevel::Normal => MediaQuality::Balanced,
+            QualityLevel::Small => MediaQuality::Small,
+        };
+        options
+    }
+
     fn video(to: &str, quality: QualityLevel, source: &Source<'_>) -> Vec<OsString> {
-        video_args(Path::new("in.mp4"), Path::new("out"), to, quality, source).unwrap()
+        video_args(
+            Path::new("in.mp4"),
+            Path::new("out"),
+            to,
+            &opts(quality),
+            source,
+        )
+        .unwrap()
     }
 
     fn edge(from: &str, to: &str) -> Option<u32> {
@@ -848,7 +988,7 @@ mod tests {
             Path::new("in.wav"),
             Path::new("out.mp3"),
             "mp3",
-            QualityLevel::Normal,
+            &opts(QualityLevel::Normal),
             &wav(),
         )
         .unwrap();
@@ -920,6 +1060,7 @@ mod tests {
             codec_tag: tag,
             width: 1920,
             height: 1080,
+            display_height: 1080,
             fps: Some(30.0),
         });
         source
@@ -943,7 +1084,7 @@ mod tests {
             Path::new("IMG_0042.MOV"),
             Path::new("out.mp4"),
             "mp4",
-            QualityLevel::Normal,
+            &opts(QualityLevel::Normal),
             &source,
         )
         .unwrap();
@@ -1227,7 +1368,7 @@ mod tests {
             Path::new("in.mp4"),
             Path::new("out.mov"),
             "mov",
-            QualityLevel::Small,
+            &opts(QualityLevel::Small),
             &source,
         )
         .unwrap();
@@ -1346,7 +1487,7 @@ mod tests {
                 Path::new("in.mp4"),
                 Path::new("out.gif"),
                 "gif",
-                q,
+                &opts(q),
                 &h264_mp4(),
                 Path::new("p.png"),
             )
@@ -1393,7 +1534,7 @@ mod tests {
                 }),
                 ..Source::default()
             };
-            audio_args(Path::new("a"), Path::new("b"), to, q, &source).unwrap()
+            audio_args(Path::new("a"), Path::new("b"), to, &opts(q), &source).unwrap()
         };
         assert!(has_pair(&run("mp3", QualityLevel::High, 2), "-q:a", "0"));
         assert!(has_pair(&run("mp3", QualityLevel::Small, 2), "-q:a", "5"));
@@ -1432,13 +1573,13 @@ mod tests {
             ..Source::default()
         };
         let p = Path::new("x");
-        assert!(plan(p, p, "mp3", QualityLevel::Normal, &silent, p).is_err());
-        assert!(plan(p, p, "mp4", QualityLevel::Normal, &wav(), p).is_err());
-        assert!(plan(p, p, "gif", QualityLevel::Normal, &wav(), p).is_err());
-        assert!(plan(p, p, "png", QualityLevel::Normal, &wav(), p).is_err());
-        assert!(plan(p, p, "docx", QualityLevel::Normal, &wav(), p).is_err());
+        assert!(plan(p, p, "mp3", &opts(QualityLevel::Normal), &silent, p).is_err());
+        assert!(plan(p, p, "mp4", &opts(QualityLevel::Normal), &wav(), p).is_err());
+        assert!(plan(p, p, "gif", &opts(QualityLevel::Normal), &wav(), p).is_err());
+        assert!(plan(p, p, "png", &opts(QualityLevel::Normal), &wav(), p).is_err());
+        assert!(plan(p, p, "docx", &opts(QualityLevel::Normal), &wav(), p).is_err());
         // A silent video is fine for a video target: it just gets -an.
-        let args = &plan(p, p, "webm", QualityLevel::Normal, &silent, p).unwrap()[0].args;
+        let args = &plan(p, p, "webm", &opts(QualityLevel::Normal), &silent, p).unwrap()[0].args;
         assert!(strs(args).contains(&"-an"));
     }
 
@@ -1477,5 +1618,246 @@ mod tests {
             );
             assert_ne!(e.from, FormatId::new(""));
         }
+    }
+
+    // ───────────── MediaOptions ─────────────
+
+    fn preset(id: &str) -> ConvertOptions {
+        let presets = morphring_core::builtin::presets();
+        morphring_core::preset::find(&presets, id)
+            .unwrap_or_else(|| panic!("no built-in preset {id}"))
+            .options()
+    }
+
+    fn audio_only(options: &ConvertOptions, to: &str, source: &Source<'_>) -> Vec<OsString> {
+        audio_args(Path::new("in"), Path::new("out"), to, options, source).unwrap()
+    }
+
+    #[test]
+    fn the_command_line_quality_beats_the_preset() {
+        let mut options = opts(QualityLevel::Small);
+        assert_eq!(quality_of(&options), QualityLevel::Small);
+        options.quality = Some(90);
+        assert_eq!(quality_of(&options), QualityLevel::High);
+        options.quality = Some(70);
+        assert_eq!(quality_of(&options), QualityLevel::Normal);
+        assert_eq!(quality_of(&opts(QualityLevel::High)), QualityLevel::High);
+        assert_eq!(quality_of(&ConvertOptions::default()), QualityLevel::Normal);
+    }
+
+    #[test]
+    fn mp4_720_preset_shrinks_a_1080p_clip() {
+        let options = preset("mp4-720");
+        let args = video_args(
+            Path::new("in.mp4"),
+            Path::new("out.mp4"),
+            "mp4",
+            &options,
+            &h264_mp4(),
+        )
+        .unwrap();
+        assert_eq!(
+            codec_part(&args),
+            [
+                "-vf",
+                "scale=w=-2:h='trunc(min(ih,720)/2)*2'",
+                "-c:v",
+                "libx264",
+                "-preset",
+                "medium",
+                "-crf",
+                "28",
+                "-pix_fmt",
+                "yuv420p",
+                "-c:a",
+                "aac",
+                "-b:a",
+                "128k",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_max_height_above_the_source_still_copies() {
+        let mut options = opts(QualityLevel::High);
+        options.media.max_height = 2160;
+        let args =
+            video_args(Path::new("i"), Path::new("o"), "mkv", &options, &h264_mp4()).unwrap();
+        assert_eq!(codec_part(&args), ["-c:v", "copy", "-c:a", "copy"]);
+        // Same height: nothing to shrink either.
+        options.media.max_height = 1080;
+        let args =
+            video_args(Path::new("i"), Path::new("o"), "mkv", &options, &h264_mp4()).unwrap();
+        assert!(has_pair(&args, "-c:v", "copy"));
+    }
+
+    #[test]
+    fn a_max_height_below_the_source_forces_a_re_encode() {
+        let mut options = opts(QualityLevel::High);
+        options.media.max_height = 480;
+        let args =
+            video_args(Path::new("i"), Path::new("o"), "mkv", &options, &h264_mp4()).unwrap();
+        assert!(has_pair(
+            &args,
+            "-vf",
+            "scale=w=-2:h='trunc(min(ih,480)/2)*2'"
+        ));
+        assert!(has_pair(&args, "-crf", "18"));
+        // The soundtrack doesn't care about pixels and is still copied.
+        assert!(has_pair(&args, "-c:a", "copy"));
+    }
+
+    #[test]
+    fn downscale_uses_the_displayed_height_and_a_floor() {
+        let mut portrait = h264_mp4().video.unwrap();
+        // A phone clip stored 1920x1080 and shown rotated is 1920 lines tall.
+        portrait.display_height = 1920;
+        assert!(needs_downscale(&portrait, 1080));
+        assert!(!needs_downscale(&portrait, 0));
+        assert!(!needs_downscale(&portrait, 1920));
+        portrait.display_height = 0;
+        assert!(!needs_downscale(&portrait, 1080));
+        assert_eq!(downscale_filter(4), "scale=w=-2:h='trunc(min(ih,16)/2)*2'");
+    }
+
+    #[test]
+    fn remove_audio_drops_the_soundtrack() {
+        let mut options = ConvertOptions::default();
+        options.media.remove_audio = true;
+        let args =
+            video_args(Path::new("i"), Path::new("o"), "mp4", &options, &h264_mp4()).unwrap();
+        assert_eq!(codec_part(&args), ["-c:v", "copy", "-an"]);
+        assert!(!strs(&args).contains(&"0:a:0"));
+    }
+
+    #[test]
+    fn audio_overrides_in_video_re_encode_the_soundtrack() {
+        let mut options = ConvertOptions::default();
+        options.media.audio_channels = 1;
+        let args =
+            video_args(Path::new("i"), Path::new("o"), "mkv", &options, &h264_mp4()).unwrap();
+        // Mono halves the stereo default.
+        assert_eq!(
+            codec_part(&args),
+            ["-c:v", "copy", "-c:a", "aac", "-b:a", "96k", "-ac", "1"]
+        );
+        options.media.audio_channels = 0;
+        options.media.audio_bitrate_kbps = 160;
+        let args =
+            video_args(Path::new("i"), Path::new("o"), "avi", &options, &h264_mp4()).unwrap();
+        assert!(has_pair(&args, "-c:a", "libmp3lame"));
+        assert!(has_pair(&args, "-b:a", "160k"));
+        // Sample rates are a WAV thing.
+        options.media.audio_sample_rate = 22050;
+        let args =
+            video_args(Path::new("i"), Path::new("o"), "mkv", &options, &h264_mp4()).unwrap();
+        assert!(!strs(&args).contains(&"-ar"));
+    }
+
+    #[test]
+    fn mp3_128_preset_pins_the_full_arg_list() {
+        let args = audio_args(
+            Path::new("in.wav"),
+            Path::new("out.mp3"),
+            "mp3",
+            &preset("mp3-128"),
+            &wav(),
+        )
+        .unwrap();
+        assert_eq!(
+            strs(&args),
+            [
+                "-hide_banner",
+                "-nostdin",
+                "-nostats",
+                "-v",
+                "error",
+                "-y",
+                "-i",
+                "in.wav",
+                "-map",
+                "0:a:0",
+                "-c:a",
+                "libmp3lame",
+                "-b:a",
+                "128k",
+                "-map_metadata",
+                "0",
+                "-metadata",
+                "major_brand=",
+                "-metadata",
+                "minor_version=",
+                "-metadata",
+                "compatible_brands=",
+                "-id3v2_version",
+                "3",
+                "-f",
+                "mp3",
+                "-progress",
+                "pipe:1",
+                "out.mp3",
+            ]
+        );
+    }
+
+    #[test]
+    fn requested_bitrates_are_snapped_and_clamped() {
+        let mut options = ConvertOptions::default();
+        let rate = |options: &ConvertOptions, to: &str| {
+            let args = audio_only(options, to, &wav());
+            let all = strs(&args);
+            let at = all.iter().position(|a| *a == "-b:a").unwrap();
+            all[at + 1].to_owned()
+        };
+        options.media.audio_bitrate_kbps = 130;
+        assert_eq!(rate(&options, "mp3"), "128k");
+        options.media.audio_bitrate_kbps = 999;
+        assert_eq!(rate(&options, "mp3"), "320k");
+        assert_eq!(rate(&options, "ogg"), "500k");
+        // AAC tops out at 256 k per channel: two of them here.
+        assert_eq!(rate(&options, "m4a"), "512k");
+        options.media.audio_bitrate_kbps = 2;
+        assert_eq!(rate(&options, "opus"), "6k");
+        assert_eq!(rate(&options, "ogg"), "32k");
+        // Lossless ignores the request instead of inventing a flag.
+        options.media.audio_bitrate_kbps = 128;
+        assert!(!strs(&audio_only(&options, "flac", &wav())).contains(&"-b:a"));
+    }
+
+    #[test]
+    fn wav_options_pick_the_codec_channels_and_rate() {
+        let mut options = ConvertOptions::default();
+        options.media.wav_format = WavFormat::Pcm24;
+        options.media.audio_channels = 1;
+        options.media.audio_sample_rate = 22050;
+        assert_eq!(
+            codec_part(&audio_only(&options, "wav", &wav())),
+            ["-c:a", "pcm_s24le", "-ac", "1", "-ar", "22050"]
+        );
+        // Out-of-range rates and channel counts are ignored, not passed on.
+        options.media.audio_channels = 6;
+        options.media.audio_sample_rate = 100;
+        options.media.wav_format = WavFormat::Float32;
+        assert_eq!(
+            codec_part(&audio_only(&options, "wav", &wav())),
+            ["-c:a", "pcm_f32le"]
+        );
+        assert_eq!(wav_codec(WavFormat::Pcm8), "pcm_u8");
+        assert_eq!(wav_codec(WavFormat::Pcm16), "pcm_s16le");
+        assert_eq!(wav_codec(WavFormat::Pcm32), "pcm_s32le");
+        // The rate is WAV only.
+        options.media.audio_sample_rate = 22050;
+        assert!(!strs(&audio_only(&options, "flac", &wav())).contains(&"-ar"));
+    }
+
+    #[test]
+    fn forced_mono_scales_the_default_bitrate() {
+        let mut options = opts(QualityLevel::High);
+        options.media.audio_channels = 1;
+        let args = audio_only(&options, "m4a", &wav());
+        assert_eq!(
+            codec_part(&args),
+            ["-c:a", "aac", "-b:a", "128k", "-ac", "1"]
+        );
     }
 }

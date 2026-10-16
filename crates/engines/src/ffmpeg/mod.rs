@@ -115,14 +115,7 @@ impl Converter for FfmpegEngine {
 
         let source = source_of(&info);
         // Fails for a missing stream before anything runs (no video for a GIF, say).
-        let passes = encoding::plan(
-            &input,
-            &staged,
-            to,
-            step.options.quality_level(),
-            &source,
-            &palette,
-        )?;
+        let passes = encoding::plan(&input, &staged, to, &step.options, &source, &palette)?;
 
         let reporter = Reporter::new(progress);
         let mut done = 0.0_f32;
@@ -179,6 +172,7 @@ fn source_of(info: &MediaInfo) -> Source<'_> {
             codec_tag: v.codec_tag.as_deref(),
             width: v.width,
             height: v.height,
+            display_height: v.display_height(),
             fps: (v.frame_rate > 0.0).then_some(v.frame_rate),
         }),
         audio: info.audio.as_ref().map(|a| AudioSource {

@@ -60,6 +60,14 @@ fn step(input: &Path, from: &'static str, to: &'static str, work: &Path) -> Step
     }
 }
 
+/// The options of a built-in preset, exactly as a job would run it.
+fn preset(id: &str) -> ConvertOptions {
+    let presets = morphring_core::builtin::presets();
+    morphring_core::preset::find(&presets, id)
+        .unwrap_or_else(|| panic!("no built-in preset {id}"))
+        .options()
+}
+
 fn folder(dir: &Path, input: &Path) -> Folder {
     Folder {
         dir: dir.to_path_buf(),
@@ -89,6 +97,24 @@ fn convert(
     (result, seen.into_inner())
 }
 
+/// Converts `input` with `options` and returns the written files.
+fn convert_with(
+    s: &Setup,
+    input: &Path,
+    from: &'static str,
+    to: &'static str,
+    options: ConvertOptions,
+) -> Result<Vec<PathBuf>, EngineError> {
+    let mut job = step(input, from, to, &s.work);
+    job.options = options;
+    FfmpegEngine::new().convert(
+        &job,
+        &mut folder(&s.out, input),
+        &|_| {},
+        &CancelToken::new(),
+    )
+}
+
 fn entries(dir: &Path) -> Vec<PathBuf> {
     std::fs::read_dir(dir)
         .unwrap_or_else(|e| panic!("read_dir {}: {e}", dir.display()))
@@ -103,6 +129,23 @@ fn entries(dir: &Path) -> Vec<PathBuf> {
 fn video_field(path: &Path, field: &str) -> String {
     let output = Command::new("ffprobe")
         .args(["-v", "error", "-select_streams", "v:0", "-count_frames"])
+        .args(["-show_entries", &format!("stream={field}")])
+        .args(["-of", "csv=p=0"])
+        .arg(path)
+        .output()
+        .unwrap_or_else(|e| panic!("failed to run ffprobe: {e}"));
+    assert!(
+        output.status.success(),
+        "ffprobe failed on {}",
+        path.display()
+    );
+    String::from_utf8_lossy(&output.stdout).trim().to_owned()
+}
+
+/// A field of the first audio stream, via ffprobe.
+fn audio_field(path: &Path, field: &str) -> String {
+    let output = Command::new("ffprobe")
+        .args(["-v", "error", "-select_streams", "a:0"])
         .args(["-show_entries", &format!("stream={field}")])
         .args(["-of", "csv=p=0"])
         .arg(path)
@@ -313,4 +356,86 @@ fn cancelling_mid_run_leaves_no_output() {
     assert!(entries(&s.out).is_empty(), "left: {:?}", entries(&s.out));
     // Only the generated input is left in the work dir, no scratch folder.
     assert_eq!(entries(&s.work), [input]);
+}
+
+#[test]
+fn max_height_shrinks_the_video_and_keeps_the_aspect() {
+    require_engine!("ffmpeg");
+    let s = setup();
+    let input = fixture("sample.mp4");
+    // The fixture is 64x64, so the 720p preset would leave it alone; same
+    // preset, smaller ceiling.
+    let mut options = preset("mp4-720");
+    options.media.max_height = 32;
+    let result = convert_with(&s, &input, "mp4", "mp4", options);
+    let expected = s.out.join("sample.mp4");
+    assert_single_output(&result.unwrap(), &expected);
+    assert_eq!(video_field(&expected, "width,height"), "32,32");
+    assert_eq!(video_field(&expected, "codec_name"), "h264");
+}
+
+#[test]
+fn max_height_never_upscales() {
+    require_engine!("ffmpeg");
+    let s = setup();
+    let input = fixture("sample.mp4");
+    let result = convert_with(&s, &input, "mp4", "mp4", preset("mp4-720"));
+    let expected = s.out.join("sample.mp4");
+    assert_single_output(&result.unwrap(), &expected);
+    assert_eq!(video_field(&expected, "width,height"), "64,64");
+}
+
+#[test]
+fn remove_audio_writes_a_silent_video() {
+    require_engine!("ffmpeg");
+    let s = setup();
+    let input = fixture("sample.mp4");
+    let mut options = ConvertOptions::default();
+    options.media.remove_audio = true;
+    let result = convert_with(&s, &input, "mp4", "mkv", options);
+    let expected = s.out.join("sample.mkv");
+    assert_single_output(&result.unwrap(), &expected);
+    assert_eq!(audio_field(&expected, "codec_name"), "");
+}
+
+#[test]
+fn mp3_128_preset_writes_128k_cbr() {
+    require_engine!("ffmpeg");
+    let s = setup();
+    // sample.wav is 8 kHz mono, and an 8 kHz MP3 (MPEG-2.5) tops out at
+    // 64 k, so LAME quietly hands back half of what we asked for. Lift the
+    // same clip to CD rate first so 128 k is actually on the menu (D6 lets
+    // test helpers run ffmpeg directly).
+    let input = s.work.join("sample.wav");
+    let made = Command::new("ffmpeg")
+        .args(["-v", "error", "-y", "-i"])
+        .arg(fixture("sample.wav"))
+        .args(["-ar", "44100", "-ac", "2"])
+        .arg(&input)
+        .status()
+        .unwrap();
+    assert!(made.success());
+    let result = convert_with(&s, &input, "wav", "mp3", preset("mp3-128"));
+    let expected = s.out.join("sample.mp3");
+    assert_single_output(&result.unwrap(), &expected);
+    assert_eq!(audio_field(&expected, "codec_name"), "mp3");
+    assert_eq!(audio_field(&expected, "bit_rate"), "128000");
+}
+
+#[test]
+fn wav_options_set_format_channels_and_rate() {
+    require_engine!("ffmpeg");
+    let s = setup();
+    let input = fixture("sample.wav");
+    let mut options = ConvertOptions::default();
+    options.media.wav_format = morphring_core::WavFormat::Pcm24;
+    options.media.audio_channels = 2;
+    options.media.audio_sample_rate = 16000;
+    let result = convert_with(&s, &input, "wav", "wav", options);
+    let expected = s.out.join("sample.wav");
+    assert_single_output(&result.unwrap(), &expected);
+    assert_eq!(
+        audio_field(&expected, "codec_name,sample_rate,channels"),
+        "pcm_s24le,16000,2"
+    );
 }
