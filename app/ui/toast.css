@@ -3,43 +3,43 @@
    palette as the settings and history windows. */
 :root {
   color-scheme: light dark;
-  --surface: #ffffff;
-  --border: rgba(0, 0, 0, 0.12);
-  --text: #1f1e1d;
-  --text-secondary: #6b6a66;
-  --track: #efede6;
-  --accent: #7f77dd;
-  --success: #3b8a5a;
-  --danger: #c73a39;
-  --button: #efede6;
-  --button-hover: #e4e1d8;
+  --surface: #faf7f0;
+  --border: rgba(14, 14, 14, 0.13);
+  --text: #0e0e0e;
+  --text-secondary: #5f5a52;
+  --track: #e8e1d2;
+  --accent: #f04a35;
+  --success: #0f7a5a;
+  --danger: #b8321f;
+  --button: #e8e1d2;
+  --button-hover: #ddd5c4;
   font-family: "Noto Sans", system-ui, sans-serif;
 }
 
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
-    --surface: #262624;
-    --border: rgba(255, 255, 255, 0.14);
-    --text: #f1efe8;
-    --text-secondary: #aeaca4;
-    --track: #31312e;
-    --success: #7cc79a;
-    --danger: #f09595;
-    --button: #31312e;
-    --button-hover: #3b3b38;
+    --surface: #1a1917;
+    --border: rgba(241, 236, 223, 0.14);
+    --text: #f1ecdf;
+    --text-secondary: #a8a297;
+    --track: #26241f;
+    --success: #5dcaa5;
+    --danger: #ff8f80;
+    --button: #26241f;
+    --button-hover: #322f29;
   }
 }
 
 :root[data-theme="dark"] {
-  --surface: #262624;
-  --border: rgba(255, 255, 255, 0.14);
-  --text: #f1efe8;
-  --text-secondary: #aeaca4;
-  --track: #31312e;
-  --success: #7cc79a;
-  --danger: #f09595;
-  --button: #31312e;
-  --button-hover: #3b3b38;
+  --surface: #1a1917;
+  --border: rgba(241, 236, 223, 0.14);
+  --text: #f1ecdf;
+  --text-secondary: #a8a297;
+  --track: #26241f;
+  --success: #5dcaa5;
+  --danger: #ff8f80;
+  --button: #26241f;
+  --button-hover: #322f29;
 }
 
 * {

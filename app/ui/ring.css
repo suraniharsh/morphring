@@ -2,35 +2,44 @@
    see-through: the window is transparent and only the donut should show. */
 :root {
   color-scheme: light dark;
-  --surface: #ffffff;
-  --border-subtle: rgba(0, 0, 0, 0.086);
-  --text: #1f1e1d;
-  --text-secondary: #6b6a66;
-  --danger: #c73a39;
+  --surface: #faf7f0;
+  --border-subtle: rgba(14, 14, 14, 0.09);
+  --text: #0e0e0e;
+  --text-secondary: #5f5a52;
+  --danger: #b8321f;
   --success: #0f7a5a;
-  --accent: #7f77dd;
-  --on-accent: #ffffff;
+  --accent: #f04a35;
+  --on-accent: #f1ecdf;
   --shadow: 0 1px 3px rgba(0, 0, 0, 0.07), 0 6px 18px rgba(0, 0, 0, 0.05);
+  /* The donut itself ignores light/dark: cream slices, an ink hole, one
+     loud slice. Same in every theme, like a good logo. */
+  --slice: #f1ecdf;
+  --slice-gap: #0e0e0e;
+  --slice-text: #0e0e0e;
+  --slice-text-secondary: #6b655b;
+  --hub: #0e0e0e;
+  --hub-text: #f1ecdf;
+  --hub-text-secondary: #a8a297;
 }
 
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
-    --surface: #262624;
-    --border-subtle: rgba(255, 255, 255, 0.11);
-    --text: #f1efe8;
-    --text-secondary: #aeaca4;
-    --danger: #f09595;
+    --surface: #1a1917;
+    --border-subtle: rgba(241, 236, 223, 0.1);
+    --text: #f1ecdf;
+    --text-secondary: #a8a297;
+    --danger: #ff8f80;
     --success: #5dcaa5;
     --shadow: 0 1px 3px rgba(0, 0, 0, 0.25), 0 8px 24px rgba(0, 0, 0, 0.2);
   }
 }
 
 :root[data-theme="dark"] {
-  --surface: #262624;
-  --border-subtle: rgba(255, 255, 255, 0.11);
-  --text: #f1efe8;
-  --text-secondary: #aeaca4;
-  --danger: #f09595;
+  --surface: #1a1917;
+  --border-subtle: rgba(241, 236, 223, 0.1);
+  --text: #f1ecdf;
+  --text-secondary: #a8a297;
+  --danger: #ff8f80;
   --success: #5dcaa5;
   --shadow: 0 1px 3px rgba(0, 0, 0, 0.25), 0 8px 24px rgba(0, 0, 0, 0.2);
 }
@@ -67,8 +76,8 @@ body {
 }
 
 .wedge {
-  fill: var(--surface);
-  stroke: var(--border-subtle);
+  fill: var(--slice);
+  stroke: var(--slice-gap);
   stroke-width: 1;
 }
 
@@ -80,17 +89,17 @@ body {
 .slice-label {
   font-size: 13px;
   font-weight: 600;
-  fill: var(--text);
+  fill: var(--slice-text);
 }
 
 .slice-caption {
   font-size: 10.5px;
   font-weight: 400;
-  fill: var(--text-secondary);
+  fill: var(--slice-text-secondary);
 }
 
 .slice.disabled .slice-label {
-  fill: var(--text-secondary);
+  fill: var(--slice-text-secondary);
 }
 
 .slice.hot .slice-label,
@@ -100,21 +109,21 @@ body {
 
 .hole,
 .plate {
-  fill: var(--surface);
-  stroke: var(--border-subtle);
+  fill: var(--hub);
+  stroke: var(--slice-gap);
   stroke-width: 1;
 }
 
 .hub-title {
   font-size: 14px;
   font-weight: 600;
-  fill: var(--text);
+  fill: var(--hub-text);
 }
 
 .hub-subtitle {
   font-size: 11.5px;
   font-weight: 400;
-  fill: var(--text-secondary);
+  fill: var(--hub-text-secondary);
 }
 
 .track {
@@ -145,13 +154,13 @@ body {
 }
 
 #ring.cancelling .percent {
-  fill: var(--text-secondary);
+  fill: var(--hub-text-secondary);
 }
 
 .percent {
   font-size: 15px;
   font-weight: 600;
-  fill: var(--text);
+  fill: var(--hub-text);
 }
 
 .badge-disc {

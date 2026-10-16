@@ -2,15 +2,15 @@
    element rules stay polite). Same "Soft" palette as the drop zone. */
 :root {
   color-scheme: light dark;
-  --page: #f6f5f1;
-  --surface: #ffffff;
-  --surface-alt: #efede6;
-  --border: rgba(0, 0, 0, 0.12);
-  --text: #1f1e1d;
-  --text-secondary: #6b6a66;
-  --danger: #c73a39;
-  --accent: #7f77dd;
-  --accent-soft: rgba(127, 119, 221, 0.18);
+  --page: #f1ecdf;
+  --surface: #faf7f0;
+  --surface-alt: #e8e1d2;
+  --border: rgba(14, 14, 14, 0.13);
+  --text: #0e0e0e;
+  --text-secondary: #5f5a52;
+  --danger: #b8321f;
+  --accent: #f04a35;
+  --accent-soft: rgba(240, 74, 53, 0.18);
   --radius: 12px;
   --radius-small: 8px;
   font-family: "Noto Sans", system-ui, sans-serif;
@@ -18,24 +18,24 @@
 
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
-    --page: #1b1b19;
-    --surface: #262624;
-    --surface-alt: #31312e;
-    --border: rgba(255, 255, 255, 0.14);
-    --text: #f1efe8;
-    --text-secondary: #aeaca4;
-    --danger: #f09595;
+    --page: #0e0e0e;
+    --surface: #1a1917;
+    --surface-alt: #26241f;
+    --border: rgba(241, 236, 223, 0.14);
+    --text: #f1ecdf;
+    --text-secondary: #a8a297;
+    --danger: #ff8f80;
   }
 }
 
 :root[data-theme="dark"] {
-  --page: #1b1b19;
-  --surface: #262624;
-  --surface-alt: #31312e;
-  --border: rgba(255, 255, 255, 0.14);
-  --text: #f1efe8;
-  --text-secondary: #aeaca4;
-  --danger: #f09595;
+  --page: #0e0e0e;
+  --surface: #1a1917;
+  --surface-alt: #26241f;
+  --border: rgba(241, 236, 223, 0.14);
+  --text: #f1ecdf;
+  --text-secondary: #a8a297;
+  --danger: #ff8f80;
 }
 
 * {

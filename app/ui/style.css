@@ -1,18 +1,18 @@
-/* Filee's "Soft" palette (Styles/Soft.axaml), accent #7F77DD with its derived
-   tokens worked out by hand from ThemeService's formulas. */
+/* MorphRing's own plate: ink #0e0e0e, cream #f1ecdf and one tomato-red
+   slice, #f04a35. Anything else is a shade of those three. */
 :root {
   color-scheme: light dark;
-  --page: #f6f5f1;
-  --surface: #ffffff;
-  --surface-alt: #efede6;
-  --border-subtle: rgba(0, 0, 0, 0.086);
-  --text: #1f1e1d;
-  --text-secondary: #6b6a66;
-  --danger: #c73a39;
-  --accent: #7f77dd;
-  --accent-soft: rgba(127, 119, 221, 0.18);
-  --accent-faint: rgba(127, 119, 221, 0.09);
-  --accent-strong: #5f59a6;
+  --page: #f1ecdf;
+  --surface: #faf7f0;
+  --surface-alt: #e8e1d2;
+  --border-subtle: rgba(14, 14, 14, 0.09);
+  --text: #0e0e0e;
+  --text-secondary: #5f5a52;
+  --danger: #b8321f;
+  --accent: #f04a35;
+  --accent-soft: rgba(240, 74, 53, 0.18);
+  --accent-faint: rgba(240, 74, 53, 0.09);
+  --accent-strong: #c93a28;
   --radius: 16px;
   --radius-small: 9px;
   --radius-large: 22px;
@@ -21,25 +21,25 @@
 
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
-    --page: #1b1b19;
-    --surface: #262624;
-    --surface-alt: #31312e;
-    --border-subtle: rgba(255, 255, 255, 0.11);
-    --text: #f1efe8;
-    --text-secondary: #aeaca4;
-    --danger: #f09595;
+    --page: #0e0e0e;
+    --surface: #1a1917;
+    --surface-alt: #26241f;
+    --border-subtle: rgba(241, 236, 223, 0.1);
+    --text: #f1ecdf;
+    --text-secondary: #a8a297;
+    --danger: #ff8f80;
     --shadow: 0 1px 3px rgba(0, 0, 0, 0.25), 0 8px 24px rgba(0, 0, 0, 0.2);
   }
 }
 
 :root[data-theme="dark"] {
-  --page: #1b1b19;
-  --surface: #262624;
-  --surface-alt: #31312e;
-  --border-subtle: rgba(255, 255, 255, 0.11);
-  --text: #f1efe8;
-  --text-secondary: #aeaca4;
-  --danger: #f09595;
+  --page: #0e0e0e;
+  --surface: #1a1917;
+  --surface-alt: #26241f;
+  --border-subtle: rgba(241, 236, 223, 0.1);
+  --text: #f1ecdf;
+  --text-secondary: #a8a297;
+  --danger: #ff8f80;
   --shadow: 0 1px 3px rgba(0, 0, 0, 0.25), 0 8px 24px rgba(0, 0, 0, 0.2);
 }
 

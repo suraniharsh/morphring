@@ -558,7 +558,7 @@
       place(el.g, t.rotate, t.scale, t.dx, t.dy, t.opacity);
       if (el.accent) {
         const enabled = model.slices[i].enabled;
-        el.accent.setAttribute("opacity", M.num(enabled ? 0.82 * M.clamp(h, 0, 1) : 0));
+        el.accent.setAttribute("opacity", M.num(enabled ? M.clamp(h, 0, 1) : 0));
         el.g.classList.toggle("hot", enabled && i === hoverIndex);
       }
     });
@@ -593,7 +593,7 @@
         }
         setVisible(el.g, true);
         place(el.g, c * 0.25, 1 - 0.8 * c, 0, 0, 1 - c);
-        if (el.accent) el.accent.setAttribute("opacity", i === chosen ? "0.8" : "0");
+        if (el.accent) el.accent.setAttribute("opacity", i === chosen ? "1" : "0");
         el.g.classList.toggle("hot", i === chosen);
       });
       hole.setAttribute("r", M.num(HOLE_R + (PLATE_R - HOLE_R) * M.easeInCubic(all)));
