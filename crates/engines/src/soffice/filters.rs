@@ -424,7 +424,12 @@ mod tests {
             "--nodefault",
             "--nolockcheck",
             "--nofirststartwizard",
-            "-env:UserInstallation=file:///data/libreoffice-profiles/worker-0/",
+            // Absolute, so it gains a drive letter on Windows; its exact
+            // spelling is user_installation_is_an_encoded_file_uri's job.
+            &format!(
+                "-env:UserInstallation={}",
+                profile_url(Path::new("/data/libreoffice-profiles/worker-0"))
+            ),
             "--convert-to",
             "pdf:writer_pdf_Export",
             "--outdir",

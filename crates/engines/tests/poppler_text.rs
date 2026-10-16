@@ -77,6 +77,8 @@ fn the_engine_offers_pdf_to_txt_at_cost_ten() {
 #[test]
 fn sample_pdf_becomes_utf8_text_with_a_bom() {
     require_engine!("pdftotext");
+    // Git for Windows ships a lone pdftotext; the engine wants all of Poppler.
+    require_engine!("pdftoppm");
     let dir = tempfile::tempdir().unwrap();
     let written = convert(fixture("sample.pdf"), dir.path(), false).unwrap();
     assert_eq!(written, [dir.path().join("result.txt")]);
@@ -99,6 +101,8 @@ fn sample_pdf_becomes_utf8_text_with_a_bom() {
 #[test]
 fn a_pdf_without_text_fails_with_filees_message() {
     require_engine!("pdftotext");
+    // Git for Windows ships a lone pdftotext; the engine wants all of Poppler.
+    require_engine!("pdftoppm");
     let dir = tempfile::tempdir().unwrap();
     let err = convert(blank_pdf(dir.path()), dir.path(), false).unwrap_err();
     assert_eq!(
@@ -111,6 +115,8 @@ fn a_pdf_without_text_fails_with_filees_message() {
 #[test]
 fn a_missing_input_fails_without_output() {
     require_engine!("pdftotext");
+    // Git for Windows ships a lone pdftotext; the engine wants all of Poppler.
+    require_engine!("pdftoppm");
     let dir = tempfile::tempdir().unwrap();
     let err = convert(dir.path().join("nope.pdf"), dir.path(), false).unwrap_err();
     assert!(err.to_string().starts_with("pdftotext "), "{err}");
@@ -120,6 +126,8 @@ fn a_missing_input_fails_without_output() {
 #[test]
 fn a_skipped_output_writes_nothing() {
     require_engine!("pdftotext");
+    // Git for Windows ships a lone pdftotext; the engine wants all of Poppler.
+    require_engine!("pdftoppm");
     let dir = tempfile::tempdir().unwrap();
     let written = convert(fixture("sample.pdf"), dir.path(), true).unwrap();
     assert!(written.is_empty());
@@ -129,6 +137,8 @@ fn a_skipped_output_writes_nothing() {
 #[test]
 fn a_cancelled_job_does_not_start() {
     require_engine!("pdftotext");
+    // Git for Windows ships a lone pdftotext; the engine wants all of Poppler.
+    require_engine!("pdftoppm");
     let dir = tempfile::tempdir().unwrap();
     let cancel = CancelToken::new();
     cancel.cancel();

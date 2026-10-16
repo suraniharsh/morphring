@@ -334,7 +334,13 @@ mod tests {
     #[test]
     fn unicode_spaces_and_quotes_survive() {
         let dir = tempfile::tempdir().unwrap();
-        let file = touch(dir.path(), "보고서 \"final\" v2.docx");
+        // Windows forbids " in file names, so it gets curly quotes, which it allows.
+        let name = if cfg!(windows) {
+            "보고서 “final” v2.docx"
+        } else {
+            "보고서 \"final\" v2.docx"
+        };
+        let file = touch(dir.path(), name);
         let cmd = parse(&["--convert", file.to_str().unwrap()], Path::new("/"));
         assert_eq!(cmd.convert, vec![file]);
     }

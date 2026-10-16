@@ -138,7 +138,13 @@ mod tests {
     #[test]
     fn keeps_unicode_and_spaces_in_names() {
         let dir = tempfile::tempdir().unwrap();
-        let file = touch(dir.path(), "보고서 \"final\" v2.docx");
+        // Windows forbids " in file names, so it gets curly quotes, which it allows.
+        let name = if cfg!(windows) {
+            "보고서 “final” v2.docx"
+        } else {
+            "보고서 \"final\" v2.docx"
+        };
+        let file = touch(dir.path(), name);
         let drop = accept_drop(&[&file]);
         assert_eq!(drop.files, vec![file.clone()]);
         let payload = DroppedFiles::from(&drop);

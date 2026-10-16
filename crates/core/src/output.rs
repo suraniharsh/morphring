@@ -360,6 +360,12 @@ mod tests {
     use std::sync::Barrier;
     use tempfile::TempDir;
 
+    /// `path` the way the resolver spells it: `/x/a.png` is drive-relative
+    /// on Windows and comes back as `D:\x\a.png`, depending on the drive.
+    fn abs(path: &str) -> PathBuf {
+        std::path::absolute(path).unwrap()
+    }
+
     fn now() -> NaiveDateTime {
         NaiveDate::from_ymd_opt(2026, 9, 30)
             .unwrap()
@@ -618,7 +624,7 @@ mod tests {
 
     #[test]
     fn a_reserved_name_is_numbered_under_every_policy() {
-        let reserved: HashSet<PathBuf> = [PathBuf::from("/x/a.png")].into();
+        let reserved: HashSet<PathBuf> = [abs("/x/a.png")].into();
         for policy in POLICIES {
             let path = resolve(
                 &rule(policy),
@@ -628,7 +634,7 @@ mod tests {
                 &never,
                 &reserved,
             );
-            assert_eq!(path, Some(PathBuf::from("/x/a (2).png")), "{policy:?}");
+            assert_eq!(path, Some(abs("/x/a (2).png")), "{policy:?}");
         }
     }
 
@@ -638,7 +644,7 @@ mod tests {
         let source = PathBuf::from("/x/Photo.JPG");
         for policy in POLICIES {
             let path = resolve(&rule(policy), &tokens(&source), "jpg", "", &never, &none());
-            assert_eq!(path, Some(PathBuf::from("/x/Photo (2).jpg")), "{policy:?}");
+            assert_eq!(path, Some(abs("/x/Photo (2).jpg")), "{policy:?}");
         }
     }
 
@@ -748,7 +754,7 @@ mod tests {
             &never,
             &none(),
         );
-        assert_eq!(path, Some(PathBuf::from("/x/{preset}.png")));
+        assert_eq!(path, Some(abs("/x/{preset}.png")));
     }
 
     #[test]
@@ -758,7 +764,7 @@ mod tests {
             ..OutputRule::default()
         };
         let path = resolve(&rule, &tokens("/x/a.jpg"), "png", "", &never, &none());
-        assert_eq!(path, Some(PathBuf::from("/x/a.png")));
+        assert_eq!(path, Some(abs("/x/a.png")));
         assert!(!OutputRule::default().keep_dates);
     }
 

@@ -74,7 +74,12 @@ fn output_folder_is_flat_and_conflicts_follow_the_policy() {
     // Default policy: the second run adds a number.
     let r = run_in(tmp.path(), png_to_jpg(), &base);
     assert_eq!(r.code, 0);
-    assert!(r.out.contains("-> out/a (2).jpg"), "{}", r.out);
+    // The report prints native separators; compare in Unix spelling.
+    assert!(
+        r.out.replace('\\', "/").contains("-> out/a (2).jpg"),
+        "{}",
+        r.out
+    );
     assert!(out.join("a (2).jpg").is_file());
 
     // --skip leaves things be and still counts as success.

@@ -300,7 +300,14 @@ fn case_distinct_inputs_are_both_converted_and_exact_duplicates_are_removed() {
 fn unicode_spaces_and_quotes_stay_in_a_single_input_argument() {
     require_engine!("magick");
     let tmp = TempDir::new().unwrap();
-    let source = png(tmp.path(), "한글 report's \"quoted\" 100%.png");
+    // Windows forbids " in file names; curly quotes are allowed there and
+    // still need quoting on a command line.
+    let name = if cfg!(windows) {
+        "한글 report's “quoted” 100%.png"
+    } else {
+        "한글 report's \"quoted\" 100%.png"
+    };
+    let source = png(tmp.path(), name);
     let out = tmp.path().join("결과 output's");
 
     let r = run(
