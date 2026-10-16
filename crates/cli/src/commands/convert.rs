@@ -1,16 +1,19 @@
 //! `morphring convert`, ported from `ConvertAsync`, `RunJobAsync` and
-//! `ResolvePreset` in Filee's `src/Filee.Cli/Cli.cs`.
+//! `ResolvePreset` in Filee's `src/Filee.Cli/Cli.cs`. Turning the flags into a
+//! job lives in [`crate::resolve`]; this file runs it and reports.
 
 use std::path::Path;
 use std::sync::mpsc;
 use std::thread;
 
 use morphring_core::job::{self, JobEvent};
-use morphring_core::output::{ConflictPolicy, OutputLocation, OutputRule};
-use morphring_core::{ConvertOptions, Converter, FileResult, FileState, Target, formats};
+use morphring_core::profiles::Library;
+use morphring_core::settings::Store;
+use morphring_core::{Converter, FileResult, FileState, formats};
 
 use crate::args::ConvertArgs;
 use crate::ctx::Ctx;
+use crate::resolve::{self, JobSpec};
 use crate::{EXIT_USAGE, inputs, report};
 
 /// Exit code when some file failed or was cancelled (Filee's `SomeFailed`).
@@ -21,31 +24,30 @@ const EXIT_NOTHING_TO_DO: i32 = 3;
 
 /// Runs `morphring convert` and returns the exit code.
 pub fn run(args: &ConvertArgs, ctx: &mut Ctx) -> i32 {
-    // lib.rs already insisted on exactly one of --to and --preset, and --preset
-    // isn't wired up until P2-41, so a missing --to can only mean a caller
-    // skipped the front door. Say the same thing the front door would have.
-    let Some(to) = args.to.as_deref() else {
-        let _ = writeln!(
-            ctx.err,
-            "morphring: Use either --to <format> or --preset <preset>."
-        );
-        return EXIT_USAGE;
+    // Settings and presets come from the same folder the app uses, so a
+    // preset made in the ring is one `--preset` away. No folder, no problem:
+    // the built-ins and factory settings step in.
+    let store = Store::new(ctx.config_dir.clone());
+    let library = Library::load(&store);
+    let settings = store.load_settings();
+    let spec = match resolve::job_from_args(
+        args.to.as_deref(),
+        args.preset.as_deref(),
+        args.quality,
+        args.overwrite,
+        args.skip,
+        args.keep_dates,
+        args.output.as_deref(),
+        &ctx.cwd,
+        &library,
+        &settings,
+    ) {
+        Ok(spec) => spec,
+        Err(e) => {
+            let _ = writeln!(ctx.err, "morphring: {e}");
+            return EXIT_USAGE;
+        }
     };
-    let Some(target) = formats::lookup_target(to) else {
-        let _ = writeln!(
-            ctx.err,
-            "morphring: unknown format '{to}'. Run 'morphring formats' for the list."
-        );
-        return EXIT_USAGE;
-    };
-    if !target.writable {
-        let _ = writeln!(
-            ctx.err,
-            "morphring: MorphRing reads {} but can't write it.",
-            target.name
-        );
-        return EXIT_USAGE;
-    }
 
     // Folders only pick up files we recognise; explicitly named files go in
     // regardless, so the job can tell the user *why* it can't convert them.
@@ -69,11 +71,12 @@ pub fn run(args: &ConvertArgs, ctx: &mut Ctx) -> i32 {
         return EXIT_NOTHING_TO_DO;
     }
 
-    let rule = output_rule(args, &ctx.cwd);
-    let options = ConvertOptions {
-        quality: args.quality,
-        ..Default::default()
-    };
+    let JobSpec {
+        target,
+        options,
+        rule,
+        label,
+    } = spec;
     let engines: Vec<&dyn Converter> = ctx.engines.iter().map(|e| e.as_ref()).collect();
     let cancel = ctx.cancel.clone();
 
@@ -100,7 +103,7 @@ pub fn run(args: &ConvertArgs, ctx: &mut Ctx) -> i32 {
             };
             job::run_job(
                 &expanded.files,
-                Target::Format(target.id),
+                target,
                 &options,
                 &rule,
                 &engines,
@@ -126,7 +129,7 @@ pub fn run(args: &ConvertArgs, ctx: &mut Ctx) -> i32 {
     };
 
     if args.json {
-        if let Err(e) = report::write_json(ctx.out, target.id.as_str(), &results, &ctx.cwd) {
+        if let Err(e) = report::write_json(ctx.out, &label, &results, &ctx.cwd) {
             let _ = writeln!(ctx.err, "morphring: cannot write the report: {e}");
             return EXIT_SOME_FAILED;
         }
@@ -138,99 +141,5 @@ pub fn run(args: &ConvertArgs, ctx: &mut Ctx) -> i32 {
         0
     } else {
         EXIT_SOME_FAILED
-    }
-}
-
-/// Where outputs go and what happens when a name is taken. `-o` is flat: every
-/// output lands straight in that folder, like Filee's `UseFolder`.
-fn output_rule(args: &ConvertArgs, cwd: &Path) -> OutputRule {
-    let location = match &args.output {
-        // join keeps an absolute -o as is and anchors a relative one at cwd,
-        // never at whatever folder the process happens to be sitting in.
-        Some(dir) => OutputLocation::CustomFolder {
-            path: cwd.join(dir),
-            keep_folders_from: None,
-        },
-        None => OutputLocation::SameFolder,
-    };
-    let conflict = if args.overwrite {
-        ConflictPolicy::Overwrite
-    } else if args.skip {
-        ConflictPolicy::Skip
-    } else {
-        ConflictPolicy::Rename
-    };
-    OutputRule {
-        location,
-        conflict,
-        ..OutputRule::default()
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use std::ffi::OsString;
-    use std::path::PathBuf;
-
-    use super::*;
-
-    fn args(extra: &[&str]) -> ConvertArgs {
-        ConvertArgs {
-            inputs: vec![OsString::from("a.png")],
-            to: Some("jpg".into()),
-            preset: None,
-            output: extra
-                .iter()
-                .position(|a| *a == "-o")
-                .map(|i| PathBuf::from(extra[i + 1])),
-            recursive: false,
-            quality: None,
-            overwrite: extra.contains(&"--overwrite"),
-            skip: extra.contains(&"--skip"),
-            json: false,
-            quiet: false,
-            keep_dates: false,
-        }
-    }
-
-    #[test]
-    fn default_rule_is_same_folder_with_rename() {
-        let rule = output_rule(&args(&[]), Path::new("/work"));
-        assert_eq!(rule.location, OutputLocation::SameFolder);
-        assert_eq!(rule.conflict, ConflictPolicy::Rename);
-        assert_eq!(rule.pattern, OutputRule::default().pattern);
-    }
-
-    #[test]
-    fn output_folder_is_flat_and_anchored_at_cwd() {
-        let rule = output_rule(&args(&["-o", "out"]), Path::new("/work"));
-        assert_eq!(
-            rule.location,
-            OutputLocation::CustomFolder {
-                path: PathBuf::from("/work/out"),
-                keep_folders_from: None
-            }
-        );
-        let rule = output_rule(&args(&["-o", "/abs"]), Path::new("/work"));
-        assert_eq!(
-            rule.location,
-            OutputLocation::CustomFolder {
-                path: PathBuf::from("/abs"),
-                keep_folders_from: None
-            }
-        );
-    }
-
-    #[test]
-    fn policy_flags_pick_the_conflict_policy() {
-        let cwd = Path::new("/work");
-        assert_eq!(
-            output_rule(&args(&["--overwrite"]), cwd).conflict,
-            ConflictPolicy::Overwrite
-        );
-        assert_eq!(
-            output_rule(&args(&["--skip"]), cwd).conflict,
-            ConflictPolicy::Skip
-        );
     }
 }
