@@ -56,6 +56,11 @@ jobs:
     # Only Linux gates; Windows and macOS are here to tattle, not to block
     # (D11), right up until XP-14 hands them a badge.
     continue-on-error: ${{ matrix.os != 'ubuntu-latest' }}
+    env:
+      # The ImageMagick AppImage wants FUSE, which the runner does not lend
+      # out. This makes it unpack itself into /tmp and run from there instead,
+      # at the cost of about a tenth of a second per call. Other OSes ignore it.
+      APPIMAGE_EXTRACT_AND_RUN: "1"
     strategy:
       fail-fast: false
       matrix:
@@ -93,9 +98,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       # Engines, one OS at a time. Every version gets printed so a red test can
-      # be blamed on the right binary. No LibreOffice anywhere: it would eat
-      # the whole time budget for breakfast (D7). ImageMagick 7 on Ubuntu
-      # arrives with P2-61; apt only has 6.x, which has no `magick` at all.
+      # be blamed on the right binary. No LibreOffice here: it would eat the
+      # whole time budget for breakfast, so it dines alone in goldens-office (D7).
       - name: Install engines (Linux)
         if: runner.os == 'Linux'
         run: |
@@ -105,6 +109,27 @@ jobs:
           pdftoppm -v 2>&1 | head -n 1
           gs --version
           pandoc --version | head -n 1
+
+      # apt only has ImageMagick 6, which has no `magick` at all, so we take
+      # the official AppImage from a pinned GitHub release instead. Release
+      # assets stay put, unlike imagemagick.org/archive/binaries, which keeps
+      # exactly one build and deletes yesterday's. It is ~33 MB and arrives in
+      # seconds, so no cache: one more moving part would cost more than it saves.
+      # Bumping the tag means bumping the hash too; `gh release view <tag> -R
+      # ImageMagick/ImageMagick --json assets` prints both.
+      - name: Install ImageMagick 7 (Linux)
+        if: runner.os == 'Linux'
+        env:
+          IM_TAG: 7.1.2-32
+          IM_SHA256: d456cab221b5fc1c396768a026d0a33ee8665f7119c7fea7151b960c69058b21
+        run: |
+          mkdir -p "$HOME/.local/bin"
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/magick.AppImage" \
+            "https://github.com/ImageMagick/ImageMagick/releases/download/$IM_TAG/ImageMagick-$IM_TAG-gcc-x86_64.AppImage"
+          echo "$IM_SHA256  $RUNNER_TEMP/magick.AppImage" | sha256sum -c -
+          install -m 0755 "$RUNNER_TEMP/magick.AppImage" "$HOME/.local/bin/magick"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          "$HOME/.local/bin/magick" -version
 
       - name: Install engines (macOS)
         if: runner.os == 'macOS'
@@ -155,6 +180,47 @@ jobs:
 
       # --no-fail-fast so one broken crate does not hide the others' failures.
       - run: cargo test --workspace --locked --no-fail-fast
+
+      # A golden test that skips still passes, which is lovely for laptops and
+      # useless for CI. Run the magick goldens again (already built, so it is
+      # a second or two) with output on, and go red if any of them chickened out.
+      - name: magick goldens ran (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          set -o pipefail
+          cargo test -p morphring-engines --locked --test magick -- --nocapture 2>&1 | tee "$RUNNER_TEMP/magick.log"
+          if grep -q '^SKIP:' "$RUNNER_TEMP/magick.log"; then
+            echo "::error::magick golden tests skipped"
+            exit 1
+          fi
+
+  # LibreOffice gets a job of its own: installing it takes minutes and its
+  # first start is slower than a Monday, and none of that should hold the main
+  # test job hostage (D7). It informs, it does not block.
+  goldens-office:
+    name: goldens-office
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install LibreOffice
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libreoffice-writer-nogui libreoffice-calc-nogui libreoffice-impress-nogui
+          soffice --version
+      # Same trick as the magick goldens: output on, and a SKIP counts as a failure.
+      - name: soffice goldens
+        run: |
+          set -o pipefail
+          cargo test -p morphring-engines --locked --test soffice -- --nocapture 2>&1 | tee "$RUNNER_TEMP/soffice.log"
+          cargo test -p morphring --locked --test convert -- --nocapture 2>&1 | tee -a "$RUNNER_TEMP/soffice.log"
+          if grep -q '^SKIP: soffice' "$RUNNER_TEMP/soffice.log"; then
+            echo "::error::soffice golden tests skipped"
+            exit 1
+          fi
 
   msrv:
     name: msrv
