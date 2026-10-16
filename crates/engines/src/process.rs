@@ -2,7 +2,8 @@
 //!
 //! Every engine runs its tool through [`run`]: an argument list (never a
 //! shell), stdout and stderr drained on their own threads, a timeout, and
-//! cancellation that kills the whole process group. Ported from Filee's
+//! cancellation that kills the whole process tree (a process group on Unix, a
+//! Job Object on Windows). Ported from Filee's
 //! `src/Filee.Engines/Infrastructure/ProcessRunner.cs`.
 
 use std::collections::VecDeque;
@@ -28,6 +29,12 @@ pub struct RunOptions<'a> {
     /// Kill the process group and return [`RunError::TimedOut`] after this long.
     /// `None` waits forever (cancellation still works).
     pub timeout: Option<Duration>,
+    /// Kill the process group and return [`RunError::Stalled`] when the program
+    /// prints nothing on stdout or stderr for this long. `None` disables the
+    /// watchdog. Works alongside `timeout`.
+    // TODO(P2-20): the watchdog itself. Until then this is a promise, not a
+    // policy: the field is accepted and quietly ignored.
+    pub stall: Option<Duration>,
     /// Working directory of the child. `None` inherits ours.
     pub cwd: Option<PathBuf>,
     /// Environment variables removed from the child's environment.
@@ -54,6 +61,9 @@ pub enum RunError {
     /// The timeout passed; the process group was killed.
     #[error("timed out")]
     TimedOut,
+    /// The program printed nothing for `after`; the process group was killed.
+    #[error("stopped making progress for {} s", .after.as_secs())]
+    Stalled { after: Duration },
     /// The program could not be started at all.
     #[error("could not start {program}: {source}")]
     Spawn {
@@ -117,6 +127,7 @@ pub fn run(
         program: program.display().to_string(),
         source,
     })?;
+    let tree = attach_tree(&child);
 
     // Both pipes must be drained while we wait, or a chatty tool fills the
     // 64 KiB pipe buffer and we stare at each other forever.
@@ -152,11 +163,11 @@ pub fn run(
             });
         }
 
-        let outcome = wait(&mut child, opts.timeout, cancel);
+        let outcome = wait(&mut child, &tree, opts.timeout, cancel);
         // Whatever ended the wait, sweep the group. A tool that exits while
         // its grandkids keep our pipes open would otherwise block the reader
         // threads (and this scope) until the grandkids get bored.
-        kill_group(&mut child);
+        kill_group(&mut child, &tree);
         outcome
     });
 
@@ -185,6 +196,7 @@ pub fn run(
 /// Polls the child until it exits, the token fires or the deadline passes.
 fn wait(
     child: &mut Child,
+    tree: &Tree,
     timeout: Option<Duration>,
     cancel: &CancelToken,
 ) -> Result<ExitStatus, RunError> {
@@ -201,12 +213,12 @@ fn wait(
             }
         }
         if cancel.is_cancelled() {
-            kill_group(child);
+            kill_group(child, tree);
             let _ = child.wait();
             return Err(RunError::Cancelled);
         }
         if deadline.is_some_and(|d| Instant::now() >= d) {
-            kill_group(child);
+            kill_group(child, tree);
             let _ = child.wait();
             return Err(RunError::TimedOut);
         }
@@ -226,9 +238,32 @@ fn failed_status() -> ExitStatus {
     ExitStatus::from_raw(1)
 }
 
+/// What it takes to kill a child together with everything it started. On Unix
+/// the process group id is the child's pid, so there is nothing extra to keep.
+#[cfg(not(windows))]
+struct Tree;
+
+/// What it takes to kill a child together with everything it started: the Job
+/// Object it was put in, when that worked.
+#[cfg(windows)]
+type Tree = Option<crate::win_job::Job>;
+
+#[cfg(not(windows))]
+fn attach_tree(_child: &Child) -> Tree {
+    Tree
+}
+
+#[cfg(windows)]
+fn attach_tree(child: &Child) -> Tree {
+    // The child gets a head start between spawn and attach, so a grandchild
+    // forked in that sliver escapes the job. Tools take longer than that to
+    // even find their config files, so the race stays theoretical.
+    crate::win_job::attach(child)
+}
+
 /// Kills the child's whole process group. Safe to call more than once.
 #[cfg(unix)]
-fn kill_group(child: &mut Child) {
+fn kill_group(child: &mut Child, _tree: &Tree) {
     let Ok(pgid) = libc::pid_t::try_from(child.id()) else {
         return;
     };
@@ -247,11 +282,17 @@ fn kill_group(child: &mut Child) {
     }
 }
 
-/// Kills the child. Grandchildren survive until Job Objects land.
+/// Kills the child's Job Object (the child and everything it started), or just
+/// the child when it could not be put in a job. Safe to call more than once.
 #[cfg(windows)]
-fn kill_group(child: &mut Child) {
-    // TODO(v0.4): put the child in a Job Object so the whole tree dies with it.
-    let _ = child.kill();
+fn kill_group(child: &mut Child, tree: &Tree) {
+    match tree {
+        Some(job) => job.terminate(),
+        // No job, no tree kill: grandchildren are on their own, like in v0.1.
+        None => {
+            let _ = child.kill();
+        }
+    }
 }
 
 /// Reads `pipe` line by line (lossy UTF-8, `\r\n` trimmed) until EOF.
@@ -461,6 +502,19 @@ mod tests {
         .unwrap_err();
         assert!(matches!(err, RunError::Spawn { .. }));
         assert!(err.to_string().contains("/definitely/not/a/morphring/tool"));
+    }
+
+    #[test]
+    fn stalled_message_names_the_quiet_period() {
+        let err = RunError::Stalled {
+            after: Duration::from_secs(120),
+        };
+        assert_eq!(err.to_string(), "stopped making progress for 120 s");
+    }
+
+    #[test]
+    fn stall_is_off_by_default() {
+        assert_eq!(RunOptions::default().stall, None);
     }
 
     #[test]

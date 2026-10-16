@@ -26,37 +26,74 @@ pub enum Tool {
     Ffmpeg,
     /// LibreOffice (`soffice`).
     Soffice,
+    /// Poppler's command line tools: `pdftoppm`, with `pdftotext` and
+    /// `pdfinfo` in the same folder.
+    Pdftoppm,
+    /// Ghostscript (`gs`; `gswin64c` or `gswin32c` on Windows).
+    Ghostscript,
+    /// Pandoc (`pandoc`).
+    Pandoc,
 }
+
+// Ghostscript on Windows ships as gswin64c (console, 64-bit) or gswin32c, and a
+// plain `gs` only shows up when someone brought their own MSYS habits along.
+const GS_WINDOWS: &[&[&str]] = &[&["gswin64c"], &["gswin32c"], &["gs"]];
 
 impl Tool {
     /// Every tool, in a stable order.
-    pub const ALL: [Tool; 3] = [Tool::Magick, Tool::Ffmpeg, Tool::Soffice];
+    pub const ALL: [Tool; 6] = [
+        Tool::Magick,
+        Tool::Ffmpeg,
+        Tool::Soffice,
+        Tool::Pdftoppm,
+        Tool::Ghostscript,
+        Tool::Pandoc,
+    ];
 
-    /// The engine id that uses this tool: `"magick"`, `"ffmpeg"` or `"soffice"`.
+    /// The engine id that uses this tool, such as `"magick"` or `"poppler"`.
     pub const fn id(self) -> &'static str {
         match self {
             Tool::Magick => "magick",
             Tool::Ffmpeg => "ffmpeg",
             Tool::Soffice => "soffice",
+            Tool::Pdftoppm => "poppler",
+            Tool::Ghostscript => "ghostscript",
+            Tool::Pandoc => "pandoc",
         }
     }
 
-    /// The product name shown to users: `"ImageMagick"`, `"FFmpeg"` or `"LibreOffice"`.
+    /// The product name shown to users, such as `"ImageMagick"` or `"Poppler"`.
     pub const fn display_name(self) -> &'static str {
         match self {
             Tool::Magick => "ImageMagick",
             Tool::Ffmpeg => "FFmpeg",
             Tool::Soffice => "LibreOffice",
+            Tool::Pdftoppm => "Poppler",
+            Tool::Ghostscript => "Ghostscript",
+            Tool::Pandoc => "Pandoc",
         }
     }
 
     /// The programs that must all sit in one folder, without the platform's
     /// executable suffix. The first one is the program that is run.
+    ///
+    /// This is the preferred entry of [`program_sets`](Self::program_sets).
     pub const fn programs(self) -> &'static [&'static str] {
+        self.program_sets()[0]
+    }
+
+    /// Every set of programs that can stand in for this tool, best first.
+    /// Each set follows the [`programs`](Self::programs) rule; most tools
+    /// have exactly one.
+    pub const fn program_sets(self) -> &'static [&'static [&'static str]] {
         match self {
-            Tool::Magick => &["magick"],
-            Tool::Ffmpeg => &["ffmpeg", "ffprobe"],
-            Tool::Soffice => &["soffice"],
+            Tool::Magick => &[&["magick"]],
+            Tool::Ffmpeg => &[&["ffmpeg", "ffprobe"]],
+            Tool::Soffice => &[&["soffice"]],
+            Tool::Pdftoppm => &[&["pdftoppm", "pdftotext", "pdfinfo"]],
+            Tool::Ghostscript if cfg!(windows) => GS_WINDOWS,
+            Tool::Ghostscript => &[&["gs"]],
+            Tool::Pandoc => &[&["pandoc"]],
         }
     }
 
@@ -65,9 +102,27 @@ impl Tool {
         match self {
             Tool::Magick => &["-version"],
             Tool::Ffmpeg => &["-hide_banner", "-version"],
-            Tool::Soffice => &["--version"],
+            Tool::Soffice | Tool::Ghostscript | Tool::Pandoc => &["--version"],
+            Tool::Pdftoppm => &["-v"],
         }
     }
+
+    /// Which stream the version command prints to.
+    const fn version_stream(self) -> Stream {
+        match self {
+            // pdftoppm -v writes its banner to stderr, because of course it does:
+            // it is the only thing it can print without a PDF to complain about.
+            Tool::Pdftoppm => Stream::Stderr,
+            _ => Stream::Stdout,
+        }
+    }
+}
+
+/// One of a child's output streams.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Stream {
+    Stdout,
+    Stderr,
 }
 
 /// The product name shown to users, such as `"FFmpeg"`.
@@ -147,6 +202,15 @@ pub fn status(tool: Tool) -> EngineStatus {
     }
 }
 
+/// The status of an engine built into MorphRing itself: always available, with
+/// no program path and MorphRing's own version.
+pub fn builtin_status() -> EngineStatus {
+    EngineStatus::Available {
+        path: PathBuf::new(),
+        version: env!("CARGO_PKG_VERSION").to_owned(),
+    }
+}
+
 /// Clears the cache, so the next lookup searches the machine again.
 pub fn forget() {
     cache()
@@ -165,9 +229,16 @@ fn discover(tool: Tool) -> Option<Found> {
 
 /// Searches the folders of `path_var` (a `PATH`-style list), then `extra`, and
 /// returns the main program from the first folder that holds **all** of the
-/// tool's programs. Nothing is cached and `PATH` is not read from the environment.
+/// tool's programs. Tools with several [`Tool::program_sets`] try each set in
+/// turn, best first. Nothing is cached and `PATH` is not read from the environment.
 pub fn locate_in(tool: Tool, path_var: Option<&OsStr>, extra: &[PathBuf]) -> Option<PathBuf> {
-    let programs = tool.programs();
+    tool.program_sets()
+        .iter()
+        .find_map(|programs| locate_set(programs, path_var, extra))
+}
+
+/// [`locate_in`] for one set of programs.
+fn locate_set(programs: &[&str], path_var: Option<&OsStr>, extra: &[PathBuf]) -> Option<PathBuf> {
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
 
     // which handles PATHEXT and the executable bit for us. We only use it to
@@ -287,14 +358,31 @@ static MAGICK_VERSION: LazyLock<Regex> =
     LazyLock::new(|| static_regex(r"ImageMagick\s+(\d+(?:\.\d+)+(?:-\d+)?)"));
 static SOFFICE_VERSION: LazyLock<Regex> =
     LazyLock::new(|| static_regex(r"LibreOffice(?:Dev)?\s+(\d+(?:\.\d+)+)"));
+static PDFTOPPM_VERSION: LazyLock<Regex> =
+    LazyLock::new(|| static_regex(r"pdftoppm version (\d+(?:\.\d+)+)"));
+// gs --version prints the bare number and nothing else, which is refreshingly
+// un-Ghostscript-like for a program whose manual is longer than most novels.
+static GS_VERSION: LazyLock<Regex> = LazyLock::new(|| static_regex(r"(?m)^\s*(\d+(?:\.\d+)+)\s*$"));
+// Major and minor are what a minimum-version check needs; the rest of the
+// number (3.1.11.1, pandoc likes its dots) rides along in group 3 for doctor.
+static PANDOC_VERSION: LazyLock<Regex> =
+    LazyLock::new(|| static_regex(r"(?m)^pandoc(?:\.exe)? (\d+)\.(\d+)((?:\.\d+)*)"));
 
-/// Reads the version from what the tool's version command printed, for
-/// example `9.0.2` from `ffmpeg version n9.0.2 Copyright ...`.
+/// Reads the version from what the tool's version command printed (stderr for
+/// `pdftoppm`, stdout for the rest), for example `9.0.2` from
+/// `ffmpeg version n9.0.2 Copyright ...`.
 pub fn parse_version(tool: Tool, stdout: &str) -> Option<String> {
     let regex = match tool {
         Tool::Ffmpeg => &*FFMPEG_VERSION,
         Tool::Magick => &*MAGICK_VERSION,
         Tool::Soffice => &*SOFFICE_VERSION,
+        Tool::Pdftoppm => &*PDFTOPPM_VERSION,
+        Tool::Ghostscript => &*GS_VERSION,
+        Tool::Pandoc => {
+            let caps = PANDOC_VERSION.captures(stdout)?;
+            let rest = caps.get(3).map_or("", |m| m.as_str());
+            return Some(format!("{}.{}{rest}", &caps[1], &caps[2]));
+        }
     };
     regex
         .captures(stdout)
@@ -303,29 +391,41 @@ pub fn parse_version(tool: Tool, stdout: &str) -> Option<String> {
 }
 
 fn probe_version(tool: Tool, program: &Path) -> Option<String> {
-    let stdout = run_probe(program, tool.version_args(), PROBE_TIMEOUT)?;
-    parse_version(tool, &stdout)
+    let text = run_probe(
+        program,
+        tool.version_args(),
+        tool.version_stream(),
+        PROBE_TIMEOUT,
+    )?;
+    parse_version(tool, &text)
 }
 
-/// Runs `program args` and returns its stdout when it exits successfully
-/// within `timeout`.
+/// Runs `program args` and returns what it printed on `stream` when it exits
+/// successfully within `timeout`.
 // TODO(T09): switch to process::run once the process runner lands; it was being
 // written in the same wave, so this is a deliberately tiny stand-in. A version
-// probe prints a few lines and exits, so no stderr reader and no group kill.
-fn run_probe(program: &Path, args: &[&str], timeout: Duration) -> Option<String> {
+// probe prints a few lines and exits, so one pipe reader and no group kill.
+fn run_probe(program: &Path, args: &[&str], stream: Stream, timeout: Duration) -> Option<String> {
     tracing::debug!(program = %program.display(), ?args, "probing version");
+    let (stdout, stderr) = match stream {
+        Stream::Stdout => (Stdio::piped(), Stdio::null()),
+        Stream::Stderr => (Stdio::null(), Stdio::piped()),
+    };
     let mut child = Command::new(program)
         .args(args)
         .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+        .stdout(stdout)
+        .stderr(stderr)
         .spawn()
         .ok()?;
 
     // Read stdout on its own thread and hand it over through a channel. If the
     // program leaves a grandchild holding the pipe open, recv_timeout lets us
     // walk away instead of joining a thread that never finishes.
-    let mut pipe = child.stdout.take()?;
+    let mut pipe: Box<dyn Read + Send> = match stream {
+        Stream::Stdout => Box::new(child.stdout.take()?),
+        Stream::Stderr => Box::new(child.stderr.take()?),
+    };
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {
         let mut buf = Vec::new();
@@ -397,6 +497,11 @@ pub fn install_hint(tool: Tool, os_release: &str) -> String {
                 Tool::Magick => "imagemagick",
                 Tool::Ffmpeg => "ffmpeg",
                 Tool::Soffice => "libreoffice-fresh",
+                Tool::Pdftoppm => "poppler",
+                Tool::Ghostscript => "ghostscript",
+                // Arch split pandoc in two; the program lives in pandoc-cli and
+                // plain "pandoc" is not a package any more.
+                Tool::Pandoc => "pandoc-cli",
             };
             format!("pacman -S {package}")
         }
@@ -405,6 +510,9 @@ pub fn install_hint(tool: Tool, os_release: &str) -> String {
                 Tool::Magick => "imagemagick",
                 Tool::Ffmpeg => "ffmpeg",
                 Tool::Soffice => "libreoffice",
+                Tool::Pdftoppm => "poppler-utils",
+                Tool::Ghostscript => "ghostscript",
+                Tool::Pandoc => "pandoc",
             };
             format!("sudo apt install {package}")
         }
@@ -418,6 +526,9 @@ pub fn brew_hint(tool: Tool) -> String {
         Tool::Magick => "brew install imagemagick".to_owned(),
         Tool::Ffmpeg => "brew install ffmpeg".to_owned(),
         Tool::Soffice => "brew install --cask libreoffice".to_owned(),
+        Tool::Pdftoppm => "brew install poppler".to_owned(),
+        Tool::Ghostscript => "brew install ghostscript".to_owned(),
+        Tool::Pandoc => "brew install pandoc".to_owned(),
     }
 }
 
@@ -426,6 +537,9 @@ fn download_hint(tool: Tool) -> String {
         Tool::Magick => "https://imagemagick.org/script/download.php",
         Tool::Ffmpeg => "https://ffmpeg.org/download.html",
         Tool::Soffice => "https://www.libreoffice.org/download/",
+        Tool::Pdftoppm => "https://poppler.freedesktop.org/",
+        Tool::Ghostscript => "https://ghostscript.com/releases/",
+        Tool::Pandoc => "https://pandoc.org/installing.html",
     };
     format!("download it from {url}")
 }
@@ -551,6 +665,80 @@ mod tests {
     }
 
     #[test]
+    fn parse_version_reads_the_v02_tools() {
+        let pdftoppm = "pdftoppm version 26.08.0\nCopyright 2005-2026 The Poppler Developers - http://poppler.freedesktop.org\n";
+        assert_eq!(
+            parse_version(Tool::Pdftoppm, pdftoppm).as_deref(),
+            Some("26.08.0")
+        );
+        assert_eq!(
+            parse_version(Tool::Ghostscript, "10.08.0\n").as_deref(),
+            Some("10.08.0")
+        );
+        assert_eq!(
+            parse_version(Tool::Pandoc, "pandoc 3.11\nFeatures: +server +lua\n").as_deref(),
+            Some("3.11")
+        );
+        assert_eq!(
+            parse_version(Tool::Pandoc, "pandoc.exe 3.1.11.1\r\n").as_deref(),
+            Some("3.1.11.1")
+        );
+        assert_eq!(parse_version(Tool::Pandoc, "pandoc-citeproc 0.17"), None);
+        assert_eq!(parse_version(Tool::Ghostscript, "GPL Ghostscript"), None);
+        assert_eq!(parse_version(Tool::Pdftoppm, ""), None);
+    }
+
+    #[test]
+    fn install_hints_cover_the_v02_tools() {
+        assert_eq!(install_hint(Tool::Pdftoppm, "ID=arch"), "pacman -S poppler");
+        assert_eq!(
+            install_hint(Tool::Pdftoppm, "ID=debian"),
+            "sudo apt install poppler-utils"
+        );
+        assert_eq!(
+            install_hint(Tool::Ghostscript, "ID=arch"),
+            "pacman -S ghostscript"
+        );
+        assert_eq!(
+            install_hint(Tool::Ghostscript, "ID=ubuntu"),
+            "sudo apt install ghostscript"
+        );
+        assert_eq!(
+            install_hint(Tool::Pandoc, "ID=arch"),
+            "pacman -S pandoc-cli"
+        );
+        assert_eq!(
+            install_hint(Tool::Pandoc, "ID=debian"),
+            "sudo apt install pandoc"
+        );
+        assert_eq!(brew_hint(Tool::Pdftoppm), "brew install poppler");
+        assert_eq!(brew_hint(Tool::Ghostscript), "brew install ghostscript");
+        assert_eq!(brew_hint(Tool::Pandoc), "brew install pandoc");
+        assert!(install_hint(Tool::Pandoc, "ID=fedora").contains("pandoc.org"));
+    }
+
+    #[test]
+    fn v02_tools_have_ids_and_programs() {
+        assert_eq!(Tool::Pdftoppm.id(), "poppler");
+        assert_eq!(Tool::Ghostscript.id(), "ghostscript");
+        assert_eq!(Tool::Pandoc.id(), "pandoc");
+        assert_eq!(
+            Tool::Pdftoppm.programs(),
+            ["pdftoppm", "pdftotext", "pdfinfo"]
+        );
+        assert_eq!(Tool::Pandoc.programs(), ["pandoc"]);
+        if cfg!(windows) {
+            assert_eq!(Tool::Ghostscript.programs(), ["gswin64c"]);
+            assert_eq!(Tool::Ghostscript.program_sets().len(), 3);
+        } else {
+            assert_eq!(Tool::Ghostscript.program_sets(), [["gs"]]);
+        }
+        for tool in Tool::ALL {
+            assert!(!tool.program_sets().is_empty(), "{tool:?}");
+        }
+    }
+
+    #[test]
     fn display_names_match_the_products() {
         assert_eq!(display_name(Tool::Ffmpeg), "FFmpeg");
         assert_eq!(display_name(Tool::Magick), "ImageMagick");
@@ -608,6 +796,24 @@ mod tests {
         }
     }
 
+    #[test]
+    fn installed_v02_tools_report_a_real_version() {
+        for tool in [Tool::Pdftoppm, Tool::Ghostscript, Tool::Pandoc] {
+            if which::which(tool.programs()[0]).is_err() {
+                eprintln!("SKIP: {} not found", tool.programs()[0]);
+                continue;
+            }
+            match status(tool) {
+                EngineStatus::Available { version, .. } => {
+                    assert_ne!(version, UNKNOWN_VERSION, "{tool:?}");
+                }
+                // pdftoppm alone is not enough (pdfinfo and pdftotext must sit
+                // beside it), so Missing is a fair answer for a half install.
+                EngineStatus::Missing { hint } => eprintln!("{tool:?} missing: {hint}"),
+            }
+        }
+    }
+
     #[cfg(unix)]
     mod fake_tools {
         use super::*;
@@ -651,6 +857,42 @@ mod tests {
         }
 
         #[test]
+        fn locate_in_wants_pdftotext_and_pdfinfo_beside_pdftoppm() {
+            let half = tempfile::TempDir::new().unwrap();
+            let full = tempfile::TempDir::new().unwrap();
+            script(half.path(), "pdftoppm", "exit 0");
+            script(half.path(), "pdftotext", "exit 0");
+            let pdftoppm = script(full.path(), "pdftoppm", "exit 0");
+            script(full.path(), "pdftotext", "exit 0");
+            script(full.path(), "pdfinfo", "exit 0");
+
+            let path = join_path([half.path(), full.path()]);
+            assert_eq!(
+                locate_in(Tool::Pdftoppm, path.as_deref(), &[]),
+                Some(pdftoppm.clone())
+            );
+            let found = Found {
+                program: pdftoppm,
+                version: UNKNOWN_VERSION.to_owned(),
+            };
+            assert_eq!(found.companion("pdfinfo"), full.path().join("pdfinfo"));
+        }
+
+        #[test]
+        fn probe_reads_pdftoppm_from_stderr() {
+            let dir = tempfile::TempDir::new().unwrap();
+            let fake = script(
+                dir.path(),
+                "pdftoppm",
+                "echo 'pdftoppm version 24.02.0' >&2; echo 'not on stdout'",
+            );
+            assert_eq!(
+                probe_version(Tool::Pdftoppm, &fake).as_deref(),
+                Some("24.02.0")
+            );
+        }
+
+        #[test]
         fn locate_in_ignores_files_that_are_not_executable() {
             let dir = tempfile::TempDir::new().unwrap();
             std::fs::write(dir.path().join("magick"), "not a program").unwrap();
@@ -676,11 +918,17 @@ mod tests {
         fn probe_gives_up_on_a_failing_or_hanging_program() {
             let dir = tempfile::TempDir::new().unwrap();
             let failing = script(dir.path(), "failing", "echo 'LibreOffice 1.2'; exit 3");
-            assert_eq!(run_probe(&failing, &[], Duration::from_secs(5)), None);
+            assert_eq!(
+                run_probe(&failing, &[], Stream::Stdout, Duration::from_secs(5)),
+                None
+            );
 
             let hanging = script(dir.path(), "hanging", "exec sleep 30");
             let started = Instant::now();
-            assert_eq!(run_probe(&hanging, &[], Duration::from_millis(200)), None);
+            assert_eq!(
+                run_probe(&hanging, &[], Stream::Stdout, Duration::from_millis(200)),
+                None
+            );
             assert!(started.elapsed() < Duration::from_secs(3));
         }
     }

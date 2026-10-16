@@ -265,6 +265,10 @@ fn run_error(err: RunError, program: &str) -> EngineError {
             "{program} did not finish within {} minutes and was stopped.",
             PASS_TIMEOUT.as_secs() / 60
         )),
+        RunError::Stalled { after } => EngineError::Failed(format!(
+            "{program} stopped making progress for {} s and was stopped.",
+            after.as_secs()
+        )),
         RunError::Spawn { program, source } => {
             EngineError::Failed(format!("Could not start {program}: {source}"))
         }

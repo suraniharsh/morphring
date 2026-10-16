@@ -151,6 +151,12 @@ impl Converter for SofficeEngine {
                     TIMEOUT.as_secs()
                 )));
             }
+            Err(RunError::Stalled { after }) => {
+                return Err(EngineError::Failed(format!(
+                    "LibreOffice stopped making progress for {} seconds",
+                    after.as_secs()
+                )));
+            }
             Err(RunError::Spawn { program, source }) => {
                 return Err(EngineError::Failed(format!(
                     "could not start {program}: {source}"
