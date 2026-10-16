@@ -10,7 +10,71 @@
   <body>
     <main>
       <h1>Settings</h1>
-      <div id="settings"></div>
+
+      <form id="settings" autocomplete="off">
+        <section class="card">
+          <h2>Default output</h2>
+          <p class="hint">Where presets set to "Default" save their files.</p>
+
+          <label class="choice">
+            <input type="radio" name="location" value="SameFolder" />
+            <span>Same folder as the original</span>
+          </label>
+
+          <label class="choice">
+            <input type="radio" name="location" value="Subfolder" />
+            <span>Subfolder next to the original</span>
+          </label>
+          <div class="indent" id="subfolder-row" hidden>
+            <label class="field">
+              <span>Subfolder name</span>
+              <input type="text" id="subfolder-name" spellcheck="false" />
+            </label>
+          </div>
+
+          <label class="choice">
+            <input type="radio" name="location" value="CustomFolder" />
+            <span>A custom folder</span>
+          </label>
+          <div class="indent row" id="custom-row" hidden>
+            <input type="text" id="custom-folder" spellcheck="false" placeholder="No folder chosen" />
+            <button type="button" id="choose-folder">Choose…</button>
+          </div>
+        </section>
+
+        <section class="card">
+          <h2>Files</h2>
+          <label class="toggle">
+            <span>
+              <strong>Keep file dates</strong>
+              <small>Converted files get the dates of the originals.</small>
+            </span>
+            <input type="checkbox" id="keep-file-dates" />
+          </label>
+          <label class="toggle">
+            <span>
+              <strong>Keep history</strong>
+              <small>Remember finished conversions in the history window.</small>
+            </span>
+            <input type="checkbox" id="keep-history" />
+          </label>
+        </section>
+
+        <section class="card">
+          <h2>Presets</h2>
+          <ul id="presets" class="presets"></ul>
+        </section>
+
+        <section class="card">
+          <h2>Config folder</h2>
+          <div class="row">
+            <code id="config-dir">-</code>
+            <button type="button" id="open-folder">Open folder</button>
+          </div>
+        </section>
+      </form>
+
+      <p id="status" class="status" role="status" aria-live="polite"></p>
     </main>
   </body>
 </html>

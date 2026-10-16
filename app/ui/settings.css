@@ -1,16 +1,229 @@
-/* The settings window. Plain on purpose until the real page moves in. */
+/* The settings window (the history window borrows this sheet too, so the
+   element rules stay polite). Same "Soft" palette as the drop zone. */
 :root {
   color-scheme: light dark;
+  --page: #f6f5f1;
+  --surface: #ffffff;
+  --surface-alt: #efede6;
+  --border: rgba(0, 0, 0, 0.12);
+  --text: #1f1e1d;
+  --text-secondary: #6b6a66;
+  --danger: #c73a39;
+  --accent: #7f77dd;
+  --accent-soft: rgba(127, 119, 221, 0.18);
+  --radius: 12px;
+  --radius-small: 8px;
   font-family: "Noto Sans", system-ui, sans-serif;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --page: #1b1b19;
+    --surface: #262624;
+    --surface-alt: #31312e;
+    --border: rgba(255, 255, 255, 0.14);
+    --text: #f1efe8;
+    --text-secondary: #aeaca4;
+    --danger: #f09595;
+  }
+}
+
+:root[data-theme="dark"] {
+  --page: #1b1b19;
+  --surface: #262624;
+  --surface-alt: #31312e;
+  --border: rgba(255, 255, 255, 0.14);
+  --text: #f1efe8;
+  --text-secondary: #aeaca4;
+  --danger: #f09595;
+}
+
+* {
+  box-sizing: border-box;
 }
 
 body {
   margin: 0;
   padding: 24px;
+  background: var(--page);
+  color: var(--text);
+  font-size: 14px;
+  line-height: 1.45;
+}
+
+main {
+  max-width: 600px;
+  margin: 0 auto;
 }
 
 h1 {
   font-size: 20px;
   font-weight: 600;
   margin: 0 0 16px;
+}
+
+h2 {
+  font-size: 15px;
+  font-weight: 600;
+  margin: 0 0 8px;
+}
+
+[hidden] {
+  display: none !important;
+}
+
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 16px;
+  margin-bottom: 12px;
+}
+
+.hint,
+small {
+  color: var(--text-secondary);
+}
+
+.hint {
+  margin: 0 0 8px;
+}
+
+.choice {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 0;
+  cursor: pointer;
+}
+
+.indent {
+  margin: 4px 0 8px 26px;
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.field span {
+  color: var(--text-secondary);
+  font-size: 13px;
+}
+
+input[type="text"] {
+  flex: 1;
+  min-width: 0;
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-small);
+  background: var(--surface-alt);
+  color: inherit;
+  font: inherit;
+}
+
+input[type="text"]:focus {
+  outline: 2px solid var(--accent);
+  outline-offset: 0;
+}
+
+input[type="text"][aria-invalid="true"] {
+  border-color: var(--danger);
+}
+
+input[type="radio"],
+input[type="checkbox"] {
+  accent-color: var(--accent);
+}
+
+button {
+  padding: 6px 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-small);
+  background: var(--surface-alt);
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+button:hover:not(:disabled) {
+  background: var(--accent-soft);
+}
+
+button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.toggle {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 6px 0;
+  cursor: pointer;
+}
+
+.toggle > span {
+  display: flex;
+  flex-direction: column;
+}
+
+.toggle input {
+  width: 18px;
+  height: 18px;
+  flex: none;
+}
+
+.presets {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: 200px;
+  overflow-y: auto;
+}
+
+.presets li {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 5px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.presets li:last-child {
+  border-bottom: none;
+}
+
+.presets .target {
+  color: var(--text-secondary);
+  font-size: 12px;
+  text-transform: uppercase;
+}
+
+code {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font-family: "Noto Sans Mono", ui-monospace, monospace;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.status {
+  min-height: 1.45em;
+  margin: 4px 0 0;
+  color: var(--text-secondary);
+}
+
+.status.error {
+  color: var(--danger);
 }
