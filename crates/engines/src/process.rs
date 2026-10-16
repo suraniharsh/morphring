@@ -412,17 +412,66 @@ fn strip_prefix(mut line: &str) -> &str {
     line
 }
 
+/// Windows `ERROR_ACCESS_DENIED`.
+const ERROR_ACCESS_DENIED: i32 = 5;
+/// Windows `ERROR_SHARING_VIOLATION`.
+const ERROR_SHARING_VIOLATION: i32 = 32;
+/// How many times a locked rename is tried again before giving up on it.
+const RENAME_RETRIES: u32 = 3;
+/// How long to wait between those tries.
+const RENAME_BACKOFF: Duration = Duration::from_millis(100);
+/// Only Windows has file locks worth waiting out. On Unix, 5 and 32 are EIO
+/// and EPIPE, and no amount of patience fixes those.
+const RETRY_LOCKED_RENAMES: bool = cfg!(windows);
+
+/// Whether a rename that failed with the Windows error `raw_os_error`, after
+/// `attempt` earlier retries, should be tried again, and how long to wait
+/// first.
+///
+/// Only sharing violations and access denied qualify: that is what Windows
+/// reports while antivirus or the search indexer holds a freshly written
+/// file.
+fn should_retry(raw_os_error: Option<i32>, attempt: u32) -> Option<Duration> {
+    match raw_os_error? {
+        ERROR_SHARING_VIOLATION | ERROR_ACCESS_DENIED if attempt < RENAME_RETRIES => {
+            Some(RENAME_BACKOFF)
+        }
+        _ => None,
+    }
+}
+
 /// Moves `from` (a file or folder) to `to`, falling back to copy and remove
 /// when a rename is not possible (for example across filesystems).
+///
+/// On Windows a rename blocked by another process holding the file is
+/// retried a few times first.
 pub fn move_into_place(from: &Path, to: &Path) -> io::Result<()> {
-    match std::fs::rename(from, to) {
-        Ok(()) => Ok(()),
-        // /tmp is tmpfs on Arch, so rename from a temp dir into ~ fails with
-        // EXDEV all day long. Any rename failure gets the slow path; if the
-        // source is really gone the copy reports that properly.
-        Err(err) => {
-            tracing::debug!(%err, from = %from.display(), to = %to.display(), "rename failed, copying");
-            copy_then_remove(from, to)
+    let mut attempt = 0;
+    loop {
+        match std::fs::rename(from, to) {
+            Ok(()) => return Ok(()),
+            Err(err) => {
+                // Defender likes to sniff every new file before we may touch
+                // it. Give it a moment instead of copying gigabytes of video
+                // just because it was curious.
+                let wait = if RETRY_LOCKED_RENAMES {
+                    should_retry(err.raw_os_error(), attempt)
+                } else {
+                    None
+                };
+                if let Some(wait) = wait {
+                    tracing::debug!(%err, attempt, from = %from.display(), to = %to.display(), "rename blocked, retrying");
+                    thread::sleep(wait);
+                    attempt += 1;
+                    continue;
+                }
+                // /tmp is tmpfs on Arch, so rename from a temp dir into ~ fails
+                // with EXDEV all day long. Any rename failure gets the slow
+                // path; if the source is really gone the copy reports that
+                // properly.
+                tracing::debug!(%err, from = %from.display(), to = %to.display(), "rename failed, copying");
+                return copy_then_remove(from, to);
+            }
         }
     }
 }
@@ -470,6 +519,9 @@ fn command_line(program: &Path, args: &[OsString]) -> String {
 mod tests {
     use super::*;
 
+    // Only the Unix tests shell out with real arguments; Windows would
+    // otherwise flag this as dead code and fail the build over a helper.
+    #[cfg(unix)]
     fn os(args: &[&str]) -> Vec<OsString> {
         args.iter().map(OsString::from).collect()
     }
@@ -545,6 +597,71 @@ mod tests {
             std::fs::read(b.path().join("pages/sub/p1.png")).unwrap(),
             b"p"
         );
+    }
+
+    #[test]
+    fn should_retry_waits_out_sharing_violations_three_times() {
+        for attempt in 0..3 {
+            assert_eq!(
+                should_retry(Some(ERROR_SHARING_VIOLATION), attempt),
+                Some(Duration::from_millis(100))
+            );
+        }
+        assert_eq!(should_retry(Some(ERROR_SHARING_VIOLATION), 3), None);
+    }
+
+    #[test]
+    fn should_retry_waits_out_access_denied_three_times() {
+        for attempt in 0..3 {
+            assert_eq!(
+                should_retry(Some(ERROR_ACCESS_DENIED), attempt),
+                Some(Duration::from_millis(100))
+            );
+        }
+        assert_eq!(should_retry(Some(ERROR_ACCESS_DENIED), 3), None);
+        assert_eq!(should_retry(Some(ERROR_ACCESS_DENIED), 99), None);
+    }
+
+    #[test]
+    fn should_retry_gives_up_at_once_on_other_errors() {
+        // 2 is ERROR_FILE_NOT_FOUND, 17 is ERROR_NOT_SAME_DEVICE: waiting
+        // will not bring the file back or move the disk.
+        assert_eq!(should_retry(Some(2), 0), None);
+        assert_eq!(should_retry(Some(17), 0), None);
+        assert_eq!(should_retry(None, 0), None);
+    }
+
+    #[test]
+    fn locked_renames_are_retried_only_on_windows() {
+        assert_eq!(RETRY_LOCKED_RENAMES, cfg!(windows));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "timing-dependent; run by hand"]
+    fn move_into_place_waits_for_a_locked_destination() {
+        use std::os::windows::fs::OpenOptionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let from = dir.path().join("new.png");
+        let to = dir.path().join("final.png");
+        std::fs::write(&from, b"fresh").unwrap();
+        std::fs::write(&to, b"stale").unwrap();
+        // Share mode 0: no FILE_SHARE_DELETE (nor anything else), so
+        // renaming over it fails until the handle goes away.
+        let held = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(&to)
+            .unwrap();
+        let releaser = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(150));
+            drop(held);
+        });
+        move_into_place(&from, &to).unwrap();
+        releaser.join().unwrap();
+        assert_eq!(std::fs::read(&to).unwrap(), b"fresh");
+        assert!(!from.exists());
     }
 
     #[test]
