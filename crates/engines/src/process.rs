@@ -1,8 +1,8 @@
 //! The one place production code starts external programs.
 //!
 //! Every engine runs its tool through [`run`]: an argument list (never a
-//! shell), stdout and stderr drained on their own threads, a timeout, and
-//! cancellation that kills the whole process tree (a process group on Unix, a
+//! shell), stdout and stderr drained on their own threads, a timeout, a stall
+//! watchdog, and cancellation that kills the whole process tree (a process group on Unix, a
 //! Job Object on Windows). Ported from Filee's
 //! `src/Filee.Engines/Infrastructure/ProcessRunner.cs`.
 
@@ -12,6 +12,7 @@ use std::io::{self, BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -23,6 +24,10 @@ pub const STDERR_TAIL_LINES: usize = 40;
 /// How often the runner checks for exit, cancellation and the deadline.
 const POLL_INTERVAL: Duration = Duration::from_millis(50);
 
+/// How often the stall watchdog looks at the clock, unless told otherwise
+/// (Filee's `FfmpegRunner` checks once a second too).
+pub const DEFAULT_STALL_POLL: Duration = Duration::from_secs(1);
+
 /// Options for [`run`].
 #[derive(Default)]
 pub struct RunOptions<'a> {
@@ -32,9 +37,10 @@ pub struct RunOptions<'a> {
     /// Kill the process group and return [`RunError::Stalled`] when the program
     /// prints nothing on stdout or stderr for this long. `None` disables the
     /// watchdog. Works alongside `timeout`.
-    // TODO(P2-20): the watchdog itself. Until then this is a promise, not a
-    // policy: the field is accepted and quietly ignored.
     pub stall: Option<Duration>,
+    /// How often the stall watchdog checks for silence. `None` means
+    /// [`DEFAULT_STALL_POLL`]. Only matters when `stall` is set.
+    pub stall_poll: Option<Duration>,
     /// Working directory of the child. `None` inherits ours.
     pub cwd: Option<PathBuf>,
     /// Environment variables removed from the child's environment.
@@ -136,12 +142,25 @@ pub fn run(
     let stdout = Mutex::new(String::new());
     let tail = Mutex::new(VecDeque::with_capacity(STDERR_TAIL_LINES));
     let on_line = opts.on_stdout_line;
+    // The watchdog's heartbeat: milliseconds since `started` at which the
+    // tool last said anything, on either pipe. Both readers bump it, the wait
+    // loop reads it. Relaxed is plenty; we're timing seconds, not nanoseconds.
+    let started = Instant::now();
+    let last_line = AtomicU64::new(0);
+    let watchdog = opts.stall.map(|after| Watchdog {
+        after,
+        poll: opts.stall_poll.unwrap_or(DEFAULT_STALL_POLL),
+        started,
+        last_line: &last_line,
+    });
 
     let outcome = thread::scope(|scope| {
         if let Some(pipe) = stdout_pipe {
             let stdout = &stdout;
+            let last_line = &last_line;
             scope.spawn(move || {
                 for_each_line(pipe, |line| {
+                    heartbeat(last_line, started);
                     if let Some(cb) = on_line {
                         cb(line);
                     }
@@ -154,8 +173,10 @@ pub fn run(
         }
         if let Some(pipe) = stderr_pipe {
             let tail = &tail;
+            let last_line = &last_line;
             scope.spawn(move || {
                 for_each_line(pipe, |line| {
+                    heartbeat(last_line, started);
                     if let Ok(mut tail) = tail.lock() {
                         push_tail(&mut tail, line.to_string());
                     }
@@ -163,7 +184,7 @@ pub fn run(
             });
         }
 
-        let outcome = wait(&mut child, &tree, opts.timeout, cancel);
+        let outcome = wait(&mut child, &tree, opts.timeout, watchdog, cancel);
         // Whatever ended the wait, sweep the group. A tool that exits while
         // its grandkids keep our pipes open would otherwise block the reader
         // threads (and this scope) until the grandkids get bored.
@@ -193,14 +214,45 @@ pub fn run(
     }
 }
 
-/// Polls the child until it exits, the token fires or the deadline passes.
+/// Records "the tool just said something" for the stall watchdog.
+fn heartbeat(last_line: &AtomicU64, started: Instant) {
+    let now = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+    // fetch_max, because the two reader threads race and time only goes one way.
+    last_line.fetch_max(now, Ordering::Relaxed);
+}
+
+/// The stall watchdog's settings plus the heartbeat it watches.
+#[derive(Clone, Copy)]
+struct Watchdog<'a> {
+    after: Duration,
+    poll: Duration,
+    started: Instant,
+    last_line: &'a AtomicU64,
+}
+
+impl Watchdog<'_> {
+    /// True once the tool has been silent for at least `after`. Silence is
+    /// counted from the start of the run until the first line arrives, so a
+    /// tool that never prints anything is caught too.
+    fn stalled(&self) -> bool {
+        let last = Duration::from_millis(self.last_line.load(Ordering::Relaxed));
+        self.started.elapsed().saturating_sub(last) >= self.after
+    }
+}
+
+/// Polls the child until it exits, the token fires, the deadline passes or
+/// the stall watchdog decides the tool has gone to sleep.
 fn wait(
     child: &mut Child,
     tree: &Tree,
     timeout: Option<Duration>,
+    watchdog: Option<Watchdog<'_>>,
     cancel: &CancelToken,
 ) -> Result<ExitStatus, RunError> {
     let deadline = timeout.map(|t| Instant::now() + t);
+    // The watchdog runs on its own (slower) beat than the exit poll, so a
+    // test can crank it up and production can leave it at a relaxed 1 s.
+    let mut next_stall_check = watchdog.map(|w| Instant::now() + w.poll);
     loop {
         match child.try_wait() {
             Ok(Some(status)) => return Ok(status),
@@ -221,6 +273,18 @@ fn wait(
             kill_group(child, tree);
             let _ = child.wait();
             return Err(RunError::TimedOut);
+        }
+        if let (Some(dog), Some(next)) = (watchdog, next_stall_check) {
+            let now = Instant::now();
+            if now >= next {
+                if dog.stalled() {
+                    tracing::debug!(after = ?dog.after, "process stalled, killing it");
+                    kill_group(child, tree);
+                    let _ = child.wait();
+                    return Err(RunError::Stalled { after: dog.after });
+                }
+                next_stall_check = Some(now + dog.poll);
+            }
         }
         thread::sleep(POLL_INTERVAL);
     }
@@ -630,6 +694,82 @@ mod tests {
             };
             let started = Instant::now();
             let res = run(Path::new("sleep"), &os(&["5"]), opts, &CancelToken::new());
+            assert!(matches!(res, Err(RunError::TimedOut)), "{res:?}");
+            assert!(started.elapsed() < Duration::from_secs(2));
+        }
+
+        #[test]
+        fn a_quiet_child_is_killed_as_stalled() {
+            let dir = tempfile::tempdir().unwrap();
+            let pid_file = dir.path().join("pid");
+            // Says hello once, then plays dead. exec keeps the pid honest.
+            let (prog, args) = sh(&format!(
+                "echo hello; echo $$ > '{}'; exec sleep 30",
+                pid_file.display()
+            ));
+            let stall = Duration::from_millis(500);
+            let opts = RunOptions {
+                stall: Some(stall),
+                ..RunOptions::default()
+            };
+            let started = Instant::now();
+            let res = run(&prog, &args, opts, &CancelToken::new());
+            let elapsed = started.elapsed();
+            assert!(
+                matches!(res, Err(RunError::Stalled { after }) if after == stall),
+                "{res:?}"
+            );
+            assert!(elapsed >= stall, "killed too early: {elapsed:?}");
+            assert!(
+                elapsed < stall + Duration::from_millis(1500),
+                "killed too late: {elapsed:?}"
+            );
+            let pid = read_pid(&pid_file);
+            assert!(gone_within(&pid, Duration::from_secs(1)));
+        }
+
+        #[test]
+        fn a_silent_child_is_stalled_even_without_a_first_line() {
+            let opts = RunOptions {
+                stall: Some(Duration::from_millis(200)),
+                stall_poll: Some(Duration::from_millis(50)),
+                ..RunOptions::default()
+            };
+            let started = Instant::now();
+            let res = run(Path::new("sleep"), &os(&["5"]), opts, &CancelToken::new());
+            assert!(matches!(res, Err(RunError::Stalled { .. })), "{res:?}");
+            assert!(started.elapsed() < Duration::from_secs(2));
+        }
+
+        #[test]
+        fn a_chatty_child_outlives_the_stall_period() {
+            // Runs for ~1.2 s, four times the stall period, but never goes
+            // quiet for long, alternating stdout and stderr to feed both pipes.
+            let (prog, args) = sh(
+                "for i in 1 2 3 4 5 6 7 8; do echo out$i; sleep 0.075; echo err$i >&2; sleep 0.075; done",
+            );
+            let opts = RunOptions {
+                stall: Some(Duration::from_millis(300)),
+                stall_poll: Some(Duration::from_millis(20)),
+                ..RunOptions::default()
+            };
+            let started = Instant::now();
+            let out = run(&prog, &args, opts, &CancelToken::new()).unwrap();
+            assert!(started.elapsed() > Duration::from_millis(300));
+            assert_eq!(out.stdout.lines().count(), 8);
+            assert_eq!(out.stderr_tail.len(), 8);
+        }
+
+        #[test]
+        fn timeout_still_wins_when_the_child_keeps_talking() {
+            let (prog, args) = sh("while true; do echo tick; sleep 0.05; done");
+            let opts = RunOptions {
+                timeout: Some(Duration::from_millis(300)),
+                stall: Some(Duration::from_secs(5)),
+                ..RunOptions::default()
+            };
+            let started = Instant::now();
+            let res = run(&prog, &args, opts, &CancelToken::new());
             assert!(matches!(res, Err(RunError::TimedOut)), "{res:?}");
             assert!(started.elapsed() < Duration::from_secs(2));
         }

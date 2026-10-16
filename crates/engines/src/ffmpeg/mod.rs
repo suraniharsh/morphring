@@ -23,9 +23,12 @@ use crate::process::{self, RunError, RunOptions};
 use encoding::{AudioSource, FfmpegPass, Source, VideoSource};
 use probe::MediaInfo;
 
-/// How long one ffmpeg pass may run. A feature film legitimately encodes for
-/// an hour on a slow machine, but v0.1.0 has no stall watchdog (PLAN.md D8).
-const PASS_TIMEOUT: Duration = Duration::from_secs(30 * 60);
+/// How long one ffmpeg pass may go without printing a single line before we
+/// call it stuck. There is deliberately no overall limit: a feature film can
+/// encode for an hour on a slow laptop, and that's fine as long as it keeps
+/// muttering progress at us. `-progress pipe:1` reports every half second,
+/// so two minutes of silence means ffmpeg is wedged, not thinking.
+const PASS_STALL: Duration = Duration::from_secs(120);
 
 /// How long ffprobe may take to read a file's header (Filee's `ProbeTimeout`).
 const PROBE_TIMEOUT: Duration = Duration::from_secs(60);
@@ -227,7 +230,7 @@ fn run_pass(
         }
     };
     let opts = RunOptions {
-        timeout: Some(PASS_TIMEOUT),
+        stall: Some(PASS_STALL),
         on_stdout_line: Some(&on_line),
         ..RunOptions::default()
     };
@@ -261,12 +264,13 @@ fn run_pass(
 fn run_error(err: RunError, program: &str) -> EngineError {
     match err {
         RunError::Cancelled => EngineError::Cancelled,
+        // Only ffprobe still runs against a clock; passes have the watchdog.
         RunError::TimedOut => EngineError::Failed(format!(
-            "{program} did not finish within {} minutes and was stopped.",
-            PASS_TIMEOUT.as_secs() / 60
+            "{program} did not finish within {} s and was stopped.",
+            PROBE_TIMEOUT.as_secs()
         )),
         RunError::Stalled { after } => EngineError::Failed(format!(
-            "{program} stopped making progress for {} s and was stopped.",
+            "FFmpeg stopped making progress for {} s",
             after.as_secs()
         )),
         RunError::Spawn { program, source } => {
@@ -337,8 +341,12 @@ mod tests {
             EngineError::Cancelled
         ));
         assert_eq!(
-            run_error(RunError::TimedOut, "ffmpeg").to_string(),
-            "ffmpeg did not finish within 30 minutes and was stopped."
+            run_error(RunError::TimedOut, "ffprobe").to_string(),
+            "ffprobe did not finish within 60 s and was stopped."
+        );
+        assert_eq!(
+            run_error(RunError::Stalled { after: PASS_STALL }, "ffmpeg").to_string(),
+            "FFmpeg stopped making progress for 120 s"
         );
     }
 
