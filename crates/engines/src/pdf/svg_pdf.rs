@@ -6,7 +6,6 @@
 //! keep Skia from embedding a 13 MB font for one Korean word.
 
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, OnceLock};
 
 use krilla::Document;
 use krilla::geom::Size;
@@ -14,7 +13,6 @@ use krilla::metadata::Metadata;
 use krilla::page::PageSettings;
 use krilla_svg::{SurfaceExt, SvgSettings};
 use morphring_core::{CancelToken, Edge, EngineError, OutputAllocator, Step};
-use usvg::fontdb::Database;
 
 use crate::process;
 
@@ -30,20 +28,6 @@ pub(crate) fn edges() -> Vec<Edge> {
         Edge::with_cost("svg", "pdf", 10),
         Edge::with_cost("svgz", "pdf", 10),
     ]
-}
-
-/// The system fonts, scanned once per process.
-fn system_fonts() -> Arc<Database> {
-    // Scanning every font on the machine takes a noticeable moment, and doing
-    // it once per file in a 500-file batch would be a fine way to heat the room.
-    static FONTS: OnceLock<Arc<Database>> = OnceLock::new();
-    FONTS
-        .get_or_init(|| {
-            let mut db = Database::new();
-            db.load_system_fonts();
-            Arc::new(db)
-        })
-        .clone()
 }
 
 /// Converts `step`, which is one of [`edges`].
@@ -89,7 +73,7 @@ fn svg_to_pdf(data: &[u8], input: &Path) -> Result<Vec<u8>, EngineError> {
         // Local files next to the SVG only. usvg has no network code at all,
         // which is the kind of security feature I can get behind.
         resources_dir: input.parent().map(Path::to_path_buf),
-        fontdb: system_fonts(),
+        fontdb: crate::svg::fonts(),
         ..usvg::Options::default()
     };
     // from_data sniffs the 1F 8B gzip header itself, so svgz needs no extra work.

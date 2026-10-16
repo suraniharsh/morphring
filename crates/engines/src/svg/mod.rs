@@ -196,16 +196,71 @@ fn to_svg(raw: &[u8]) -> Result<Vec<u8>, EngineError> {
 }
 
 /// The system fonts, loaded once per process. Scanning every font on the
-/// machine takes long enough that doing it per file would be rude.
-fn fonts() -> Arc<fontdb::Database> {
+/// machine takes long enough that doing it per file would be rude. The SVG to
+/// PDF engine shares this database.
+pub(crate) fn fonts() -> Arc<fontdb::Database> {
     static FONTS: OnceLock<Arc<fontdb::Database>> = OnceLock::new();
     FONTS
         .get_or_init(|| {
             let mut db = fontdb::Database::new();
             db.load_system_fonts();
+            pick_generic_families(&mut db);
             Arc::new(db)
         })
         .clone()
+}
+
+/// Candidates for the generic families, best first. fontdb maps them to the
+/// Windows fonts (Arial, Times New Roman, Courier New) and does not ask
+/// fontconfig, so on a Linux box without Microsoft fonts every
+/// `font-family="sans-serif"` quietly rendered as no text at all.
+const SANS: &[&str] = &[
+    "Arial",
+    "Helvetica",
+    "Liberation Sans",
+    "DejaVu Sans",
+    "Noto Sans",
+    "Cantarell",
+    "Ubuntu",
+];
+const SERIF: &[&str] = &[
+    "Times New Roman",
+    "Times",
+    "Liberation Serif",
+    "DejaVu Serif",
+    "Noto Serif",
+];
+const MONO: &[&str] = &[
+    "Courier New",
+    "Courier",
+    "Liberation Mono",
+    "DejaVu Sans Mono",
+    "Noto Sans Mono",
+];
+
+/// Points serif, sans-serif and monospace at fonts this machine really has.
+/// When none of the candidates is installed, any font beats a blank.
+fn pick_generic_families(db: &mut fontdb::Database) {
+    let installed: Vec<String> = db
+        .faces()
+        .filter_map(|face| face.families.first().map(|(name, _)| name.clone()))
+        .collect();
+    let pick = |candidates: &[&str]| {
+        candidates
+            .iter()
+            .find(|c| installed.iter().any(|f| f.eq_ignore_ascii_case(c)))
+            .map(|c| (*c).to_owned())
+            .or_else(|| installed.first().cloned())
+    };
+    if let Some(family) = pick(SANS) {
+        db.set_sans_serif_family(family);
+    }
+    if let Some(family) = pick(SERIF) {
+        db.set_serif_family(family);
+    }
+    if let Some(family) = pick(MONO) {
+        db.set_monospace_family(family);
+    }
 }
 
 /// True for an href that would leave the machine: URLs and UNC/network paths.
