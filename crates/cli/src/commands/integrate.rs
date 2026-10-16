@@ -157,9 +157,11 @@ fn install(args: &IntegrateArgs, ctx: &mut Ctx, host: &Host, home: &Path) -> i32
     }
     let verb = if args.dry_run { "Would write" } else { "Wrote" };
     for change in &changes {
-        let _ = match integration::surface_of(change) {
-            Some(surface) => writeln!(ctx.out, "{verb} {change} ({surface})"),
-            None => writeln!(ctx.out, "{verb} {change}"),
+        let _ = match (change, integration::surface_of(change)) {
+            // A note is advice, not something we wrote, so it gets no verb.
+            (integration::Change::Note(note), _) => writeln!(ctx.out, "{note}"),
+            (_, Some(surface)) => writeln!(ctx.out, "{verb} {change} ({surface})"),
+            (_, None) => writeln!(ctx.out, "{verb} {change}"),
         };
     }
     if !args.dry_run {
@@ -533,9 +535,9 @@ mod tests {
         );
     }
 
-    // The Explorer and Finder backends are stubs until XP-06 and XP-11, and
-    // they should say so instead of pretending something happened.
-    #[cfg(any(windows, target_os = "macos"))]
+    // The Explorer backend is a stub until XP-06, and it should say so
+    // instead of pretending something happened.
+    #[cfg(windows)]
     #[test]
     fn a_stub_backend_says_it_cannot_integrate_yet() {
         let world = World::new();

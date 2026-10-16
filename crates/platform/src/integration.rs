@@ -26,13 +26,16 @@ pub enum Change {
     File(PathBuf),
     /// A registry key, written as its full path (Windows only).
     Registry(String),
+    /// Something the user may still have to do by hand, such as turning the
+    /// Finder Quick Action on in System Settings (macOS only).
+    Note(String),
 }
 
 impl fmt::Display for Change {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Change::File(path) => write!(f, "{}", path.display()),
-            Change::Registry(key) => f.write_str(key),
+            Change::Registry(key) | Change::Note(key) => f.write_str(key),
         }
     }
 }
@@ -205,7 +208,7 @@ mod tests {
         assert_eq!(surface_of(&change), None);
     }
 
-    #[cfg(any(windows, target_os = "macos"))]
+    #[cfg(windows)]
     #[test]
     fn the_stub_backends_change_nothing_yet() {
         let home = tempfile::TempDir::new().unwrap();
@@ -213,5 +216,20 @@ mod tests {
         assert!(install(&exe, home.path(), false).unwrap().is_empty());
         assert!(uninstall(home.path(), false).unwrap().is_empty());
         assert_eq!(surfaces().len(), 1);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_install_and_uninstall_write_the_quick_action() {
+        let home = tempfile::TempDir::new().unwrap();
+        let exe = home.path().join("morphring-app");
+        let changes = install(&exe, home.path(), true).unwrap();
+        assert_eq!(
+            changes,
+            crate::finder::install(&exe, home.path(), true).unwrap()
+        );
+        assert!(matches!(changes.last(), Some(Change::Note(_))));
+        assert!(uninstall(home.path(), false).unwrap().is_empty());
+        assert_eq!(surfaces(), ["Finder"]);
     }
 }
