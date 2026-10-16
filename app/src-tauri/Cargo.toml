@@ -26,7 +26,12 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 morphring-core = { path = "../../crates/core" }
 morphring-engines = { path = "../../crates/engines" }
-tauri = { version = "2", features = ["tray-icon"] }
+# macos-private-api: transparent windows on macOS (macos-support.md §3); without
+# it a release build quietly paints the ring white. tauri-build insists the
+# feature matches `app.macOSPrivateApi` in the config on every OS, and it only
+# looks at this table, so it can't hide in a macOS-only section. Elsewhere it
+# compiles to nothing, which is the cheapest kind of feature.
+tauri = { version = "2", features = ["tray-icon", "macos-private-api"] }
 tauri-plugin-single-instance = "2"
 tauri-plugin-opener = "2"
 # Folder picker for the settings page.

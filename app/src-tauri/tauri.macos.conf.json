@@ -1,0 +1,40 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "app": {
+    "macOSPrivateApi": true
+  },
+  "bundle": {
+    "fileAssociations": [
+      {
+        "name": "Image",
+        "ext": ["png", "jpg", "jpeg", "webp", "tiff", "tif", "bmp", "gif", "ico", "avif", "heic", "heif", "jxl", "psd", "tga", "qoi", "icns", "svg"],
+        "role": "Viewer",
+        "rank": "Alternate"
+      },
+      {
+        "name": "Audio",
+        "ext": ["mp3", "wav", "flac", "aac", "m4a", "ogg", "opus", "aiff", "aif", "wma"],
+        "role": "Viewer",
+        "rank": "Alternate"
+      },
+      {
+        "name": "Video",
+        "ext": ["mp4", "mov", "mkv", "webm", "avi", "m4v", "wmv", "flv", "mpg", "mpeg", "3gp"],
+        "role": "Viewer",
+        "rank": "Alternate"
+      },
+      {
+        "name": "PDF",
+        "ext": ["pdf"],
+        "role": "Viewer",
+        "rank": "Alternate"
+      },
+      {
+        "name": "Document",
+        "ext": ["docx", "doc", "odt", "rtf", "txt", "md", "html", "epub", "xlsx", "xls", "ods", "csv", "pptx", "ppt", "odp"],
+        "role": "Viewer",
+        "rank": "Alternate"
+      }
+    ]
+  }
+}
