@@ -78,13 +78,18 @@ mod tests {
     use crate::parts::test_support::{NoOutputs, step};
 
     #[test]
-    fn the_engine_has_an_id_and_the_text_edge() {
+    fn the_engine_has_an_id_and_both_edges() {
         let engine = PopplerEngine::new();
         assert_eq!(engine.id(), "poppler");
         assert_eq!(engine.display_name(), "Poppler");
+        let edges = engine.edges();
         assert!(
-            engine
-                .edges()
+            edges
+                .iter()
+                .any(|e| e.from.as_str() == "pdf" && e.to.as_str() == "png")
+        );
+        assert!(
+            edges
                 .iter()
                 .any(|e| e.from.as_str() == "pdf" && e.to.as_str() == "txt")
         );
@@ -94,28 +99,13 @@ mod tests {
     fn a_pair_without_an_edge_is_refused() {
         let err = PopplerEngine::new()
             .convert(
-                &step("pdf", "png"),
+                &step("pdf", "mp3"),
                 &mut NoOutputs,
                 &|_| {},
                 &CancelToken::new(),
             )
             .unwrap_err();
-        assert_eq!(err.to_string(), "Poppler cannot convert pdf to png");
-    }
-
-    #[test]
-    fn the_stub_parts_say_so() {
-        let parts: [crate::parts::ConvertFn; 1] = [render::convert];
-        for convert in parts {
-            let err = convert(
-                &step("pdf", "png"),
-                &mut NoOutputs,
-                &|_| {},
-                &CancelToken::new(),
-            )
-            .unwrap_err();
-            assert_eq!(err.to_string(), "not implemented");
-        }
+        assert_eq!(err.to_string(), "Poppler cannot convert pdf to mp3");
     }
 
     #[test]
