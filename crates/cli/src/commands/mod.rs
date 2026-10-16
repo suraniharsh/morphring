@@ -4,3 +4,5 @@ pub mod convert;
 pub mod doctor;
 pub mod formats;
 pub mod integrate;
+pub mod presets;
+pub mod watch;

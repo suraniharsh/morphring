@@ -49,15 +49,44 @@ pub struct Outcome {
     pub err: String,
 }
 
-/// Runs `morphring <args>` in-process with `cwd` as the current folder and
-/// `engines` as the installed engines.
+/// Runs `morphring <args>` in-process with `cwd` as the current folder,
+/// `engines` as the installed engines and no config folder, so the user's
+/// real settings never leak into a test.
 pub fn run_in(cwd: &Path, engines: Vec<Box<dyn Converter>>, args: &[&str]) -> Outcome {
     run_with_cancel(cwd, engines, args, CancelToken::new())
+}
+
+/// Like [`run_in`], with `config_dir` as the folder holding settings.json and
+/// presets.json (usually a temp folder the test filled).
+pub fn run_in_with_config(
+    cwd: &Path,
+    config_dir: &Path,
+    engines: Vec<Box<dyn Converter>>,
+    args: &[&str],
+) -> Outcome {
+    run_full(
+        cwd,
+        Some(config_dir.to_path_buf()),
+        engines,
+        args,
+        CancelToken::new(),
+    )
 }
 
 /// Like [`run_in`], with a cancel token the test controls.
 pub fn run_with_cancel(
     cwd: &Path,
+    engines: Vec<Box<dyn Converter>>,
+    args: &[&str],
+    cancel: CancelToken,
+) -> Outcome {
+    run_full(cwd, None, engines, args, cancel)
+}
+
+/// The one place that builds a `Ctx`; the helpers above pick the knobs.
+fn run_full(
+    cwd: &Path,
+    config_dir: Option<PathBuf>,
     engines: Vec<Box<dyn Converter>>,
     args: &[&str],
     cancel: CancelToken,
@@ -70,6 +99,7 @@ pub fn run_with_cancel(
             cwd: cwd.to_path_buf(),
             cancel,
             engines,
+            config_dir,
         };
         morphring::run_with(args.iter().map(OsString::from), &mut ctx)
     };

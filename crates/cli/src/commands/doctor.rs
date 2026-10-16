@@ -173,6 +173,7 @@ mod tests {
                 cwd: PathBuf::from("/"),
                 cancel: CancelToken::new(),
                 engines,
+                config_dir: None,
             };
             run_in(&DoctorArgs { json }, &mut ctx, &folders())
         };
@@ -328,6 +329,7 @@ temp     /tmp/morphring
                     cwd: PathBuf::from("/"),
                     cancel: CancelToken::new(),
                     engines: all_missing(),
+                    config_dir: None,
                 };
                 run_in(&DoctorArgs { json }, &mut ctx, &folders())
             };

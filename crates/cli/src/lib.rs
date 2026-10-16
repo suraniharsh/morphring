@@ -6,9 +6,11 @@ pub mod commands;
 pub mod ctx;
 pub mod inputs;
 pub mod report;
+mod resolve;
 
 use std::ffi::OsString;
 use std::io::Write;
+use std::path::PathBuf;
 
 use clap::Parser;
 use clap::error::{ContextKind, ContextValue, ErrorKind};
@@ -50,8 +52,16 @@ pub fn run(
         cwd,
         cancel,
         engines: morphring_engines::registry::all(),
+        config_dir: config_dir(),
     };
     dispatch(command, &mut ctx)
+}
+
+/// The folder that holds settings.json and presets.json, the same one the
+/// app uses. `None` when the OS gives us no home to put it in, in which case
+/// everything runs on the built-in defaults.
+fn config_dir() -> Option<PathBuf> {
+    directories::ProjectDirs::from("", "", "morphring").map(|dirs| dirs.config_dir().to_path_buf())
 }
 
 /// Runs the command line against an explicit context. `args` excludes the
@@ -101,13 +111,30 @@ fn parse(
             Parsed::Exit(0)
         }
         Some(Command::Version) => Parsed::Exit(print_version(out)),
-        Some(command) => Parsed::Run(command),
+        Some(command) => match target_choice_error(&command) {
+            Some(message) => Parsed::Exit(usage_error(err, message)),
+            None => Parsed::Run(command),
+        },
     }
+}
+
+/// `convert` and `watch` need exactly one of `--to` and `--preset`. Checked
+/// after clap, so a missing input still wins (Filee's order: `convert --to
+/// jpg` says "at least one file", `convert a.png` says this).
+fn target_choice_error(command: &Command) -> Option<&'static str> {
+    let (to, preset) = match command {
+        Command::Convert(args) => (&args.to, &args.preset),
+        Command::Watch(args) => (&args.to, &args.preset),
+        _ => return None,
+    };
+    (to.is_some() == preset.is_some()).then_some("Use either --to <format> or --preset <preset>.")
 }
 
 fn dispatch(command: Command, ctx: &mut Ctx) -> i32 {
     match command {
         Command::Convert(args) => commands::convert::run(&args, ctx),
+        Command::Watch(args) => commands::watch::run(&args, ctx),
+        Command::Presets => commands::presets::run(ctx),
         Command::Formats(args) => commands::formats::run(&args, ctx),
         Command::Doctor(args) => commands::doctor::run(&args, ctx),
         Command::Integrate(args) => {
@@ -164,11 +191,12 @@ fn usage_message(e: &clap::Error) -> String {
                 Some(ContextValue::String(s)) => s.clone(),
                 _ => String::new(),
             };
-            // Same order as Filee: inputs first, then the target.
+            // --to/--preset are checked after clap (target_choice_error), so
+            // the inputs are the only thing clap can find missing here.
             if missing.contains("INPUTS") {
                 "Give at least one file or folder to convert.".to_owned()
-            } else if missing.contains("--to") {
-                "Give a target format with --to <format>.".to_owned()
+            } else if missing.contains("FOLDER") {
+                "Give exactly one folder to watch.".to_owned()
             } else {
                 fallback_message(e)
             }
@@ -178,6 +206,12 @@ fn usage_message(e: &clap::Error) -> String {
                 && string(ContextKind::InvalidValue).is_some_and(|v| !v.is_empty()) =>
         {
             "--quality must be a number from 1 to 100.".to_owned()
+        }
+        ErrorKind::ValueValidation | ErrorKind::InvalidValue
+            if option() == "--settle"
+                && string(ContextKind::InvalidValue).is_some_and(|v| !v.is_empty()) =>
+        {
+            "--settle must be a number of seconds.".to_owned()
         }
         ErrorKind::InvalidValue if string(ContextKind::InvalidValue).is_none_or(str::is_empty) => {
             format!("{} needs a value.", option())
@@ -224,6 +258,7 @@ mod tests {
                 cwd: PathBuf::from("/"),
                 cancel: CancelToken::new(),
                 engines: Vec::new(),
+                config_dir: None,
             };
             run_with(args.iter().map(OsString::from), &mut ctx)
         };
@@ -283,7 +318,7 @@ mod tests {
 
     #[test]
     fn help_for_a_command_matches_its_dash_dash_help() {
-        for name in ["convert", "formats", "doctor"] {
+        for name in ["convert", "watch", "formats", "presets", "doctor"] {
             let (code, via_help, _) = run_args(&["help", name]);
             assert_eq!(code, 0);
             let (code, via_flag, _) = run_args(&[name, "--help"]);
@@ -318,7 +353,10 @@ mod tests {
     fn general_help_lists_every_command_and_exit_codes() {
         for needle in [
             "morphring convert",
+            "--preset",
+            "morphring watch",
             "morphring formats",
+            "morphring presets",
             "morphring doctor",
             "morphring help",
             "morphring version",
@@ -336,8 +374,8 @@ mod tests {
         assert_usage_error(&["bogus"], "Unknown command 'bogus'.");
         assert_usage_error(&["--bogus"], "Unknown option '--bogus'.");
         assert_usage_error(
-            &["convert", "a.png", "--to", "jpg", "--keep-dates"],
-            "Unknown option '--keep-dates'.",
+            &["convert", "a.png", "--to", "jpg", "--settle", "2"],
+            "Unknown option '--settle'.",
         );
         assert_usage_error(&["version", "extra"], "Unexpected argument 'extra'.");
     }
@@ -351,10 +389,63 @@ mod tests {
         );
         assert_usage_error(
             &["convert", "a.png"],
-            "Give a target format with --to <format>.",
+            "Use either --to <format> or --preset <preset>.",
         );
+        assert_usage_error(
+            &["convert", "a.png", "--to", "jpg", "--preset", "to-png"],
+            "Use either --to <format> or --preset <preset>.",
+        );
+        assert_usage_error(&["convert", "a.png", "-p"], "--preset needs a value.");
         assert_usage_error(&["convert", "a.png", "--to"], "--to needs a value.");
         assert_usage_error(&["convert", "a.png", "-t"], "--to needs a value.");
+    }
+
+    #[test]
+    fn watch_needs_one_folder_and_a_target() {
+        assert_usage_error(&["watch"], "Give exactly one folder to watch.");
+        assert_usage_error(
+            &["watch", "--to", "jpg"],
+            "Give exactly one folder to watch.",
+        );
+        assert_usage_error(
+            &["watch", "inbox", "other", "--to", "jpg"],
+            "Unexpected argument 'other'.",
+        );
+        assert_usage_error(
+            &["watch", "inbox"],
+            "Use either --to <format> or --preset <preset>.",
+        );
+        assert_usage_error(
+            &["watch", "inbox", "-t", "pdf", "-p", "to-pdf"],
+            "Use either --to <format> or --preset <preset>.",
+        );
+        for settle in ["-1", "soon", "inf"] {
+            assert_usage_error(
+                &["watch", "inbox", "--to", "pdf", "--settle", settle],
+                "--settle must be a number of seconds.",
+            );
+        }
+        assert_usage_error(
+            &["watch", "inbox", "--to", "pdf", "--settle"],
+            "--settle needs a value.",
+        );
+        assert_usage_error(
+            &["watch", "inbox", "--to", "pdf", "--skip", "--overwrite"],
+            "Use either --overwrite or --skip, not both.",
+        );
+    }
+
+    #[test]
+    fn watch_and_presets_reach_their_stubs() {
+        assert_eq!(
+            run_args(&["watch", "inbox", "--to", "pdf"]),
+            (
+                2,
+                String::new(),
+                "morphring: watch is not available yet\n".into()
+            )
+        );
+        assert_eq!(run_args(&["presets"]), (0, String::new(), String::new()));
     }
 
     #[test]
@@ -399,7 +490,7 @@ mod tests {
             panic!("not convert")
         };
         assert_eq!(args.inputs, ["a", "b"]);
-        assert_eq!(args.to, "jpg");
+        assert_eq!(args.to.as_deref(), Some("jpg"));
         assert!(args.json);
     }
 }

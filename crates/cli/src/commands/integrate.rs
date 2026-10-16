@@ -287,6 +287,7 @@ mod tests {
                     cwd: self.dir.path().to_path_buf(),
                     cancel: CancelToken::new(),
                     engines: Vec::new(),
+                    config_dir: None,
                 };
                 run(&args, &mut ctx, host)
             };

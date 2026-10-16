@@ -17,4 +17,7 @@ pub struct Ctx<'a> {
     pub cancel: CancelToken,
     /// Engines in priority order.
     pub engines: Vec<Box<dyn Converter>>,
+    /// Where settings and presets live. `None` means the built-in defaults
+    /// only: tests, and machines without a home folder.
+    pub config_dir: Option<PathBuf>,
 }

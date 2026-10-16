@@ -143,6 +143,7 @@ mod tests {
                     .into_iter()
                     .map(|e| Box::new(e) as Box<dyn Converter>)
                     .collect(),
+                config_dir: None,
             };
             run_with(args.iter().map(OsString::from), &mut ctx)
         };

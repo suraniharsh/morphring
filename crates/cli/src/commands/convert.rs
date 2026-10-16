@@ -21,11 +21,20 @@ const EXIT_NOTHING_TO_DO: i32 = 3;
 
 /// Runs `morphring convert` and returns the exit code.
 pub fn run(args: &ConvertArgs, ctx: &mut Ctx) -> i32 {
-    let Some(target) = formats::lookup_target(&args.to) else {
+    // lib.rs already insisted on exactly one of --to and --preset, and --preset
+    // isn't wired up until P2-41, so a missing --to can only mean a caller
+    // skipped the front door. Say the same thing the front door would have.
+    let Some(to) = args.to.as_deref() else {
         let _ = writeln!(
             ctx.err,
-            "morphring: unknown format '{}'. Run 'morphring formats' for the list.",
-            args.to
+            "morphring: Use either --to <format> or --preset <preset>."
+        );
+        return EXIT_USAGE;
+    };
+    let Some(target) = formats::lookup_target(to) else {
+        let _ = writeln!(
+            ctx.err,
+            "morphring: unknown format '{to}'. Run 'morphring formats' for the list."
         );
         return EXIT_USAGE;
     };
@@ -168,7 +177,8 @@ mod tests {
     fn args(extra: &[&str]) -> ConvertArgs {
         ConvertArgs {
             inputs: vec![OsString::from("a.png")],
-            to: "jpg".into(),
+            to: Some("jpg".into()),
+            preset: None,
             output: extra
                 .iter()
                 .position(|a| *a == "-o")
@@ -179,6 +189,7 @@ mod tests {
             skip: extra.contains(&"--skip"),
             json: false,
             quiet: false,
+            keep_dates: false,
         }
     }
 

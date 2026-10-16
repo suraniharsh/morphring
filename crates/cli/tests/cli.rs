@@ -5,12 +5,13 @@
 //! Everything goes through `run_with()` in-process, except help and version,
 //! which run the built binary with an empty `PATH` to prove they need nothing.
 //!
-//! Deferred to v0.2, because the features they test don't exist yet:
-//! - `Keep_dates_copies_the_dates_of_the_originals` (--keep-dates)
+//! Still waiting for their features (v0.2 tasks P2-40 to P2-42):
+//! - `Keep_dates_copies_the_dates_of_the_originals` (--keep-dates is parsed
+//!   but not applied yet)
 //! - `Watch_needs_an_existing_folder` and
-//!   `Watch_converts_files_that_arrive_until_cancelled` (the watch command)
-//! - the preset rows of `Wrong_arguments_explain_themselves_with_exit_code_2`,
-//!   the `presets` half of `Formats_and_presets_are_listed`, and the --preset
+//!   `Watch_converts_files_that_arrive_until_cancelled` (watch is a stub)
+//! - the unknown-preset row of `Wrong_arguments_explain_themselves_with_exit_code_2`,
+//!   the `to-png` check of `Formats_and_presets_are_listed`, and the --preset
 //!   in `A_folder_converts_the_files_filee_knows` (here it says --to jpg)
 
 mod common;
@@ -146,9 +147,16 @@ fn wrong_arguments_explain_themselves_with_exit_code_2() {
     let a = png(tmp.path(), "a.png");
     let a = str_of(&a);
 
-    // Filee's table minus the two --preset rows, which wait for presets.
-    let cases: [(&[&str], &str); 5] = [
-        (&["convert", a], "--to"),
+    // Filee's table minus the unknown-preset row, which waits for P2-41.
+    let cases: [(&[&str], &str); 6] = [
+        (
+            &["convert", a],
+            "Use either --to <format> or --preset <preset>.",
+        ),
+        (
+            &["convert", a, "--to", "jpg", "--preset", "to-png"],
+            "Use either --to <format> or --preset <preset>.",
+        ),
         (&["convert", a, "--to", "nosuchformat"], "unknown format"),
         (&["convert", "--to", "jpg"], "at least one file"),
         (
@@ -177,6 +185,18 @@ fn a_missing_input_is_reported() {
 
     assert_eq!(r.code, 2, "{r:?}");
     assert!(r.err.contains("not found"), "{}", r.err);
+}
+
+#[test]
+fn presets_are_listed() {
+    let tmp = TempDir::new().unwrap();
+
+    let r = run(tmp.path(), &["presets"]);
+
+    // The table itself arrives with P2-40; for now the command only has to
+    // exist and succeed quietly.
+    assert_eq!(r.code, 0, "{r:?}");
+    assert_eq!(r.err, "");
 }
 
 #[test]
@@ -217,6 +237,17 @@ fn help_and_version_need_no_engines() {
     let (code, out) = morphring(&["help", "convert"]);
     assert_eq!(code, Some(0));
     assert!(out.contains("--to"), "{out}");
+
+    let (code, out) = morphring(&["help", "watch"]);
+    assert_eq!(code, Some(0));
+    assert!(out.contains("--move-originals"), "{out}");
+    assert!(out.contains("--settle <seconds>"), "{out}");
+    #[cfg(not(windows))]
+    assert!(out.contains("(default 5)"), "{out}");
+
+    let (code, out) = morphring(&["help", "presets"]);
+    assert_eq!(code, Some(0));
+    assert!(out.contains("--preset <id or name>"), "{out}");
 
     let (code, out) = morphring(&["--version"]);
     assert_eq!(code, Some(0));
