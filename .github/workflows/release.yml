@@ -1,17 +1,21 @@
-# Draft release for v* tags: test, build the Linux x86_64 CLI, smoke-test it, bundle the ring app as .deb and
-# .AppImage, package everything with a SHA256SUMS.txt and open a *draft* GitHub release whose notes are the tag's
-# CHANGELOG.md section. A human publishes the draft after a look. A tag push does not wait for ci.yml, so this job
-# runs the tests itself instead of trusting that someone did.
-# One job on purpose: a half-finished multi-job release can leave a draft with half its assets, and nobody wants to
-# explain to a user why the checksum file lists a tarball that isn't there.
+# Draft release for v* tags. Build jobs, one per OS, each test or smoke-test what they make and upload it:
+#   linux        the x86_64 CLI tarball plus the ring app as .deb and .AppImage
+#   windows-cli  the x86_64 CLI as a zip
+#   macos-cli    the arm64 CLI, ad-hoc signed, as a tarball
+# Then `publish` collects every dist/* file, writes one SHA256SUMS.txt and opens a *draft* GitHub release whose notes
+# are the tag's CHANGELOG.md section. A human publishes the draft after a look. A tag push does not wait for ci.yml,
+# so the Linux job runs the tests itself instead of trusting that someone did.
+# Several jobs are fine now: `publish` needs every build job, so it only runs when all of them succeeded, and a draft
+# with half its assets (and a checksum file listing a tarball that isn't there) can no longer happen. New build jobs
+# (the Windows installer, the macOS dmg) only have to upload a `dist-<job>` artifact and add themselves to `needs`.
 name: Release
 
 on:
   push:
     tags: ['v*']
   # A dry run from any branch: `gh workflow run release.yml --ref <branch>`. I am not tagging a release just to find
-  # out that linuxdeploy has opinions about FUSE again. Without a tag the version check and the draft release are
-  # skipped, and dist/ goes up as a plain workflow artifact instead.
+  # out that linuxdeploy has opinions about FUSE again. Without a tag the binaries are checked against Cargo.toml's
+  # version instead, the draft release is skipped, and the combined dist/ goes up as a plain workflow artifact.
   workflow_dispatch:
 
 permissions:
@@ -19,7 +23,7 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
-  # The one Tauri CLI version every bundling step uses (this job now, the Windows and macOS jobs later). Pinned,
+  # The one Tauri CLI version every bundling step uses (the linux job now, the Windows and macOS app jobs later). Pinned,
   # because `npx @tauri-apps/cli@2` means "whatever was published five minutes ago", and I'd rather not debug a
   # release that broke while I was asleep. The CLI's numbers don't track the tauri crate's (CLI 2.12.x drives crate
   # 2.11.x just fine); the `Check Tauri CLI` step below makes sure the pair still agrees. Pick the newest 2.x that
@@ -27,7 +31,7 @@ env:
   TAURI_CLI_VERSION: "2.12.1"
 
 jobs:
-  linux-cli:
+  linux:
     runs-on: ubuntu-22.04
     # The CLI alone fits in 30 minutes; WebKit, tao and wry from a cold cache do not.
     timeout-minutes: 60
@@ -57,21 +61,24 @@ jobs:
       - name: Build
         run: cargo build --release --locked -p morphring
 
-      # On a tag the binary must agree with the tag. On a dry run there is no tag to agree with, so the binary's own
-      # version names the assets and the CHANGELOG section instead.
+      # On a tag the binary must agree with the tag; on a dry run there is no tag, so it must agree with Cargo.toml.
+      # Either way the agreed version names the assets. The same block lives in every build job: three copies of
+      # twelve lines beat a composite action nobody will remember exists.
       - name: Smoke test
         run: |
           set -euo pipefail
           bin=target/release/morphring
-          actual="$("$bin" --version)"
           if [ "$GITHUB_REF_TYPE" = tag ]; then
-            expected="morphring ${GITHUB_REF_NAME#v}"
-            if [ "$actual" != "$expected" ]; then
-              echo "::error::version mismatch: tag says '$expected', binary says '$actual'"
-              exit 1
-            fi
+            want="${GITHUB_REF_NAME#v}"
+          else
+            want="$(sed -nE 's/^version = "([^"]+)"$/\1/p' Cargo.toml | head -n1)"
           fi
-          echo "VERSION=${actual#morphring }" >> "$GITHUB_ENV"
+          actual="$("$bin" --version)"
+          if [ "$actual" != "morphring $want" ]; then
+            echo "::error::version mismatch: expected 'morphring $want', binary says '$actual'"
+            exit 1
+          fi
+          echo "VERSION=$want" >> "$GITHUB_ENV"
           T="$(mktemp -d)"
           "$bin" convert crates/engines/tests/fixtures/sample.wav --to mp3 -o "$T"
           if [ ! -s "$T/sample.mp3" ]; then
@@ -112,16 +119,19 @@ jobs:
           APPIMAGE_EXTRACT_AND_RUN: "1"
         run: npx --yes "@tauri-apps/cli@$TAURI_CLI_VERSION" build --bundles deb,appimage --ci
 
+      # dist/ holds release assets and nothing else, so `publish` can take dist/* without a guest list. The tarball's
+      # staging folder lives in RUNNER_TEMP for that reason.
       - name: Package
         run: |
           set -euo pipefail
           name="morphring-v${VERSION}-x86_64-linux"
           deb="morphring-app_${VERSION}_amd64.deb"
           appimage="MorphRing_${VERSION}_x86_64.AppImage"
-          mkdir -p "dist/$name"
-          cp target/release/morphring README.md LICENSE THIRD-PARTY-NOTICES.md CHANGELOG.md "dist/$name/"
+          stage="$RUNNER_TEMP/stage"
+          mkdir -p dist "$stage/$name"
+          cp target/release/morphring README.md LICENSE THIRD-PARTY-NOTICES.md CHANGELOG.md "$stage/$name/"
           # --owner/--group so the tarball doesn't unpack as uid 1001 "runner" on someone's laptop.
-          tar -C dist --owner=0 --group=0 -czf "dist/$name.tar.gz" "$name"
+          tar -C "$stage" --owner=0 --group=0 -czf "dist/$name.tar.gz" "$name"
           bundle=app/src-tauri/target/release/bundle
           # Exactly one of each, or the rename below would quietly pick a stale one.
           debs=("$bundle"/deb/*.deb)
@@ -133,10 +143,8 @@ jobs:
           cp "${debs[0]}" "dist/$deb"
           cp "${appimages[0]}" "dist/$appimage"
           chmod +x "dist/$appimage"
-          (cd dist && sha256sum "$name.tar.gz" "$deb" "$appimage" > SHA256SUMS.txt)
-          cat dist/SHA256SUMS.txt
+          ls -l dist
           {
-            echo "ASSET=dist/$name.tar.gz"
             echo "DEB=dist/$deb"
             echo "APPIMAGE=dist/$appimage"
           } >> "$GITHUB_ENV"
@@ -154,6 +162,208 @@ jobs:
             echo "::error::$APPIMAGE is only $size bytes; a real one bundles WebKit and is far bigger"
             exit 1
           fi
+
+      # The artifact zip drops the AppImage's executable bit; publish puts it back.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-linux
+          if-no-files-found: error
+          retention-days: 7
+          path: dist/*
+
+  windows-cli:
+    # Fallback label if this one ever goes missing: windows-latest (PLAN-v0.2.md, risks).
+    runs-on: windows-2025
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: bash
+    steps:
+      # Trust, but print: if the label quietly points at a different image some day, the log says so first.
+      - name: Runner check
+        shell: pwsh
+        run: |
+          [Environment]::OSVersion
+          $env:PROCESSOR_ARCHITECTURE
+
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        run: rustup toolchain install && rustup show active-toolchain
+
+      - uses: Swatinem/rust-cache@v2
+
+      # Chocolatey's shims put ffmpeg.exe and ffprobe.exe side by side on PATH, which is what discovery wants.
+      - name: Install ffmpeg
+        run: choco install ffmpeg -y --no-progress
+
+      - name: Build
+        run: cargo build --release --locked -p morphring
+
+      - name: Smoke test
+        run: |
+          set -euo pipefail
+          bin=target/release/morphring.exe
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            want="${GITHUB_REF_NAME#v}"
+          else
+            want="$(sed -nE 's/^version = "([^"]+)"$/\1/p' Cargo.toml | head -n1)"
+          fi
+          # tr -d '\r', because I refuse to lose an afternoon to a carriage return again.
+          actual="$("$bin" --version | tr -d '\r')"
+          if [ "$actual" != "morphring $want" ]; then
+            echo "::error::version mismatch: expected 'morphring $want', binary says '$actual'"
+            exit 1
+          fi
+          echo "VERSION=$want" >> "$GITHUB_ENV"
+          # RUNNER_TEMP is D:\a\_temp here; cygpath turns it into something bash and the exe both understand.
+          T="$(cygpath -u "$RUNNER_TEMP")/smoke"
+          mkdir -p "$T"
+          "$bin" convert crates/engines/tests/fixtures/sample.wav --to mp3 -o "$T"
+          if [ ! -s "$T/sample.mp3" ]; then
+            echo "::error::smoke conversion produced no $T/sample.mp3"
+            exit 1
+          fi
+
+      # 7z ships on the image; zip is what Windows people double-click, so a zip it is.
+      - name: Package
+        run: |
+          set -euo pipefail
+          name="morphring-v${VERSION}-x86_64-windows"
+          stage="$(cygpath -u "$RUNNER_TEMP")/stage"
+          mkdir -p dist "$stage/$name"
+          cp target/release/morphring.exe README.md LICENSE THIRD-PARTY-NOTICES.md CHANGELOG.md "$stage/$name/"
+          (cd "$stage" && 7z a -tzip -bd "$name.zip" "$name" > /dev/null)
+          mv "$stage/$name.zip" dist/
+          7z l "dist/$name.zip"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-windows-cli
+          if-no-files-found: error
+          retention-days: 7
+          path: dist/*
+
+  macos-cli:
+    # Fallback label if this one ever goes missing: macos-15 (also arm64; the runner check below insists).
+    runs-on: macos-26
+    timeout-minutes: 45
+    steps:
+      # The asset says aarch64, so the machine had better be one. An Intel image behind a renamed label fails here,
+      # not in a user's Downloads folder.
+      - name: Runner check
+        run: |
+          set -euo pipefail
+          sw_vers
+          arch="$(uname -m)"
+          echo "uname -m: $arch"
+          if [ "$arch" != arm64 ]; then
+            echo "::error::macos-cli must run on arm64, this runner is $arch"
+            exit 1
+          fi
+
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        run: rustup toolchain install && rustup show active-toolchain
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install ffmpeg
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: "1"
+          HOMEBREW_NO_INSTALL_CLEANUP: "1"
+        run: brew install ffmpeg
+
+      - name: Build
+        run: cargo build --release --locked -p morphring
+
+      # Ad-hoc, not Developer ID: Gatekeeper still frowns at a downloaded binary, but an unsigned arm64 binary gets
+      # killed outright, which is a worse first impression. --force because the linker already left an ad-hoc
+      # signature and codesign won't replace one without being asked.
+      - name: Sign (ad-hoc)
+        run: |
+          set -euo pipefail
+          codesign --force -s - target/release/morphring
+          codesign -dv target/release/morphring
+
+      - name: Smoke test
+        run: |
+          set -euo pipefail
+          bin=target/release/morphring
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            want="${GITHUB_REF_NAME#v}"
+          else
+            want="$(sed -nE 's/^version = "([^"]+)"$/\1/p' Cargo.toml | head -n1)"
+          fi
+          actual="$("$bin" --version)"
+          if [ "$actual" != "morphring $want" ]; then
+            echo "::error::version mismatch: expected 'morphring $want', binary says '$actual'"
+            exit 1
+          fi
+          echo "VERSION=$want" >> "$GITHUB_ENV"
+          T="$(mktemp -d)"
+          "$bin" convert crates/engines/tests/fixtures/sample.wav --to mp3 -o "$T"
+          if [ ! -s "$T/sample.mp3" ]; then
+            echo "::error::smoke conversion produced no $T/sample.mp3"
+            exit 1
+          fi
+
+      # bsdtar spells GNU's --owner/--group as --uid/--gid, and COPYFILE_DISABLE keeps the ._ AppleDouble files out.
+      - name: Package
+        env:
+          COPYFILE_DISABLE: "1"
+        run: |
+          set -euo pipefail
+          name="morphring-v${VERSION}-aarch64-macos"
+          stage="$RUNNER_TEMP/stage"
+          mkdir -p dist "$stage/$name"
+          cp target/release/morphring README.md LICENSE THIRD-PARTY-NOTICES.md CHANGELOG.md "$stage/$name/"
+          tar -C "$stage" --uid 0 --gid 0 -czf "dist/$name.tar.gz" "$name"
+          tar -tzvf "dist/$name.tar.gz"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-macos-cli
+          if-no-files-found: error
+          retention-days: 7
+          path: dist/*
+
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # Every build job, so this runs only when all of them succeeded. XP-09 and XP-12 add their jobs here.
+    needs: [linux, windows-cli, macos-cli]
+    steps:
+      - uses: actions/checkout@v4
+
+      # Every build job uploads a dist-<job> artifact; merge them all into one flat dist/.
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: dist-*
+          merge-multiple: true
+          path: dist
+
+      # The build jobs already checked their binaries against this same version.
+      - name: Version
+        run: |
+          set -euo pipefail
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            version="${GITHUB_REF_NAME#v}"
+          else
+            version="$(sed -nE 's/^version = "([^"]+)"$/\1/p' Cargo.toml | head -n1)"
+          fi
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+
+      - name: Checksums
+        run: |
+          set -euo pipefail
+          chmod +x dist/*.AppImage 2>/dev/null || true
+          rm -f dist/SHA256SUMS.txt
+          (cd dist && sha256sum -- * > "$RUNNER_TEMP/SHA256SUMS.txt")
+          mv "$RUNNER_TEMP/SHA256SUMS.txt" dist/
+          cat dist/SHA256SUMS.txt
+          (cd dist && sha256sum -c SHA256SUMS.txt)
 
       # Notes = the lines between '## [x.y.z]' and the next '## [' heading, heading excluded.
       - name: Extract release notes
@@ -175,20 +385,17 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release create "$GITHUB_REF_NAME" \
+            --repo "$GITHUB_REPOSITORY" \
             --draft \
             --verify-tag \
             --title "MorphRing ${GITHUB_REF_NAME#v}" \
             --notes-file "$RUNNER_TEMP/notes.md" \
-            "$ASSET" "$DEB" "$APPIMAGE" dist/SHA256SUMS.txt
+            dist/*
 
       - name: Upload dry-run artifacts
         if: github.ref_type != 'tag'
         uses: actions/upload-artifact@v4
         with:
-          name: morphring-${{ env.VERSION }}-linux
+          name: morphring-${{ env.VERSION }}-dist
           if-no-files-found: error
-          path: |
-            dist/*.tar.gz
-            dist/*.deb
-            dist/*.AppImage
-            dist/SHA256SUMS.txt
+          path: dist/*
