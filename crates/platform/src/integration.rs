@@ -208,16 +208,6 @@ mod tests {
         assert_eq!(surface_of(&change), None);
     }
 
-    #[cfg(windows)]
-    #[test]
-    fn the_stub_backends_change_nothing_yet() {
-        let home = tempfile::TempDir::new().unwrap();
-        let exe = home.path().join("morphring-app");
-        assert!(install(&exe, home.path(), false).unwrap().is_empty());
-        assert!(uninstall(home.path(), false).unwrap().is_empty());
-        assert_eq!(surfaces().len(), 1);
-    }
-
     #[cfg(target_os = "macos")]
     #[test]
     fn macos_install_and_uninstall_write_the_quick_action() {

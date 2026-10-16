@@ -417,6 +417,9 @@ mod tests {
         assert!(!world.menu("nautilus").exists());
     }
 
+    // Not on Windows: there a real install writes the real HKCU verb, and
+    // tests never get to touch that one.
+    #[cfg(not(windows))]
     #[test]
     fn install_twice_is_fine() {
         let world = World::new();
@@ -488,8 +491,9 @@ mod tests {
                 format!("morphring: {message}\nRun 'morphring help integrate' for usage.\n")
             );
         }
-        // Case does not matter, as with help.
-        assert_eq!(world.run(&["INSTALL"], &host).0, 0);
+        // Case does not matter, as with help. A dry run, because on Windows a real
+        // install would scribble our verb into the registry of whoever runs the tests.
+        assert_eq!(world.run(&["INSTALL", "--dry-run"], &host).0, 0);
     }
 
     #[test]
@@ -533,22 +537,5 @@ mod tests {
             english_list(&integration::surfaces()),
             "Dolphin, Nautilus, Nemo and Thunar"
         );
-    }
-
-    // The Explorer backend is a stub until XP-06, and it should say so
-    // instead of pretending something happened.
-    #[cfg(windows)]
-    #[test]
-    fn a_stub_backend_says_it_cannot_integrate_yet() {
-        let world = World::new();
-        let (code, out, err) = world.run(&["install", "--dry-run"], &world.host(false));
-        assert_eq!((code, err.as_str()), (0, ""));
-        assert_eq!(
-            out,
-            "MorphRing cannot add a context menu entry on this system yet.\n"
-        );
-        let (code, out, _) = world.run(&["uninstall"], &world.host(true));
-        assert_eq!(code, 0);
-        assert_eq!(out, "No MorphRing context menu entries to remove.\n");
     }
 }
