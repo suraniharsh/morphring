@@ -255,7 +255,8 @@ pub fn open_ring<R: Runtime>(app: &AppHandle<R>, files: Vec<PathBuf>) {
 }
 
 fn hide_main<R: Runtime>(app: &AppHandle<R>) {
-    // Let chains would read nicer, but they need Rust 1.88 and we promise 1.85.
+    // Let chains would read nicer, and the 1.93 MSRV allows them now; this nest
+    // predates the bump and works fine, so it stays until someone is bored.
     if let Some(main) = app.get_webview_window(MAIN_WINDOW) {
         if let Err(e) = main.hide() {
             tracing::debug!("could not hide the main window: {e}");

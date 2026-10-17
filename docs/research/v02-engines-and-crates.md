@@ -24,7 +24,7 @@ This updates `docs/research/rust-conversion-ecosystem.md` (2026-10-15). Versions
 | `--keep-dates` | **`filetime` 0.2.29** (mtime, atime) | std `FileTimesExt::set_created` (Windows/macOS, v0.4) | - |
 | Pandoc | **External `pandoc`** (3.11, installed), Filee's tables verbatim | - | Linking anything (pandoc is GPL) |
 
-Two housekeeping changes come with this: `deny.toml` must allow **`CC0-1.0`** (the licence of `notify`), and the workspace `rust-version` must go from 1.85 to **1.92** (`krilla`, `krilla-svg` and `hayro` need 1.92; `image`, `zip`, `lopdf` and `notify` need 1.88). The pinned toolchain is stable 1.98, so this changes nothing for CI.
+Two housekeeping changes come with this: `deny.toml` must allow **`CC0-1.0`** (the licence of `notify`), and the workspace `rust-version` must go from the v0.1 value (the edition 2024 minimum) to **1.92** (`krilla`, `krilla-svg` and `hayro` need 1.92; `image`, `zip`, `lopdf` and `notify` need 1.88). The pinned toolchain is stable 1.98, so this changes nothing for CI.
 
 ## 1. Verified versions (crates.io API, 2026-10-16)
 

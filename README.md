@@ -51,7 +51,7 @@ install -Dm755 morphring-v0.1.0-x86_64-linux/morphring ~/.local/bin/morphring
 
 ### From source
 
-You need a stable Rust toolchain (1.85 or newer; `rust-toolchain.toml` picks it for
+You need a stable Rust toolchain (1.93 or newer; `rust-toolchain.toml` picks it for
 you with rustup).
 
 ```sh
