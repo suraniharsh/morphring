@@ -8,7 +8,7 @@
 //! clockwise from 12 o'clock". The "mixed" profiles (`is_fallback`) catch
 //! whatever the normal ones don't, which on a real desktop is a lot.
 
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 use std::io;
 use std::path::Path;
 
@@ -16,6 +16,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::builtin;
 use crate::formats::{self, Category};
+use crate::migrate;
 use crate::preset::Preset;
 use crate::settings::Store;
 
@@ -29,8 +30,10 @@ pub const PRESETS_FILE: &str = "presets.json";
 /// File name of the profile list inside the store dir.
 pub const PROFILES_FILE: &str = "profiles.json";
 
-/// Current `schemaVersion` of `presets.json` and `profiles.json`.
-pub const LIBRARY_SCHEMA_VERSION: u32 = 1;
+/// Current `schemaVersion` of `presets.json` and `profiles.json`. Version 2
+/// brought Filee's newer built-ins and the `removedBuiltins` list; see
+/// [`crate::migrate`] for what each version adds.
+pub const LIBRARY_SCHEMA_VERSION: u32 = 2;
 
 /// One ring layout for a family of source files.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -349,6 +352,10 @@ impl Default for PresetsFile {
 struct ProfilesFile {
     schema_version: u32,
     profiles: Vec<ToolbarProfile>,
+    /// Built-ins the user deleted, so upgrades don't bring them back. Keys
+    /// are `preset:<id>`, `profile:<id>` and `slice:<profile>/<preset>`.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    removed_builtins: Vec<String>,
 }
 
 impl Default for ProfilesFile {
@@ -356,6 +363,7 @@ impl Default for ProfilesFile {
         Self {
             schema_version: LIBRARY_SCHEMA_VERSION,
             profiles: builtin_profiles(),
+            removed_builtins: Vec::new(),
         }
     }
 }
@@ -384,22 +392,48 @@ impl Library {
 
     /// Reads `presets.json` and `profiles.json` from `store`. A missing file
     /// gives the built-ins; a corrupt one is copied to `<file>.broken` and
-    /// also gives the built-ins. The result is made consistent before it is
-    /// returned.
+    /// also gives the built-ins. A library from an older schema is upgraded
+    /// ([`migrate::upgrade`]) and saved right away, once. The result is made
+    /// consistent before it is returned.
     pub fn load(store: &Store) -> Self {
         let presets: PresetsFile = store.read_json(PRESETS_FILE);
         let profiles: ProfilesFile = store.read_json(PROFILES_FILE);
+        // A missing file reads as the current version, so the older of the
+        // two decides. Mixing files from two versions is a choice, but not
+        // one we judge.
+        let from = presets.schema_version.min(profiles.schema_version);
         let mut library = Self {
             presets: presets.presets,
             profiles: profiles.profiles,
         };
         library.ensure_consistency();
+        if from < LIBRARY_SCHEMA_VERSION {
+            let removed: BTreeSet<String> = profiles.removed_builtins.into_iter().collect();
+            migrate::upgrade(&mut library, from, &removed);
+            if let Err(err) = library.save(store) {
+                // Still usable in memory; the upgrade just runs again next time.
+                tracing::warn!("could not save the upgraded preset library: {err}");
+            }
+        }
         library
     }
 
     /// Makes the library consistent, then writes both files atomically.
+    /// `profiles.json` also gets the built-ins the library lacks as
+    /// `removedBuiltins`, so a later upgrade knows they were deleted.
     pub fn save(&mut self, store: &Store) -> io::Result<()> {
         self.ensure_consistency();
+        let mut removed = migrate::missing_builtins(self);
+        // Keep what a newer MorphRing recorded about built-ins we've never
+        // heard of. Reading the old file again costs a millisecond; losing a
+        // deletion costs a user's patience.
+        let on_disk: ProfilesFile = store.read_json(PROFILES_FILE);
+        removed.extend(
+            on_disk
+                .removed_builtins
+                .into_iter()
+                .filter(|key| !migrate::is_known_builtin(key)),
+        );
         store.write_json(
             PRESETS_FILE,
             &PresetsFile {
@@ -412,6 +446,7 @@ impl Library {
             &ProfilesFile {
                 schema_version: LIBRARY_SCHEMA_VERSION,
                 profiles: self.profiles.clone(),
+                removed_builtins: removed.into_iter().collect(),
             },
         )
     }
@@ -1036,12 +1071,12 @@ mod tests {
         let presets: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(tmp.path().join(PRESETS_FILE)).unwrap())
                 .unwrap();
-        assert_eq!(presets["schemaVersion"], 1);
+        assert_eq!(presets["schemaVersion"], LIBRARY_SCHEMA_VERSION);
         assert!(presets["presets"].is_array());
         let profiles: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(tmp.path().join(PROFILES_FILE)).unwrap())
                 .unwrap();
-        assert_eq!(profiles["schemaVersion"], 1);
+        assert_eq!(profiles["schemaVersion"], LIBRARY_SCHEMA_VERSION);
         assert_eq!(profiles["profiles"][0]["id"], "scans");
         assert_eq!(profiles["profiles"][0]["isFallback"], true);
         assert_eq!(profiles["profiles"][0]["presetIds"][0], "mine");
@@ -1086,7 +1121,7 @@ mod tests {
         // Only presets.json exists, and it holds a single preset.
         fs::write(
             tmp.path().join(PRESETS_FILE),
-            r#"{ "schemaVersion": 1, "presets": [ { "id": "to-pdf", "target": "pdf" } ] }"#,
+            r#"{ "schemaVersion": 2, "presets": [ { "id": "to-pdf", "target": "pdf" } ] }"#,
         )
         .unwrap();
         let library = Library::load(&store(&tmp));

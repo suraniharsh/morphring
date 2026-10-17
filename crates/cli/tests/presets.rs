@@ -71,7 +71,7 @@ fn a_custom_presets_file_lists_its_own_presets_in_order() {
     fs::write(
         config.path().join("presets.json"),
         r#"{
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "presets": [
     { "id": "tiny-webp", "name": "Tiny WebP", "target": "webp" },
     { "id": "my-merge", "nameKey": "preset.merge_pdf", "target": "pdf" }
