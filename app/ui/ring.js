@@ -434,14 +434,18 @@
   let watchdog = 0;
 
   function startAnimation() {
-    if (rafId) return;
+    // A loop that is still getting frames needs no help. One that went quiet
+    // gets replaced, and the new animation starts its stall count from zero,
+    // the way Filee's StartAnimation does it.
+    if (rafId && performance.now() - lastFrameAt < M.WATCHDOG.stalledMs) return;
+    if (rafId) cancelAnimationFrame(rafId);
+    stalls = 0;
     lastFrameAt = performance.now();
     rafId = requestAnimationFrame(frame);
     armWatchdog();
   }
 
   function frame(ts) {
-    stalls = 0;
     // The first frame gets a polite 1/60 s; later ones are capped at 50 ms
     // so a hiccup can't fling the springs.
     step(ts, 0.05);
@@ -462,41 +466,39 @@
     }
   }
 
-  // Frames can go missing, for example when the window is hidden and shown
-  // again in between. Filee's answer, and mine: nudge the loop once, and if
-  // it's still asleep, jump every animation to its end so an opening ring
-  // always actually appears. The timers (minimum ring time, the ✓ hold) keep
-  // ticking from here at real speed, or a stalled ring would never finish.
+  // Frames can go missing: webviews throttle requestAnimationFrame in hidden
+  // or transparent windows, and a request made just before a hide can simply
+  // never be answered. Filee's answer, and mine: ask again a couple of times,
+  // and if the loop is still asleep, jump every animation to its end so an
+  // opening ring always actually appears. Stalls count per animation, not per
+  // frame, or frames trickling in once per retry would open the donut in slow
+  // motion. The timers (minimum ring time, the check-mark hold) keep ticking
+  // from here at real speed, or a stalled ring would never finish.
   function armWatchdog() {
     clearTimeout(watchdog);
-    watchdog = setTimeout(() => {
-      if (!rafId) return;
-      if (performance.now() - lastFrameAt > 250) {
-        stalls++;
-        cancelAnimationFrame(rafId);
-        if (stalls >= 2) finishAnimations();
-        step(performance.now(), 0.3);
-      }
-      if (rafId) armWatchdog();
-    }, 300);
+    watchdog = setTimeout(checkLoop, M.WATCHDOG.checkMs);
+  }
+
+  function checkLoop() {
+    if (!rafId) return;
+    const now = performance.now();
+    const check = M.watchdogCheck(now, lastFrameAt, stalls);
+    stalls = check.stalls;
+    if (check.action !== "watch") {
+      cancelAnimationFrame(rafId);
+      rafId = 0;
+      if (check.action === "finish") finishAnimations();
+      if (mode !== "hidden") step(now, 0.3);
+      else lastTs = null;
+    }
+    if (rafId) armWatchdog();
   }
 
   function finishAnimations() {
-    if (mode === "menu") {
-      clock = 1e6;
-      hover.forEach((s, i) => {
-        s.value = i === hoverIndex ? 1 : 0;
-        s.velocity = 0;
-      });
-    } else if (mode === "closing") {
-      hide();
-    } else if (mode === "progress" && progress) {
-      progress.collapseClock = progress.collapseEnd;
-      if (progress.ringClock < 0) progress.ringClock = 0;
-      progress.pop.value = 1;
-      progress.pop.velocity = 0;
-      progress.shown = progress.target;
-    }
+    const state = { mode, clock, hover, hoverIndex, progress };
+    const done = M.finishAll(state);
+    clock = state.clock;
+    if (done) hide();
   }
 
   function advance(dt) {

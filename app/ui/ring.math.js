@@ -434,6 +434,66 @@
     }
   }
 
+  // ───── frame-loop watchdog (DonutMenu.cs StalledLoopMs / CheckLoop) ─────
+
+  /**
+   * Watchdog timing: a loop with no frame for `stalledMs` is stalled, it is
+   * checked every `checkMs`, and after `retries` fresh frame requests the
+   * animations jump to their end.
+   */
+  const WATCHDOG = Object.freeze({ stalledMs: 250, checkMs: 300, retries: 2 });
+
+  /**
+   * What the watchdog does on one check. `now` and `lastFrameAt` are in ms,
+   * `stalls` counts the stalls of the current animation so far. Returns
+   * `{ action, stalls }` with action "watch" (frames are coming), "retry"
+   * (ask for a frame again) or "finish" (snap every animation to its end).
+   */
+  function watchdogCheck(now, lastFrameAt, stalls, retries = WATCHDOG.retries) {
+    if (now - lastFrameAt < WATCHDOG.stalledMs) return { action: "watch", stalls };
+    const next = stalls + 1;
+    return { action: next <= retries ? "retry" : "finish", stalls: next };
+  }
+
+  /**
+   * Jumps every animation in `state` to where it ends, in place: the open
+   * clock, the hover springs, and the progress ring's collapse, pop and arc.
+   * `state` is `{ mode, clock, hover, hoverIndex, progress }`. The progress
+   * ring's timers (minimum ring time, the badge hold) are left alone, they
+   * are time, not decoration. Returns true when the ring should now hide,
+   * which is what a finished close animation means.
+   */
+  function finishAll(state) {
+    // 1e6 s is "the end" for every clock here, short of a ring with
+    // thirty-five million slices. I checked: nobody has that many formats.
+    const END = 1e6;
+    if (state.mode === "menu") {
+      state.clock = END;
+      (state.hover || []).forEach((s, i) => {
+        s.value = i === state.hoverIndex ? 1 : 0;
+        s.velocity = 0;
+      });
+      return false;
+    }
+    if (state.mode === "closing") {
+      state.clock = END;
+      return true;
+    }
+    const p = state.mode === "progress" ? state.progress : null;
+    if (p) {
+      p.collapseClock = p.collapseEnd;
+      if (p.ringClock < 0) p.ringClock = 0;
+      p.pop.value = 1;
+      p.pop.velocity = 0;
+      p.shown = p.target;
+      if (p.outcome && p.badge) {
+        p.badge.value = 1;
+        p.badge.velocity = 0;
+      }
+    }
+    return false;
+  }
+
   return {
     TAU,
     RING,
@@ -465,5 +525,8 @@
     wrapText,
     hintFor,
     ProgressRing,
+    WATCHDOG,
+    watchdogCheck,
+    finishAll,
   };
 });

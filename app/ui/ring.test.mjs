@@ -313,3 +313,97 @@ test("progress: reduced motion snaps the animations but keeps the holds", () => 
   run(ring, 0.4);
   assert.equal(ring.phase, "done");
 });
+
+// ───── frame-loop watchdog ─────
+
+test("watchdog: frames arriving in time just keep it watching", () => {
+  const { stalledMs } = M.WATCHDOG;
+  assert.deepEqual(M.watchdogCheck(1000 + stalledMs - 1, 1000, 0), { action: "watch", stalls: 0 });
+  assert.deepEqual(M.watchdogCheck(1000, 1000, 1), { action: "watch", stalls: 1 });
+});
+
+test("watchdog: a stalled loop is retried twice, then finished", () => {
+  assert.equal(M.WATCHDOG.stalledMs, 250, "Filee's StalledLoopMs");
+  assert.equal(M.WATCHDOG.retries, 2, "Filee's FrameRetries");
+  // A fake clock and a frame loop that never answers.
+  let now = 0;
+  const lastFrameAt = 0;
+  let stalls = 0;
+  const actions = [];
+  for (let i = 0; i < 3; i++) {
+    now += M.WATCHDOG.checkMs;
+    const check = M.watchdogCheck(now, lastFrameAt, stalls);
+    stalls = check.stalls;
+    actions.push(check.action);
+  }
+  assert.deepEqual(actions, ["retry", "retry", "finish"]);
+  assert.equal(stalls, 3);
+});
+
+test("watchdog: stalls count per animation, so trickling frames still finish", () => {
+  // One frame sneaks in after every retry: the count must not reset, or the
+  // donut would open one frame per 300 ms forever.
+  let now = 0;
+  let lastFrameAt = 0;
+  let stalls = 0;
+  const actions = [];
+  for (let i = 0; i < 3; i++) {
+    now += M.WATCHDOG.checkMs;
+    const check = M.watchdogCheck(now, lastFrameAt, stalls);
+    stalls = check.stalls;
+    actions.push(check.action);
+    lastFrameAt = now - M.WATCHDOG.stalledMs - 1; // a frame long ago again
+  }
+  assert.deepEqual(actions, ["retry", "retry", "finish"]);
+  assert.equal(M.watchdogCheck(300, 0, 0, 0).action, "finish", "zero retries finishes at once");
+});
+
+test("finishAll: an opening menu ends fully open with the hover settled", () => {
+  const hover = [
+    { value: 0.3, velocity: 4 },
+    { value: 0.6, velocity: -2 },
+    { value: 0, velocity: 1 },
+  ];
+  const state = { mode: "menu", clock: 0.01, hover, hoverIndex: 1, progress: null };
+  assert.equal(M.finishAll(state), false);
+  assert.ok(M.openFinished(hover.length, state.clock));
+  for (let i = 0; i < 3; i++) close(M.openAmount(i, state.clock), 1);
+  assert.deepEqual(
+    hover.map((s) => [s.value, s.velocity]),
+    [
+      [0, 0],
+      [1, 0],
+      [0, 0],
+    ],
+  );
+});
+
+test("finishAll: a closing ring asks to hide", () => {
+  const state = { mode: "closing", clock: 0, hover: [], hoverIndex: -1, progress: null };
+  assert.equal(M.finishAll(state), true);
+  assert.ok(M.closeFinished(8, state.clock));
+});
+
+test("finishAll: the progress ring snaps its looks but keeps its timers", () => {
+  const ring = new M.ProgressRing(6);
+  ring.setProgress(0.4);
+  ring.complete("succeeded");
+  const state = { mode: "progress", clock: 0, hover: [], hoverIndex: -1, progress: ring };
+  assert.equal(M.finishAll(state), false);
+  assert.equal(ring.collapse(5), 1);
+  assert.equal(ring.ringClock, 0);
+  assert.equal(ring.pop.value, 1);
+  assert.equal(ring.shown, ring.target);
+  assert.equal(ring.outcome, null, "the minimum ring time still applies");
+  ring.advance(RING.minRingSeconds + 0.01);
+  assert.equal(ring.outcome, "succeeded");
+  M.finishAll(state);
+  assert.equal(ring.badge.value, 1);
+  assert.equal(ring.phase, "running", "the ✓ hold is not skipped");
+});
+
+test("finishAll: a hidden ring is left alone", () => {
+  const state = { mode: "hidden", clock: 0.2, hover: [], hoverIndex: -1, progress: null };
+  assert.equal(M.finishAll(state), false);
+  assert.equal(state.clock, 0.2);
+});
