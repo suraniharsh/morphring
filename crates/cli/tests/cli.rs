@@ -220,38 +220,85 @@ fn formats_are_listed() {
 fn help_and_version_need_no_engines() {
     // A PATH pointing at an empty folder: if help or version went looking for
     // magick, they would find nothing and we'd know about it.
-    let empty = TempDir::new().unwrap();
-    let morphring = |args: &[&str]| {
-        let output = Command::new(env!("CARGO_BIN_EXE_morphring"))
-            .args(args)
-            .env("PATH", empty.path())
-            .current_dir(empty.path())
-            .output()
-            .unwrap_or_else(|e| panic!("cannot start morphring: {e}"));
-        (
-            output.status.code(),
-            String::from_utf8(output.stdout).expect("stdout is UTF-8"),
-        )
-    };
-
-    let (code, out) = morphring(&["help", "convert"]);
+    let (code, out, _) = morphring_bin(&["help", "convert"]);
     assert_eq!(code, Some(0));
     assert!(out.contains("--to"), "{out}");
 
-    let (code, out) = morphring(&["help", "watch"]);
+    let (code, out, _) = morphring_bin(&["help", "watch"]);
     assert_eq!(code, Some(0));
     assert!(out.contains("--move-originals"), "{out}");
     assert!(out.contains("--settle <seconds>"), "{out}");
     #[cfg(not(windows))]
     assert!(out.contains("(default 5)"), "{out}");
 
-    let (code, out) = morphring(&["help", "presets"]);
+    let (code, out, _) = morphring_bin(&["help", "presets"]);
     assert_eq!(code, Some(0));
     assert!(out.contains("--preset <id or name>"), "{out}");
 
-    let (code, out) = morphring(&["--version"]);
+    let (code, out, _) = morphring_bin(&["--version"]);
     assert_eq!(code, Some(0));
     assert!(out.starts_with("morphring "), "{out}");
+}
+
+/// Runs the real binary in an empty folder with PATH pointing at that same
+/// empty folder, and returns (exit code, stdout, stderr). If help or version
+/// ever went looking for magick, they would find nothing and we'd know.
+fn morphring_bin(args: &[&str]) -> (Option<i32>, String, String) {
+    let empty = TempDir::new().unwrap_or_else(|e| panic!("cannot make a temp folder: {e}"));
+    let output = Command::new(env!("CARGO_BIN_EXE_morphring"))
+        .args(args)
+        .env("PATH", empty.path())
+        .current_dir(empty.path())
+        .output()
+        .unwrap_or_else(|e| panic!("cannot start morphring: {e}"));
+    let text = |bytes: Vec<u8>| {
+        String::from_utf8(bytes).unwrap_or_else(|e| panic!("output is not UTF-8: {e}"))
+    };
+    (
+        output.status.code(),
+        text(output.stdout),
+        text(output.stderr),
+    )
+}
+
+// CliOptions.cs:35. Filee takes the DOS-era `/?` on every OS, so we do too;
+// Linux users who type it are either Windows refugees or very curious.
+#[test]
+fn slash_question_mark_first_prints_the_general_help() {
+    let (code, out, err) = morphring_bin(&["/?"]);
+    assert_eq!(code, Some(0), "{err}");
+    assert_eq!(out, morphring_bin(&["--help"]).1);
+    assert_eq!(out, morphring_bin(&["-h"]).1);
+    assert!(out.contains("morphring help"), "{out}");
+}
+
+#[test]
+fn slash_question_mark_after_a_command_prints_its_help() {
+    for name in [
+        "convert",
+        "watch",
+        "presets",
+        "formats",
+        "doctor",
+        "integrate",
+    ] {
+        let (code, out, err) = morphring_bin(&[name, "/?"]);
+        assert_eq!(code, Some(0), "{name}: {err}");
+        assert_eq!(out, morphring_bin(&["help", name]).1, "{name}");
+        assert_eq!(out, morphring_bin(&[name, "-h"]).1, "{name}");
+    }
+    // Wherever -h works, `/?` works, even after other arguments.
+    let (code, out, _) = morphring_bin(&["convert", "a.png", "--to", "jpg", "/?"]);
+    assert_eq!(code, Some(0));
+    assert!(out.contains("--to"), "{out}");
+}
+
+#[test]
+fn slash_question_mark_after_double_dash_is_just_a_file_name() {
+    let tmp = TempDir::new().unwrap();
+    let r = run(tmp.path(), &["convert", "--to", "jpg", "--", "/?"]);
+    assert_ne!(r.code, 0, "{}", r.out);
+    assert!(!r.out.contains("Usage"), "{}", r.out);
 }
 
 // Case-sensitivity is a property of the file system, not the OS, but Linux is
