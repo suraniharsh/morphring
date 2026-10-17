@@ -193,6 +193,10 @@ pub struct PresetsArgs {
     /// What to do with the presets; `None` lists them.
     #[command(subcommand)]
     pub action: Option<PresetsAction>,
+
+    /// Print the list as JSON, with the members of each group.
+    #[arg(long)]
+    pub json: bool,
 }
 
 /// The `morphring presets <action>` subcommands.
@@ -361,13 +365,15 @@ pub const WATCH_HELP: &str = watch_help!("2");
 
 /// `morphring help presets` (and `morphring presets --help`).
 pub const PRESETS_HELP: &str = "\
-Usage: morphring presets
+Usage: morphring presets [--json]
        morphring presets export <file>
        morphring presets import <file>
        morphring presets reset [--yes]
 
 Lists the presets with their id, name and target format. Use one with:
   morphring convert <files> --preset <id or name>
+A group on the donut is listed with the target 'group'; it converts nothing
+itself, so use one of its members instead.
 
 Commands:
   export <file>          Save the presets and profiles to a file
@@ -375,6 +381,7 @@ Commands:
   reset                  Put the presets and profiles back to the built-in defaults
 
 Options:
+      --json             Print the list as JSON, with the members of each group
   -y, --yes              Reset without asking first
 
 Export, import and reset are MorphRing extras: Filee offers them only in its

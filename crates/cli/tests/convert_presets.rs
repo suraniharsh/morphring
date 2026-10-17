@@ -235,3 +235,155 @@ fn an_unknown_preset_is_a_usage_error() {
         "morphring: no preset 'nope'. Run 'morphring presets' for the list.\n"
     );
 }
+
+/// A presets.json with two conversions, a `rotate` group holding them (plus
+/// an id that isn't there, which loading drops) and a group with nobody left.
+fn write_groups(config: &Path) {
+    fs::write(
+        config.join("presets.json"),
+        r#"{ "presets": [
+             { "id": "turn-left", "name": "Turn left", "target": "png" },
+             { "id": "turn-right", "name": "Turn right", "target": "png" },
+             { "id": "rotate", "name": "Rotate", "target": "group", "kind": "Group",
+               "subPresetIds": ["turn-left", "gone", "turn-right"] },
+             { "id": "empty", "name": "Empty", "target": "group", "kind": "Group",
+               "subPresetIds": ["gone"] } ] }"#,
+    )
+    .unwrap_or_else(|e| panic!("write presets.json: {e}"));
+}
+
+#[test]
+fn a_group_preset_names_its_members_and_exits_2() {
+    let tmp = TempDir::new().unwrap();
+    let config = TempDir::new().unwrap();
+    write_groups(config.path());
+    touch(tmp.path(), "a.png");
+    // By id and by display name, as typed.
+    for key in ["rotate", "ROTATE"] {
+        let r = run_in_with_config(
+            tmp.path(),
+            config.path(),
+            png_engines(),
+            &["convert", "a.png", "--preset", key],
+        );
+        assert_eq!(r.code, 2, "{r:?}");
+        assert_eq!(r.out, "");
+        assert_eq!(
+            r.err,
+            format!(
+                "morphring: '{key}' is a group on the donut, not a conversion. \
+                 Use one of: turn-left, turn-right\n"
+            )
+        );
+    }
+    assert!(!tmp.path().join("a.png.png").exists());
+}
+
+#[test]
+fn an_empty_group_points_at_the_list() {
+    let tmp = TempDir::new().unwrap();
+    let config = TempDir::new().unwrap();
+    write_groups(config.path());
+    touch(tmp.path(), "a.png");
+    let r = run_in_with_config(
+        tmp.path(),
+        config.path(),
+        png_engines(),
+        &["convert", "a.png", "-p", "Empty", "--json"],
+    );
+    assert_eq!(r.code, 2, "{r:?}");
+    assert_eq!(r.out, "");
+    assert_eq!(
+        r.err,
+        "morphring: 'Empty' is a group on the donut and has no presets left. \
+         Run 'morphring presets' for the list.\n"
+    );
+}
+
+#[test]
+fn watch_refuses_a_group_too() {
+    let tmp = TempDir::new().unwrap();
+    let config = TempDir::new().unwrap();
+    write_groups(config.path());
+    fs::create_dir(tmp.path().join("inbox")).unwrap();
+    let r = run_in_with_config(
+        tmp.path(),
+        config.path(),
+        png_engines(),
+        &["watch", "inbox", "--preset", "rotate"],
+    );
+    assert_eq!(r.code, 2, "{r:?}");
+    assert_eq!(
+        r.err,
+        "morphring: 'rotate' is a group on the donut, not a conversion. \
+         Use one of: turn-left, turn-right\n"
+    );
+}
+
+#[test]
+fn a_conversion_wins_over_a_group_of_the_same_name() {
+    let tmp = TempDir::new().unwrap();
+    let config = TempDir::new().unwrap();
+    // The user's own "Rotate" preset sits behind the `rotate` group.
+    fs::write(
+        config.path().join("presets.json"),
+        r#"{ "presets": [
+             { "id": "rotate", "name": "Rotate", "target": "group", "kind": "Group",
+               "subPresetIds": ["mine"] },
+             { "id": "mine", "name": "Rotate", "target": "jpg",
+               "output": { "location": "SameFolder", "pattern": "{name}-mine" } } ] }"#,
+    )
+    .unwrap();
+    touch(tmp.path(), "a.png");
+    let r = run_in_with_config(
+        tmp.path(),
+        config.path(),
+        png_engines(),
+        &["convert", "a.png", "--preset", "rotate", "--json"],
+    );
+    assert_eq!(r.code, 0, "{r:?}");
+    assert!(tmp.path().join("a-mine.jpg").is_file(), "{r:?}");
+    let json: Value = serde_json::from_str(&r.out).unwrap();
+    assert_eq!(json["preset"], "Rotate");
+}
+
+#[test]
+fn presets_lists_groups_with_target_group() {
+    let tmp = TempDir::new().unwrap();
+    let config = TempDir::new().unwrap();
+    write_groups(config.path());
+    let r = run_in_with_config(tmp.path(), config.path(), Vec::new(), &["presets"]);
+    assert_eq!(r.code, 0, "{r:?}");
+    let rotate = r
+        .out
+        .lines()
+        .find(|line| line.starts_with("rotate "))
+        .unwrap_or_else(|| panic!("no rotate row in {}", r.out));
+    assert_eq!(rotate, format!("{:<24} {:<28} group", "rotate", "Rotate"));
+
+    let r = run_in_with_config(
+        tmp.path(),
+        config.path(),
+        Vec::new(),
+        &["presets", "--json"],
+    );
+    assert_eq!(r.code, 0, "{r:?}");
+    assert_eq!(r.err, "");
+    let json: Value = serde_json::from_str(&r.out).unwrap();
+    let rows = json.as_array().unwrap();
+    let row = |id: &str| rows.iter().find(|r| r["id"] == id).unwrap().clone();
+    assert_eq!(
+        row("rotate"),
+        serde_json::json!({
+            "id": "rotate", "name": "Rotate", "target": "group", "isGroup": true,
+            "members": ["turn-left", "turn-right"]
+        })
+    );
+    assert_eq!(row("empty")["members"], serde_json::json!([]));
+    assert_eq!(
+        row("turn-left"),
+        serde_json::json!({
+            "id": "turn-left", "name": "Turn left", "target": "png", "isGroup": false
+        })
+    );
+}

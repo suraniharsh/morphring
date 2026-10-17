@@ -81,10 +81,11 @@ pub fn run(args: &ConvertArgs, ctx: &mut Ctx) -> i32 {
 
     // The JSON report names the preset the way the ring would. resolve already
     // found it once; finding it again is a slice scan, cheaper than plumbing.
+    // Conversions only, like resolve: a group never gets this far.
     let preset_name = args
         .preset
         .as_deref()
-        .and_then(|key| preset::find(&library.presets, key))
+        .and_then(|key| preset::find_conversion(&library.presets, key))
         .map(preset::Preset::display_name);
 
     let JobSpec {

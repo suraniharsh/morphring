@@ -258,7 +258,9 @@ pub fn run(args: &WatchArgs, ctx: &mut Ctx) -> i32 {
 fn preset_name(args: &WatchArgs, library: &Library) -> Option<String> {
     match (&args.to, &args.preset) {
         (Some(to), _) => formats::lookup_target(to).map(|f| preset::for_target(f).display_name()),
-        (None, Some(key)) => preset::find(&library.presets, key).map(preset::Preset::display_name),
+        (None, Some(key)) => {
+            preset::find_conversion(&library.presets, key).map(preset::Preset::display_name)
+        }
         (None, None) => None,
     }
 }

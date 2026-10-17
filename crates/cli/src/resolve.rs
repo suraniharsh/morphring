@@ -16,6 +16,8 @@ use morphring_core::profiles::Library;
 use morphring_core::settings::AppSettings;
 use morphring_core::{ConvertOptions, Target, formats};
 
+use crate::commands::presets;
+
 /// Everything `run_job` needs besides the files and the engines.
 #[derive(Clone, Debug, PartialEq)]
 pub struct JobSpec {
@@ -124,11 +126,19 @@ fn choose_preset(
             }
             Ok(preset::for_target(format))
         }
-        (None, Some(key)) => preset::find(&library.presets, key).cloned().ok_or_else(|| {
-            UsageError(format!(
-                "no preset '{key}'. Run 'morphring presets' for the list."
-            ))
-        }),
+        (None, Some(key)) => {
+            // Conversions first, so a "Rotate" group can't hide your own
+            // "Rotate" preset; a group is only found to say what it holds.
+            if let Some(found) = preset::find_conversion(&library.presets, key) {
+                return Ok(found.clone());
+            }
+            match preset::find(&library.presets, key) {
+                Some(group) => Err(UsageError(presets::group_refusal(key, group, library))),
+                None => Err(UsageError(format!(
+                    "no preset '{key}'. Run 'morphring presets' for the list."
+                ))),
+            }
+        }
         // lib.rs checks this before we get here; saying it again costs nothing
         // and keeps this function honest when someone calls it directly.
         _ => Err(UsageError(

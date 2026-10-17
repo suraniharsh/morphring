@@ -160,7 +160,7 @@ fn dispatch(command: Command, ctx: &mut Ctx) -> i32 {
         Command::Convert(args) => commands::convert::run(&args, ctx),
         Command::Watch(args) => commands::watch::run(&args, ctx),
         Command::Presets(args) => match &args.action {
-            None => commands::presets::run(ctx),
+            None => commands::presets::run(args.json, ctx),
             Some(action) => commands::library::run(action, ctx),
         },
         Command::Formats(args) => commands::formats::run(&args, ctx),
