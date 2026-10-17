@@ -43,9 +43,9 @@ pub enum Command {
     /// List formats, or the targets one format converts to.
     #[command(override_help = FORMATS_HELP)]
     Formats(FormatsArgs),
-    /// List the presets.
-    #[command(override_help = PRESETS_HELP)]
-    Presets,
+    /// List the presets, or export, import or reset them.
+    #[command(override_help = PRESETS_HELP, disable_help_subcommand = true)]
+    Presets(PresetsArgs),
     /// Show which engines are installed.
     #[command(override_help = DOCTOR_HELP)]
     Doctor(DoctorArgs),
@@ -186,6 +186,45 @@ pub struct FormatsArgs {
     pub format: Option<String>,
 }
 
+/// Arguments of `morphring presets`. No action lists the presets, as
+/// always; the actions go beyond Filee, whose CLI only lists.
+#[derive(Debug, Args)]
+pub struct PresetsArgs {
+    /// What to do with the presets; `None` lists them.
+    #[command(subcommand)]
+    pub action: Option<PresetsAction>,
+}
+
+/// The `morphring presets <action>` subcommands.
+#[derive(Debug, Subcommand)]
+pub enum PresetsAction {
+    /// Write the presets and profiles to a file.
+    #[command(override_help = PRESETS_HELP)]
+    Export(PresetsFileArgs),
+    /// Read presets and profiles from a file made by export.
+    #[command(override_help = PRESETS_HELP)]
+    Import(PresetsFileArgs),
+    /// Put the presets and profiles back to the built-in defaults.
+    #[command(override_help = PRESETS_HELP)]
+    Reset(PresetsResetArgs),
+}
+
+/// Arguments of `morphring presets export` and `morphring presets import`.
+#[derive(Debug, Args)]
+pub struct PresetsFileArgs {
+    /// The bundle file to write (export) or read (import).
+    #[arg(required = true, value_name = "FILE")]
+    pub file: PathBuf,
+}
+
+/// Arguments of `morphring presets reset`.
+#[derive(Debug, Args)]
+pub struct PresetsResetArgs {
+    /// Reset without asking first.
+    #[arg(short = 'y', long = "yes")]
+    pub yes: bool,
+}
+
 /// Arguments of `morphring doctor`.
 #[derive(Debug, Args)]
 pub struct DoctorArgs {
@@ -236,7 +275,7 @@ Usage:
   morphring convert <files or folders...> --preset <preset> [options]
   morphring watch <folder> --to <format> [options]
   morphring formats [<format>]
-  morphring presets
+  morphring presets [export <file> | import <file> | reset [--yes]]
   morphring doctor [--json]
   morphring integrate install|uninstall
   morphring help [<command>]
@@ -251,8 +290,9 @@ Examples:
   morphring watch ~/Inbox --to pdf --move-originals
   morphring formats docx
 
-Run 'morphring help <command>' for the options of one command. Add --verbose to any
-command to log what MorphRing runs to stderr (RUST_LOG works too).
+Run 'morphring help <command>' for the options of one command; -h, --help and /?
+after a command do the same. Add --verbose to any command to log what MorphRing runs
+to stderr (RUST_LOG works too).
 
 Exit codes: 0 all converted, 1 some failed or were cancelled, 2 wrong arguments or a
 missing input, 3 nothing to convert.
@@ -322,9 +362,23 @@ pub const WATCH_HELP: &str = watch_help!("2");
 /// `morphring help presets` (and `morphring presets --help`).
 pub const PRESETS_HELP: &str = "\
 Usage: morphring presets
+       morphring presets export <file>
+       morphring presets import <file>
+       morphring presets reset [--yes]
 
 Lists the presets with their id, name and target format. Use one with:
   morphring convert <files> --preset <id or name>
+
+Commands:
+  export <file>          Save the presets and profiles to a file
+  import <file>          Add the presets and profiles from a file made by export
+  reset                  Put the presets and profiles back to the built-in defaults
+
+Options:
+  -y, --yes              Reset without asking first
+
+Export, import and reset are MorphRing extras: Filee offers them only in its
+settings window, not on its command line.
 ";
 
 /// `morphring help formats` (and `morphring formats --help`).
@@ -487,6 +541,62 @@ mod tests {
         assert!(args.recursive && args.overwrite && args.quiet && args.keep_dates);
         assert!(args.move_originals && !args.skip);
         assert_eq!(args.settle, Some(0.2));
+    }
+
+    /// Parses `morphring presets <rest>` and hands back its action.
+    fn presets_action(rest: &[&str]) -> Option<PresetsAction> {
+        let argv = ["morphring", "presets"]
+            .into_iter()
+            .chain(rest.iter().copied());
+        match Cli::try_parse_from(argv).unwrap().command {
+            Some(Command::Presets(args)) => args.action,
+            other => panic!("not presets: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn plain_presets_still_lists() {
+        assert!(presets_action(&[]).is_none());
+    }
+
+    #[test]
+    fn presets_export_and_import_take_one_file() {
+        let Some(PresetsAction::Export(args)) = presets_action(&["export", "out.json"]) else {
+            panic!("not export")
+        };
+        assert_eq!(args.file, PathBuf::from("out.json"));
+        let Some(PresetsAction::Import(args)) = presets_action(&["import", "in.json"]) else {
+            panic!("not import")
+        };
+        assert_eq!(args.file, PathBuf::from("in.json"));
+        for action in ["export", "import"] {
+            assert!(Cli::try_parse_from(["morphring", "presets", action]).is_err());
+            assert!(Cli::try_parse_from(["morphring", "presets", action, "a", "b"]).is_err());
+        }
+    }
+
+    #[test]
+    fn presets_reset_asks_unless_told_yes() {
+        let Some(PresetsAction::Reset(args)) = presets_action(&["reset"]) else {
+            panic!("not reset")
+        };
+        assert!(!args.yes);
+        for yes in ["--yes", "-y"] {
+            let Some(PresetsAction::Reset(args)) = presets_action(&["reset", yes]) else {
+                panic!("not reset")
+            };
+            assert!(args.yes, "{yes}");
+        }
+        // --yes belongs to reset, not to the listing.
+        assert!(Cli::try_parse_from(["morphring", "presets", "--yes"]).is_err());
+    }
+
+    #[test]
+    fn presets_help_lists_the_actions_and_owns_up_to_going_beyond_filee() {
+        for needle in ["export <file>", "import <file>", "reset [--yes]", "Filee"] {
+            assert!(PRESETS_HELP.contains(needle), "{needle}");
+        }
+        assert!(GENERAL_HELP.contains("/?"));
     }
 
     #[test]

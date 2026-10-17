@@ -86,7 +86,7 @@ fn parse(
     out: &mut dyn Write,
     err: &mut dyn Write,
 ) -> Parsed {
-    let argv = std::iter::once(OsString::from("morphring")).chain(args);
+    let argv = std::iter::once(OsString::from("morphring")).chain(help_aliases(args));
     let cli = match Cli::try_parse_from(argv) {
         Ok(cli) => cli,
         Err(e) if e.kind() == ErrorKind::DisplayHelp => {
@@ -118,6 +118,31 @@ fn parse(
     }
 }
 
+/// The Windows-style help switch, which Filee accepts on every OS.
+const SLASH_HELP: &str = "/?";
+
+/// Rewrites `/?` to `--help` before clap sees it, so it behaves like `-h`
+/// wherever that is accepted: general help when first, the command's help
+/// after a command. Anything after `--` is left alone; a file genuinely
+/// called `/?` deserves the escape hatch, if not our sympathy.
+fn help_aliases(args: impl IntoIterator<Item = OsString>) -> Vec<OsString> {
+    let mut after_dashes = false;
+    args.into_iter()
+        .map(|arg| {
+            if after_dashes {
+                arg
+            } else if arg == "--" {
+                after_dashes = true;
+                arg
+            } else if arg == SLASH_HELP {
+                OsString::from("--help")
+            } else {
+                arg
+            }
+        })
+        .collect()
+}
+
 /// `convert` and `watch` need exactly one of `--to` and `--preset`. Checked
 /// after clap, so a missing input still wins (Filee's order: `convert --to
 /// jpg` says "at least one file", `convert a.png` says this).
@@ -134,7 +159,10 @@ fn dispatch(command: Command, ctx: &mut Ctx) -> i32 {
     match command {
         Command::Convert(args) => commands::convert::run(&args, ctx),
         Command::Watch(args) => commands::watch::run(&args, ctx),
-        Command::Presets => commands::presets::run(ctx),
+        Command::Presets(args) => match &args.action {
+            None => commands::presets::run(ctx),
+            Some(action) => commands::library::run(action, ctx),
+        },
         Command::Formats(args) => commands::formats::run(&args, ctx),
         Command::Doctor(args) => commands::doctor::run(&args, ctx),
         Command::Integrate(args) => {
@@ -197,6 +225,8 @@ fn usage_message(e: &clap::Error) -> String {
                 "Give at least one file or folder to convert.".to_owned()
             } else if missing.contains("FOLDER") {
                 "Give exactly one folder to watch.".to_owned()
+            } else if missing.contains("FILE") {
+                "Give the presets file.".to_owned()
             } else {
                 fallback_message(e)
             }
@@ -446,6 +476,51 @@ mod tests {
         let (code, out, err) = run_args(&["presets"]);
         assert_eq!((code, err.as_str()), (0, ""));
         assert!(out.contains("to-png"), "{out}");
+    }
+
+    #[test]
+    fn presets_actions_are_declared_but_not_available_yet() {
+        for (args, action) in [
+            (&["presets", "export", "out.json"][..], "export"),
+            (&["presets", "import", "in.json"], "import"),
+            (&["presets", "reset", "--yes"], "reset"),
+            (&["presets", "reset"], "reset"),
+        ] {
+            let (code, out, err) = run_args(args);
+            assert_eq!((code, out.as_str()), (2, ""), "{args:?}");
+            assert_eq!(
+                err,
+                format!("morphring: 'presets {action}' is not available yet.\n"),
+                "{args:?}"
+            );
+        }
+        assert_usage_error(&["presets", "export"], "Give the presets file.");
+        assert_usage_error(&["presets", "bogus"], "Unknown command 'bogus'.");
+    }
+
+    #[test]
+    fn presets_help_works_from_every_door() {
+        for args in [
+            &["presets", "--help"][..],
+            &["presets", "export", "--help"],
+            &["presets", "reset", "-h"],
+            &["help", "presets"],
+        ] {
+            assert_eq!(
+                run_args(args),
+                (0, args::PRESETS_HELP.to_owned(), String::new()),
+                "{args:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn slash_question_mark_is_help() {
+        assert_eq!(run_args(&["/?"]).1, args::GENERAL_HELP);
+        assert_eq!(run_args(&["convert", "/?"]).1, args::CONVERT_HELP);
+        assert_eq!(run_args(&["presets", "/?"]).1, args::PRESETS_HELP);
+        let rewritten = help_aliases(["convert", "/?", "--", "/?"].map(OsString::from));
+        assert_eq!(rewritten, ["convert", "--help", "--", "/?"]);
     }
 
     #[test]
