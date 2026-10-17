@@ -482,6 +482,23 @@
     return !!(hovering && ringVisible && running && !cancelWanted);
   }
 
+  /**
+   * What a click on the progress ring does, given what sits under it
+   * (`hitKind`, from progressHitTest) and where the job is:
+   * `{ running, finished, failedHeld, hasOutput }`. `finished` means the
+   * backend has said how the job ended, `failedHeld` that a failed ring is
+   * parked waiting to be dismissed. Returns "cancel" (the ×, while the job
+   * runs), "reveal" (the plate of a finished ring with something on disk:
+   * RadialController's ProgressClicked, which opens the first output's
+   * folder), "close" (any other click on a parked failure) or "none".
+   */
+  function progressClickAction(hitKind, state) {
+    const s = state || {};
+    if (hitKind === "cancel") return s.running ? "cancel" : "none";
+    if (hitKind === "ring" && s.finished && s.hasOutput) return "reveal";
+    return s.failedHeld ? "close" : "none";
+  }
+
   // ───── frame-loop watchdog (DonutMenu.cs StalledLoopMs / CheckLoop) ─────
 
   /**
@@ -577,6 +594,7 @@
     progressHover,
     progressHitTest,
     showCancel,
+    progressClickAction,
     WATCHDOG,
     watchdogCheck,
     finishAll,

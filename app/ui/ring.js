@@ -18,14 +18,19 @@
 //                     for the conversion the ring shows. The first one
 //                     (progress 0) arrives as soon as the job is queued, so
 //                     the ring knows which jobId to cancel.
-//     "ring-done"     { outcome: "succeeded" | "failed" | "cancelled", message? }
+//     "ring-done"     { outcome: "succeeded" | "failed" | "cancelled", message?,
+//                       outputs? }
+//                     outputs, when present, lists the files written; the
+//                     convert reply's summary.outputs is read either way
 //   commands the ring invokes
 //     convert { files, presetId }
 //                             runs the clicked slice's preset: its target,
 //                             options and output rule, with the default output
 //                             from the settings. A rejected promise counts as
 //                             a failed job, and its error text is shown under
-//                             the ring
+//                             the ring. It resolves with the job's summary,
+//                             whose outputs[0] a click on the finished ring
+//                             reveals (opener plugin, revealItemInDir)
 //     cancel_job { jobId }    cancels the job the ring shows (Escape or a
 //                             click on the × that shows while the pointer
 //                             hovers the running ring); the backend
@@ -90,6 +95,10 @@
   let cancelWanted = false;
   let cancelSent = false;
   let failureText = "";
+  // The first file the job on the ring wrote, once the backend says so. A
+  // click on the finished ring shows it in the file manager, Filee's
+  // ProgressClicked; until then the plate is just a plate.
+  let firstOutput = "";
   let sliceEls = [];
   // The pointer is near the progress ring, so the × may show (if the job is
   // still running and nobody asked to cancel it yet).
@@ -393,6 +402,7 @@
     mode = "progress";
     progress = new M.ProgressRing(model.slices.length, { reduced });
     failureText = "";
+    firstOutput = "";
     backendJob = 0;
     cancelWanted = false;
     cancelSent = false;
@@ -402,9 +412,43 @@
     svg.classList.remove("pointing");
     startAnimation();
     const mine = job;
-    backend.convert(model.files, slice.presetId).catch((err) => {
-      if (mine === job) finish("failed", errorText(err));
+    backend.convert(model.files, slice.presetId).then(
+      (summary) => {
+        if (mine === job) noteOutputs(summary && summary.outputs);
+      },
+      (err) => {
+        if (mine === job) finish("failed", errorText(err));
+      },
+    );
+  }
+
+  // Keeps the first written file, whichever of ring-done and the convert
+  // reply gets here first. They say the same thing; one of them just says
+  // it a few milliseconds later, like a colleague repeating your joke.
+  function noteOutputs(outputs) {
+    if (firstOutput || !Array.isArray(outputs)) return;
+    const first = outputs.find((o) => typeof o === "string" && o !== "");
+    if (first) firstOutput = first;
+  }
+
+  // What a click at `kind` on the progress ring would do right now.
+  function clickAction(kind) {
+    if (mode !== "progress" || !progress) return "none";
+    return M.progressClickAction(kind, {
+      running: running(),
+      finished: !!progress.pending,
+      failedHeld: progress.phase === "failed",
+      hasOutput: !!firstOutput,
     });
+  }
+
+  // Shows the first output in the file manager and gets out of the way, so
+  // the folder that opens isn't hiding behind a ring that already said ✓.
+  function revealOutput() {
+    const path = firstOutput;
+    if (!path) return;
+    backend.reveal(path).catch((err) => console.warn("revealItemInDir failed:", err));
+    hide();
   }
 
   // Whether the job on the ring is still going, i.e. cancelling means something.
@@ -724,7 +768,8 @@
       const p = svgPoint(e);
       ringHover = !!p && M.progressHover(C, p);
       setCancelShown(cancelShown());
-      svg.classList.toggle("pointing", hitAt(e).kind === "cancel");
+      const action = clickAction(hitAt(e).kind);
+      svg.classList.toggle("pointing", action === "cancel" || action === "reveal");
       return;
     }
     if (mode !== "menu") return;
@@ -756,10 +801,11 @@
       // Filee lets corner clicks fall through to whatever is behind; a
       // WebKitGTK window can't, so the next best thing is to get out of the way.
       else if (hit.kind !== "empty") requestClose();
-    } else if (mode === "progress" && progress && progress.phase === "failed") {
-      requestClose();
-    } else if (running() && hit.kind === "cancel") {
-      requestCancel();
+    } else {
+      const action = clickAction(hit.kind);
+      if (action === "cancel") requestCancel();
+      else if (action === "reveal") revealOutput();
+      else if (action === "close") requestClose();
     }
   });
 
@@ -838,12 +884,19 @@
       progress.setProgress(p && p.progress);
       startAnimation();
     });
-    on("ring-done", (p) => finish(p && p.outcome, p && p.message));
+    on("ring-done", (p) => {
+      if (mode === "progress") noteOutputs(p && p.outputs);
+      finish(p && p.outcome, p && p.message);
+    });
     tauri.core.invoke("ping").catch((err) => console.warn("backend did not answer ping:", err));
     return {
       convert: (files, presetId) => tauri.core.invoke("convert", { files, presetId }),
       cancel: (jobId) => tauri.core.invoke("cancel_job", { jobId }),
       close: () => tauri.core.invoke("ring_close"),
+      reveal: (path) =>
+        tauri.opener && tauri.opener.revealItemInDir
+          ? tauri.opener.revealItemInDir(path)
+          : tauri.core.invoke("plugin:opener|reveal_item_in_dir", { paths: [path] }),
     };
   }
 
@@ -894,7 +947,7 @@
               clearInterval(tick);
               stopDemo = null;
               finish("succeeded");
-              resolve();
+              resolve({ outcome: "succeeded", outputs: files.map((f) => f.replace(/\.[^./]+$/, ".jpg")) });
             }
           }, 90);
           stopDemo = () => {
@@ -910,6 +963,10 @@
       },
       close: () => {
         setTimeout(() => openRing(sample), 700);
+        return Promise.resolve();
+      },
+      reveal: (path) => {
+        console.info("demo: would reveal", path);
         return Promise.resolve();
       },
     };

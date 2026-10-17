@@ -462,3 +462,46 @@ test("cancel: the × shows only while hovering a running, visible ring", () => {
     assert.equal(M.showCancel(h, v, r, w), want, JSON.stringify([h, v, r, w]));
   }
 });
+
+// ───── clicking the finished ring (RadialController's ProgressClicked) ─────
+
+test("click: the finished ring reveals the output, the running one does not", () => {
+  const running = { running: true, finished: false, failedHeld: false, hasOutput: false };
+  const done = { running: false, finished: true, failedHeld: false, hasOutput: true };
+  assert.equal(M.progressClickAction("ring", done), "reveal");
+  assert.equal(M.progressClickAction("ring", running), "none");
+  // Even a running job that somehow knows an output keeps its plate inert.
+  assert.equal(M.progressClickAction("ring", { ...running, hasOutput: true }), "none");
+  assert.equal(M.progressClickAction("cancel", running), "cancel");
+  assert.equal(M.progressClickAction("cancel", done), "none");
+  assert.equal(M.progressClickAction("outside", done), "none");
+});
+
+test("click: nothing to reveal without an output", () => {
+  const cancelled = { running: false, finished: true, failedHeld: false, hasOutput: false };
+  assert.equal(M.progressClickAction("ring", cancelled), "none");
+  const failed = { ...cancelled, failedHeld: true };
+  assert.equal(M.progressClickAction("ring", failed), "close");
+  assert.equal(M.progressClickAction("outside", failed), "close");
+  // A partly failed job wrote something, so its plate still shows it.
+  assert.equal(M.progressClickAction("ring", { ...failed, hasOutput: true }), "reveal");
+});
+
+test("click: the state machine's done hold is when a click can reveal", () => {
+  const ring = new M.ProgressRing(3, { reduced: true });
+  const state = () => ({
+    running: !ring.pending,
+    finished: !!ring.pending,
+    failedHeld: ring.phase === "failed",
+    hasOutput: true,
+  });
+  ring.advance(0.016);
+  ring.setProgress(0.5);
+  ring.advance(0.016);
+  assert.equal(M.progressClickAction("ring", state()), "none");
+  ring.complete("succeeded");
+  ring.advance(RING.minRingSeconds + 0.01);
+  assert.equal(ring.outcome, "succeeded");
+  assert.notEqual(ring.phase, "done");
+  assert.equal(M.progressClickAction("ring", state()), "reveal");
+});
