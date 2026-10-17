@@ -180,6 +180,65 @@ fn two_conversions_at_once_both_succeed() {
 }
 
 #[test]
+fn three_engines_on_one_data_dir_all_succeed() {
+    // Separate engines are what separate MorphRing processes look like (the
+    // app, a CLI run and a `watch`): one pool each, one shared profiles
+    // folder. Before the profile locks every one of them grabbed worker-0,
+    // and LibreOffice let exactly one of them have it.
+    require_engine!("soffice");
+    let tmp = tempfile::tempdir().unwrap();
+    let data = tmp.path().join("data");
+    let engines = [
+        SofficeEngine::new_in(&data),
+        SofficeEngine::new_in(&data),
+        SofficeEngine::new_in(&data),
+    ];
+    let cancel = CancelToken::new();
+    // Warm worker-0 up first. The clash needs a profile that already exists,
+    // which is the everyday case, not the first-ever conversion.
+    let warm = tmp.path().join("warm");
+    convert(
+        &engines[0],
+        &step("sample.docx", "docx", "pdf", &warm.join("work")),
+        &warm,
+        &cancel,
+    )
+    .unwrap();
+    // Everybody leaves the starting line together, like three impatient
+    // processes started from three terminals at once.
+    let start = std::sync::Barrier::new(engines.len());
+    let results: Vec<_> = thread::scope(|s| {
+        let handles: Vec<_> = engines
+            .iter()
+            .enumerate()
+            .map(|(i, engine)| {
+                let (cancel, start) = (&cancel, &start);
+                let out_dir = tmp.path().join(format!("out{i}"));
+                fs::create_dir_all(&out_dir).unwrap();
+                s.spawn(move || {
+                    start.wait();
+                    convert(
+                        engine,
+                        &step("sample.docx", "docx", "pdf", &out_dir.join("work")),
+                        &out_dir,
+                        cancel,
+                    )
+                })
+            })
+            .collect();
+        handles.into_iter().map(|h| h.join().unwrap()).collect()
+    });
+    for result in results {
+        let written = result.unwrap();
+        assert_eq!(first_bytes(&written[0], 4), b"%PDF");
+    }
+    // Three overlapping runs, three different profiles.
+    for worker in ["worker-0", "worker-1", "worker-2"] {
+        assert!(data.join("libreoffice-profiles").join(worker).is_dir());
+    }
+}
+
+#[test]
 fn skipped_output_runs_nothing() {
     require_engine!("soffice");
     let tmp = tempfile::tempdir().unwrap();

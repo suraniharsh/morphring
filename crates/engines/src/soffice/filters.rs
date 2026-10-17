@@ -184,6 +184,26 @@ pub fn profile_dir(data_dir: &Path, worker: usize) -> PathBuf {
         .join(format!("worker-{worker}"))
 }
 
+/// The lock file that marks worker `worker`'s profile as taken:
+/// `<data_dir>/libreoffice-profiles/worker-<worker>.lock`.
+///
+/// It sits next to the profile, not inside it, so LibreOffice never trips
+/// over it and wiping a profile doesn't yank the lock from under its owner.
+pub fn profile_lock(data_dir: &Path, worker: usize) -> PathBuf {
+    data_dir
+        .join("libreoffice-profiles")
+        .join(format!("worker-{worker}.lock"))
+}
+
+/// LibreOffice's own lock file inside a profile, `<profile_dir>/.lock`.
+///
+/// soffice writes it while it runs and removes it on a clean exit, so finding
+/// one after our own soffice has gone means some other LibreOffice process is
+/// (or recently was) using the profile.
+pub fn office_lock(profile_dir: &Path) -> PathBuf {
+    profile_dir.join(".lock")
+}
+
 /// The `file://` URI LibreOffice wants for `-env:UserInstallation`.
 fn profile_url(profile_dir: &Path) -> String {
     // from_directory_path insists on an absolute path. Our data dir always is
@@ -194,6 +214,13 @@ fn profile_url(profile_dir: &Path) -> String {
         Ok(url) => url.into(),
         Err(()) => format!("file://{}", absolute.display()),
     }
+}
+
+/// The `-env:UserInstallation=...` argument that points soffice at
+/// `profile_dir`. Any process carrying this exact argument is a LibreOffice
+/// living in that profile, which is how we spot squatters.
+pub fn user_installation_arg(profile_dir: &Path) -> String {
+    format!("-env:UserInstallation={}", profile_url(profile_dir))
 }
 
 /// The soffice argument list that converts `input` with `filter` into `outdir`,
@@ -212,7 +239,7 @@ pub fn args(input: &Path, filter: &str, outdir: &Path, profile_dir: &Path) -> Ve
     .collect();
     // Two soffice processes sharing a profile don't fight, the second one just
     // quietly exits 1. Hence one profile per worker, passed as a file URI.
-    args.push(format!("-env:UserInstallation={}", profile_url(profile_dir)).into());
+    args.push(user_installation_arg(profile_dir).into());
     args.push("--convert-to".into());
     args.push(filter.into());
     args.push("--outdir".into());
@@ -407,6 +434,38 @@ mod tests {
             profile_dir(Path::new("/home/me/.local/share/morphring"), 1),
             PathBuf::from("/home/me/.local/share/morphring/libreoffice-profiles/worker-1")
         );
+    }
+
+    #[test]
+    fn profile_lock_sits_next_to_its_profile() {
+        let data = Path::new("/home/me/.local/share/morphring");
+        assert_eq!(
+            profile_lock(data, 3),
+            PathBuf::from("/home/me/.local/share/morphring/libreoffice-profiles/worker-3.lock")
+        );
+        assert_eq!(
+            profile_lock(data, 3).parent(),
+            profile_dir(data, 3).parent()
+        );
+    }
+
+    #[test]
+    fn office_lock_lives_inside_the_profile() {
+        let profile = profile_dir(Path::new("/home/me/.local/share/morphring"), 0);
+        assert_eq!(
+            office_lock(&profile),
+            PathBuf::from("/home/me/.local/share/morphring/libreoffice-profiles/worker-0/.lock")
+        );
+    }
+
+    #[test]
+    fn user_installation_arg_matches_what_args_passes() {
+        let profile = Path::new("/data/libreoffice-profiles/worker-3");
+        let arg = user_installation_arg(profile);
+        assert!(arg.starts_with("-env:UserInstallation=file:///"), "{arg}");
+        assert!(arg.ends_with("worker-3/"), "{arg}");
+        let all = args(Path::new("/in/a.docx"), "pdf", Path::new("/out"), profile);
+        assert!(all.iter().any(|a| *a == *arg), "{all:?}");
     }
 
     #[test]
