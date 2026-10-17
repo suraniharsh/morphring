@@ -185,35 +185,6 @@ pub fn run_job(
         .collect()
 }
 
-/// Fails every file of a job with `detail`, for a job mode that is wired up
-/// but not implemented yet. Each file still gets its started and finished
-/// events, so nobody's progress bar waits for Godot.
-fn not_yet_supported(job: &Job<'_>, files: &[PathBuf], detail: &str) -> Vec<FileResult> {
-    files
-        .iter()
-        .enumerate()
-        .map(|(index, source)| {
-            job.emit(JobEvent::FileStarted {
-                index,
-                source: source.clone(),
-            });
-            let result = FileResult {
-                source: source.clone(),
-                state: FileState::Failed {
-                    key: ErrorKey::ConversionFailed,
-                    detail: detail.to_owned(),
-                },
-                outputs: Vec::new(),
-            };
-            job.emit(JobEvent::FileFinished {
-                index,
-                result: result.clone(),
-            });
-            result
-        })
-        .collect()
-}
-
 /// Everything the workers of one job share.
 struct Job<'a> {
     target: Target,
