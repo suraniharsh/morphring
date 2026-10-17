@@ -49,6 +49,12 @@ pub struct EdgeFlags {
     /// through LibreOffice keeps a PDF's vectors, but a photo that went through
     /// a PDF would only come back as a picture inside an SVG.
     pub not_for_image_sources: bool,
+    /// Never used once the route has passed through a raster image (the
+    /// source or any intermediate). Reading text out of a PDF, or a soundtrack
+    /// out of a video, only works on what the user's file really held; a
+    /// picture of a page has no text layer and a GIF turned into a video has
+    /// no sound, however politely we ask.
+    pub needs_original_content: bool,
 }
 
 impl EdgeFlags {
@@ -56,6 +62,7 @@ impl EdgeFlags {
     pub const NONE: Self = Self {
         image_sources_only: false,
         not_for_image_sources: false,
+        needs_original_content: false,
     };
 
     /// Whether an edge with these flags may be used in a route whose source
@@ -107,6 +114,13 @@ impl Edge {
     /// The same edge, never used in routes that start from a raster image.
     pub const fn not_for_image_sources(mut self) -> Self {
         self.flags.not_for_image_sources = true;
+        self
+    }
+
+    /// The same edge, never used once the route has passed through a raster
+    /// image: text and audio extraction need the original content.
+    pub const fn needs_original_content(mut self) -> Self {
+        self.flags.needs_original_content = true;
         self
     }
 }
@@ -471,5 +485,15 @@ mod tests {
         assert!(office.flags.allows(false));
 
         assert!(EdgeFlags::NONE.allows(true) && EdgeFlags::NONE.allows(false));
+    }
+
+    #[test]
+    fn needs_original_content_sets_only_its_own_flag() {
+        let text = Edge::new("pdf", "txt").needs_original_content();
+        assert!(text.flags.needs_original_content);
+        assert!(!text.flags.image_sources_only && !text.flags.not_for_image_sources);
+        // Judged per route by the planner, not by the source alone.
+        assert!(text.flags.allows(true) && text.flags.allows(false));
+        assert_eq!(EdgeFlags::default(), EdgeFlags::NONE);
     }
 }

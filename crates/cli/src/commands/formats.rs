@@ -239,6 +239,56 @@ mod tests {
         );
     }
 
+    /// Every target `formats <from>` lists with the real engines, installed
+    /// now or optional later; the hints in brackets are not targets.
+    fn real_targets(from: &str) -> Vec<String> {
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+        let code = {
+            let mut ctx = Ctx {
+                out: &mut out,
+                err: &mut err,
+                cwd: PathBuf::from("/"),
+                cancel: CancelToken::new(),
+                engines: morphring_engines::registry::all(),
+                config_dir: None,
+            };
+            run_with(["formats", from].iter().map(OsString::from), &mut ctx)
+        };
+        assert_eq!(code, 0);
+        String::from_utf8(out)
+            .unwrap()
+            .lines()
+            .skip(1)
+            .filter_map(|line| line.strip_prefix("  "))
+            .flat_map(|line| line.split("  (").next().unwrap().split(", "))
+            .map(str::to_owned)
+            .collect()
+    }
+
+    #[test]
+    fn pictures_never_promise_text_or_sound() {
+        // FX-03: these all failed, with an error about a PDF nobody gave us.
+        let lost = [
+            "docx", "odt", "txt", "mp3", "m4a", "wav", "flac", "ogg", "opus",
+        ];
+        for from in ["png", "jpg", "gif", "webp"] {
+            let targets = real_targets(from);
+            assert!(targets.iter().any(|t| t == "pdf"), "{from}: {targets:?}");
+            for t in lost {
+                assert!(
+                    !targets.iter().any(|x| x == t),
+                    "{from} -> {t}: {targets:?}"
+                );
+            }
+        }
+        let video = real_targets("mp4");
+        assert!(video.iter().any(|t| t == "mp3"), "{video:?}");
+        assert!(!video.iter().any(|t| t == "txt"), "{video:?}");
+        // A real vector drawing still has its text to give.
+        let svg = real_targets("svg");
+        assert!(svg.iter().any(|t| t == "txt"), "{svg:?}");
+    }
+
     #[test]
     fn unknown_format_is_a_usage_error() {
         let (code, out, err) = run_args(&["formats", "nope"], vec![]);

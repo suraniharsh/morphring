@@ -47,10 +47,11 @@ const fn build_edges() -> [Edge; EDGE_COUNT] {
             n += 1;
             j += 1;
         }
-        // video -> audio: extract the soundtrack.
+        // video -> audio: extract the soundtrack. Only the user's own video
+        // has one; a GIF promoted to MP4 on the way is as silent as a mime.
         j = 0;
         while j < A {
-            edges[n] = Edge::new(from, AUDIO_FORMATS[j]);
+            edges[n] = Edge::new(from, AUDIO_FORMATS[j]).needs_original_content();
             n += 1;
             j += 1;
         }
@@ -1617,6 +1618,19 @@ mod tests {
                 e.to
             );
             assert_ne!(e.from, FormatId::new(""));
+        }
+    }
+
+    #[test]
+    fn only_soundtrack_extraction_needs_the_original_video() {
+        for e in EDGES.iter() {
+            let audio_from_video =
+                VIDEO_FORMATS.contains(&e.from.as_str()) && AUDIO_FORMATS.contains(&e.to.as_str());
+            assert_eq!(
+                e.flags.needs_original_content, audio_from_video,
+                "{} -> {}",
+                e.from, e.to
+            );
         }
     }
 

@@ -99,7 +99,7 @@ fn sample_pdf_becomes_utf8_text_with_a_bom() {
 }
 
 #[test]
-fn a_pdf_without_text_fails_with_filees_message() {
+fn a_pdf_without_text_fails_with_a_clear_message() {
     require_engine!("pdftotext");
     // Git for Windows ships a lone pdftotext; the engine wants all of Poppler.
     require_engine!("pdftoppm");
@@ -107,7 +107,7 @@ fn a_pdf_without_text_fails_with_filees_message() {
     let err = convert(blank_pdf(dir.path()), dir.path(), false).unwrap_err();
     assert_eq!(
         err.to_string(),
-        "The PDF contains no text (it may be scanned or contain only images)."
+        "No text was found in this file (it may be scanned or contain only pictures)."
     );
     assert!(!dir.path().join("result.txt").exists());
 }

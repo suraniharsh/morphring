@@ -27,13 +27,17 @@ const PROGRAM: &str = "pdftotext";
 /// What every byte-order-mark enjoyer (Filee, Notepad, Excel) expects up front.
 const BOM: &[u8] = b"\xEF\xBB\xBF";
 
-/// The error for a PDF without a text layer.
+/// The error for a PDF without a text layer. The PDF is often our own
+/// intermediate (an SVG or a document printed on the way), so the message talks
+/// about "this file" rather than accusing the user's drawing of being a PDF.
 pub(crate) const NO_TEXT: &str =
-    "The PDF contains no text (it may be scanned or contain only images).";
+    "No text was found in this file (it may be scanned or contain only pictures).";
 
 /// The edges this part handles.
 pub(crate) fn edges() -> Vec<Edge> {
-    vec![Edge::with_cost("pdf", "txt", 10)]
+    // Text only exists in what the user gave us; a PDF made from a picture
+    // is a frame around pixels, so the planner keeps pictures away from here.
+    vec![Edge::with_cost("pdf", "txt", 10).needs_original_content()]
 }
 
 /// Converts `step`, which is one of [`edges`].
@@ -188,6 +192,8 @@ mod tests {
         assert_eq!(edges[0].from.as_str(), "pdf");
         assert_eq!(edges[0].to.as_str(), "txt");
         assert_eq!(edges[0].cost, 10);
+        // A picture's PDF has no text layer, so no route may get here via one.
+        assert!(edges[0].flags.needs_original_content);
     }
 
     #[test]
@@ -250,10 +256,10 @@ mod tests {
     }
 
     #[test]
-    fn the_no_text_message_is_filees() {
+    fn the_no_text_message_does_not_assume_a_pdf() {
         assert_eq!(
             NO_TEXT,
-            "The PDF contains no text (it may be scanned or contain only images)."
+            "No text was found in this file (it may be scanned or contain only pictures)."
         );
     }
 }

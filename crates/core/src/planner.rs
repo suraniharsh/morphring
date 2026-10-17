@@ -10,7 +10,9 @@
 //! Two of Filee's refinements ride along: edge flags that keep image tracing
 //! away from anything that was not a raster image to begin with
 //! (RoutePlanner.cs:62-81), and [`EngineTuning`], the user's engine priority
-//! and per-edge cost overrides (ConverterCatalog.cs:53-69).
+//! and per-edge cost overrides (ConverterCatalog.cs:53-69). One flag is our
+//! own: text and audio extraction refuse to run after a raster image, because
+//! no amount of `pdftotext` finds words in a photo of a page.
 
 use std::collections::HashMap;
 
@@ -99,6 +101,9 @@ impl EngineTuning {
 pub struct Planner {
     /// Every usable edge, in registration order (engine order, then edge order).
     edges: Vec<Hop>,
+    /// Index for index with `edges`: the edge needs the user's original
+    /// content and may not follow a raster image anywhere in the route.
+    needs_original: Vec<bool>,
     /// For each source format, the cheapest edge to each target format, ordered
     /// by the target's first appearance among that source's edges. Index 0 is
     /// for routes from a non-image source, index 1 for routes from a raster
@@ -151,7 +156,9 @@ impl Planner {
         // that edge for free, so the search stays exact while the walk shrinks
         // from "every engine combination" to "every format combination". Done
         // once per kind of source, because a flagged edge may be the cheapest
-        // for images and not even allowed for anything else.
+        // for images and not even allowed for anything else. Edges that need
+        // the original content are judged per path, so they never collapse
+        // into an unflagged twin: the twin may be the only one a path can use.
         let adjacency = [false, true].map(|image_source| {
             let mut adjacency: HashMap<FormatId, Vec<usize>> = HashMap::new();
             for (index, edge) in edges.iter().enumerate() {
@@ -159,7 +166,11 @@ impl Planner {
                     continue;
                 }
                 let out = adjacency.entry(edge.from).or_default();
-                match out.iter_mut().find(|i| edges[**i].to == edge.to) {
+                let original = flags[index].needs_original_content;
+                let twin = |i: &&mut usize| {
+                    edges[**i].to == edge.to && flags[**i].needs_original_content == original
+                };
+                match out.iter_mut().find(twin) {
                     Some(best) if edges[*best].cost <= edge.cost => {}
                     Some(best) => *best = index,
                     None => out.push(index),
@@ -168,7 +179,12 @@ impl Planner {
             adjacency
         });
 
-        Self { edges, adjacency }
+        let needs_original = flags.iter().map(|f| f.needs_original_content).collect();
+        Self {
+            edges,
+            needs_original,
+            adjacency,
+        }
     }
 
     /// The cheapest route from `from` to `to`, or `None` when no route of at
@@ -245,20 +261,25 @@ impl Planner {
     /// Calls `visit` with every simple path of 1 to `MAX_HOPS` hops starting at
     /// `from` (no format visited twice, no self edges), depth first in
     /// registration order, using only the edges whose flags allow a route
-    /// from `from`. Paths are edge indices; the cost is their sum.
+    /// from `from`. Edges that need the original content are skipped once the
+    /// path has passed through a raster image (`from` included). Paths are
+    /// edge indices; the cost is their sum.
     fn walk(&self, from: FormatId, visit: &mut dyn FnMut(&[usize], u32)) {
-        let adjacency = &self.adjacency[usize::from(is_image(from))];
+        let image_source = is_image(from);
+        let adjacency = &self.adjacency[usize::from(image_source)];
         let mut path = Vec::with_capacity(MAX_HOPS);
         let mut seen = Vec::with_capacity(MAX_HOPS + 1);
         seen.push(from);
-        self.walk_from(adjacency, from, 0, &mut path, &mut seen, visit);
+        self.walk_from(adjacency, 0, image_source, &mut path, &mut seen, visit);
     }
 
+    /// One level of [`Planner::walk`]. The current format is the last one in
+    /// `seen`, which saves an argument and keeps clippy's counting finger happy.
     fn walk_from(
         &self,
         adjacency: &HashMap<FormatId, Vec<usize>>,
-        node: FormatId,
         cost: u32,
+        rasterised: bool,
         path: &mut Vec<usize>,
         seen: &mut Vec<FormatId>,
         visit: &mut dyn FnMut(&[usize], u32),
@@ -266,7 +287,7 @@ impl Planner {
         if path.len() == MAX_HOPS {
             return;
         }
-        let Some(out) = adjacency.get(&node) else {
+        let Some(out) = seen.last().and_then(|node| adjacency.get(node)) else {
             return;
         };
         for &index in out {
@@ -276,11 +297,17 @@ impl Planner {
             if seen.contains(&edge.to) {
                 continue;
             }
+            // Once the content became pixels, the words and the soundtrack
+            // are gone for good; don't promise to extract them.
+            if rasterised && self.needs_original[index] {
+                continue;
+            }
             let cost = cost.saturating_add(edge.cost);
+            let rasterised = rasterised || is_image(edge.to);
             path.push(index);
             seen.push(edge.to);
             visit(path, cost);
-            self.walk_from(adjacency, edge.to, cost, path, seen, visit);
+            self.walk_from(adjacency, cost, rasterised, path, seen, visit);
             seen.pop();
             path.pop();
         }
@@ -659,6 +686,89 @@ mod tests {
         let route = p.plan(f("pdf"), f("svg")).unwrap();
         assert_eq!(route.engines().collect::<Vec<_>>(), [1, 1]);
         assert_eq!(p.plan(f("png"), f("svg")).unwrap().cost, 5);
+    }
+
+    /// The FX-03 graph in miniature: pictures become PDFs and videos, PDFs
+    /// give up their text, videos their sound, and SVGs print to PDF.
+    fn extraction_engines() -> [Edges; 2] {
+        [
+            Edges(
+                "office",
+                vec![
+                    Edge::new("png", "pdf"),
+                    Edge::new("svg", "pdf"),
+                    Edge::new("pdf", "txt").needs_original_content(),
+                ],
+            ),
+            Edges(
+                "media",
+                vec![
+                    Edge::new("gif", "mp4"),
+                    Edge::new("mp4", "png"),
+                    Edge::new("mp4", "mp3").needs_original_content(),
+                ],
+            ),
+        ]
+    }
+
+    #[test]
+    fn text_and_audio_are_never_extracted_after_a_raster_image() {
+        let engines = extraction_engines();
+        let p = flagged(&engines);
+        // A raster source has no text layer and no soundtrack to give.
+        assert!(p.plan(f("png"), f("txt")).is_none());
+        assert!(p.plan(f("gif"), f("mp3")).is_none());
+        // Nor does a video once it has been flattened into a poster frame.
+        assert!(p.plan(f("mp4"), f("txt")).is_none());
+        // The original content is still fair game.
+        assert_eq!(steps(&p.plan(f("mp4"), f("mp3")).unwrap()), ["mp4→mp3"]);
+        assert_eq!(steps(&p.plan(f("svg"), f("pdf")).unwrap()), ["svg→pdf"]);
+        assert_eq!(
+            steps(&p.plan(f("svg"), f("txt")).unwrap()),
+            ["svg→pdf", "pdf→txt"]
+        );
+        assert_eq!(steps(&p.plan(f("pdf"), f("txt")).unwrap()), ["pdf→txt"]);
+
+        // The listings use the same walk, so they stop promising it too.
+        let listed = |from| -> Vec<FormatId> {
+            p.targets_from(f(from))
+                .into_iter()
+                .map(|(t, _)| t)
+                .collect()
+        };
+        assert!(!listed("png").contains(&f("txt")));
+        assert!(!listed("gif").contains(&f("mp3")));
+        assert!(listed("gif").contains(&f("mp4")));
+        assert!(listed("mp4").contains(&f("mp3")));
+        assert!(!listed("mp4").contains(&f("txt")));
+        assert!(listed("svg").contains(&f("txt")));
+    }
+
+    #[test]
+    fn a_flagged_extraction_does_not_shadow_a_plain_twin() {
+        // Two engines read PDF text; the cheap one needs the original content.
+        // A route through a picture must still find the plain one (an OCR
+        // engine, say), and a clean route must still pick the cheap one.
+        let engines = [
+            Edges(
+                "text",
+                vec![
+                    Edge::new("png", "pdf"),
+                    Edge::with_cost("pdf", "txt", 1).needs_original_content(),
+                ],
+            ),
+            Edges("ocr", vec![Edge::with_cost("pdf", "txt", 50)]),
+        ];
+        let p = flagged(&engines);
+        let photo = p.plan(f("png"), f("txt")).unwrap();
+        assert_eq!(photo.engines().collect::<Vec<_>>(), [0, 1]);
+        assert_eq!(
+            p.plan(f("pdf"), f("txt"))
+                .unwrap()
+                .engines()
+                .collect::<Vec<_>>(),
+            [0]
+        );
     }
 
     fn tuned(engines: &[FakeConverter], tuning: &EngineTuning) -> Planner {
