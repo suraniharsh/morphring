@@ -12,9 +12,9 @@ name = "morphring"
 path = "src/main.rs"
 
 [dependencies]
-morphring-core = { path = "../core", version = "0.1.0" }
-morphring-engines = { path = "../engines", version = "0.1.0" }
-morphring-platform = { path = "../platform", version = "0.1.0" }
+morphring-core = { path = "../core", version = "0.2.0" }
+morphring-engines = { path = "../engines", version = "0.2.0" }
+morphring-platform = { path = "../platform", version = "0.2.0" }
 anyhow.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
@@ -30,7 +30,7 @@ pathdiff.workspace = true
 notify.workspace = true
 
 [dev-dependencies]
-morphring-core = { path = "../core", version = "0.1.0", features = ["test-support"] }
+morphring-core = { path = "../core", version = "0.2.0", features = ["test-support"] }
 tempfile.workspace = true
 which.workspace = true
 filetime.workspace = true

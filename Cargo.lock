@@ -2023,7 +2023,7 @@ dependencies = [
 
 [[package]]
 name = "morphring"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -2049,7 +2049,7 @@ dependencies = [
 
 [[package]]
 name = "morphring-core"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "chrono",
  "filetime",
@@ -2064,7 +2064,7 @@ dependencies = [
 
 [[package]]
 name = "morphring-engines"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "brotli",
  "bzip2",
@@ -2127,7 +2127,7 @@ dependencies = [
 
 [[package]]
 name = "morphring-platform"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "mslnk",
  "objc2",

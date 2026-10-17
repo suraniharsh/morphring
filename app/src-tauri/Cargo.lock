@@ -3159,7 +3159,7 @@ dependencies = [
 
 [[package]]
 name = "morphring-app"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "directories",
@@ -3180,7 +3180,7 @@ dependencies = [
 
 [[package]]
 name = "morphring-core"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "chrono",
  "filetime",
@@ -3195,7 +3195,7 @@ dependencies = [
 
 [[package]]
 name = "morphring-engines"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "brotli",
  "bzip2",

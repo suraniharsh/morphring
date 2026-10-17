@@ -6,7 +6,7 @@ default-members = ["crates/core", "crates/engines", "crates/cli", "crates/platfo
 exclude = ["app"]
 
 [workspace.package]
-version = "0.1.1"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.93"
 license = "MIT"

@@ -19,7 +19,7 @@ optdepends=(
   'libreoffice-fresh: office document conversions'
   'poppler: PDF page rendering with pdftoppm'
   'ghostscript: PDF rendering and compression'
-  'pandoc: markup and document conversions'
+  'pandoc-cli: markup and document conversions'
 )
 provides=("$_pkgname")
 conflicts=("$_pkgname")
@@ -28,8 +28,8 @@ conflicts=("$_pkgname")
 options=('!strip' '!debug')
 _dirname="$_pkgname-v$pkgver-x86_64-linux"
 source=("$_dirname.tar.gz::$url/releases/download/v$pkgver/$_dirname.tar.gz")
-# TODO(R-03): real checksum
-sha256sums=('SKIP')
+# From the v0.1.1 release's SHA256SUMS.txt, not a local build. Trust, but verify.
+sha256sums=('d0ad8dfcb8025c21e76d2045a6915f8b55984dfc7d9bbc9a39188f6de416bd8d')
 
 package() {
   cd "$srcdir/$_dirname"

@@ -64,7 +64,7 @@ download = ["dep:ureq", "dep:sha2"]
 pdf-native-render = ["dep:hayro", "dep:pdf-extract", "dep:image"]
 
 [dependencies]
-morphring-core = { path = "../core", version = "0.1.0" }
+morphring-core = { path = "../core", version = "0.2.0" }
 thiserror.workspace = true
 tracing.workspace = true
 serde.workspace = true
@@ -128,7 +128,7 @@ libc.workspace = true
 windows-sys.workspace = true
 
 [dev-dependencies]
-morphring-core = { path = "../core", version = "0.1.0", features = ["test-support"] }
+morphring-core = { path = "../core", version = "0.2.0", features = ["test-support"] }
 
 [lints]
 workspace = true
