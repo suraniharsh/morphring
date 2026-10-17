@@ -3,9 +3,11 @@
 #
 # Both `test` and `app` run on Linux, Windows and macOS with real engines
 # installed, so every later XP task gets an honest cross-OS signal instead of
-# a shrug. Linux blocks, Windows and macOS inform (D11) until XP-14 promotes
-# them. Every cargo call uses --locked (D12): if Cargo.lock is stale, CI should
-# say so instead of quietly rewriting it.
+# a shrug. As of v0.2 all three OSes block (this supersedes D11, which let
+# Windows and macOS merely inform): a red Windows run is now a red run. The
+# only jobs still allowed to fail are deny-advisories and goldens-office.
+# Every cargo call uses --locked (D12): if Cargo.lock is stale, CI should say
+# so instead of quietly rewriting it.
 name: CI
 
 on:
@@ -53,9 +55,8 @@ jobs:
     name: test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: ${{ matrix.timeout }}
-    # Only Linux gates; Windows and macOS are here to tattle, not to block
-    # (D11), right up until XP-14 hands them a badge.
-    continue-on-error: ${{ matrix.os != 'ubuntu-latest' }}
+    # Every OS gates now. Windows and macOS spent v0.1 tattling; in v0.2
+    # they got the badge (XP-14), so a red run here is a red run, full stop.
     env:
       # The ImageMagick AppImage wants FUSE, which the runner does not lend
       # out. This makes it unpack itself into /tmp and run from there instead,
@@ -226,10 +227,8 @@ jobs:
     name: msrv
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    # Expected red for now: the let-chains in cli/src/inputs.rs need 1.88+,
-    # while Cargo.toml still promises 1.85. P2-01 bumps the MSRV to 1.92 and
-    # XP-14 makes this job blocking. Until then it is a reminder, not a gate.
-    continue-on-error: true
+    # Blocking: if Cargo.toml promises a rust-version, this job holds us to
+    # it. Breaking the promise means bumping it on purpose, not by accident.
     steps:
       - uses: actions/checkout@v4
       - name: Read rust-version
@@ -274,8 +273,7 @@ jobs:
     name: app (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: ${{ matrix.timeout }}
-    # Ubuntu blocks; Windows and macOS report in until XP-14.
-    continue-on-error: ${{ matrix.os != 'ubuntu-latest' }}
+    # All three OSes block, same as `test`.
     strategy:
       fail-fast: false
       matrix:
