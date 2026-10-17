@@ -264,7 +264,7 @@ mod tests {
         let file: serde_json::Value = serde_json::from_str(&text).unwrap();
         assert_eq!(file["defaultOutput"]["location"], "Subfolder");
         assert_eq!(file["defaultOutput"]["subfolderName"], "out");
-        assert_eq!(file["schemaVersion"], 1);
+        assert_eq!(file["schemaVersion"], SETTINGS_SCHEMA_VERSION);
 
         // And the state moved along with the file.
         let (settings, _) = prefs.current();
