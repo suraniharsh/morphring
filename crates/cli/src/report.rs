@@ -104,7 +104,7 @@ pub fn summary(files: &[FileResult]) -> String {
 /// The `--json` document. Field order is Filee's and is part of the contract.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct JsonReport {
-    /// Preset display name; always `null` until presets arrive.
+    /// The preset's display name when `--preset` picked it, `null` for `--to`.
     pub preset: Option<String>,
     /// Target format id.
     pub target: String,
@@ -131,12 +131,13 @@ pub struct JsonFile {
 }
 
 impl JsonReport {
-    /// Builds the report. `files` must be in input order; relative paths are
-    /// made absolute against `cwd`.
-    pub fn new(target: &str, files: &[FileResult], cwd: &Path) -> Self {
+    /// Builds the report. `preset` is the display name of the preset given
+    /// with `--preset` (`None` for `--to`). `files` must be in input order;
+    /// relative paths are made absolute against `cwd`.
+    pub fn new(preset: Option<&str>, target: &str, files: &[FileResult], cwd: &Path) -> Self {
         let c = Counts::of(files);
         Self {
-            preset: None,
+            preset: preset.map(str::to_owned),
             target: target.to_owned(),
             converted: c.converted,
             skipped: c.skipped,
@@ -155,13 +156,15 @@ impl JsonReport {
 }
 
 /// Writes the `--json` document (2-space indent) followed by a newline.
+/// `preset` is as in [`JsonReport::new`].
 pub fn write_json(
     out: &mut dyn Write,
+    preset: Option<&str>,
     target: &str,
     files: &[FileResult],
     cwd: &Path,
 ) -> io::Result<()> {
-    serde_json::to_writer_pretty(&mut *out, &JsonReport::new(target, files, cwd))?;
+    serde_json::to_writer_pretty(&mut *out, &JsonReport::new(preset, target, files, cwd))?;
     writeln!(out)
 }
 
@@ -377,7 +380,7 @@ mod tests {
 
     fn json_bytes(files: &[FileResult]) -> Vec<u8> {
         let mut buf = Vec::new();
-        write_json(&mut buf, "webp", files, Path::new(CWD)).unwrap();
+        write_json(&mut buf, None, "webp", files, Path::new(CWD)).unwrap();
         buf
     }
 
@@ -425,7 +428,7 @@ mod tests {
         let files = sample();
         let buf = json_bytes(&files);
         let back: JsonReport = serde_json::from_slice(&buf).unwrap();
-        assert_eq!(back, JsonReport::new("webp", &files, Path::new(CWD)));
+        assert_eq!(back, JsonReport::new(None, "webp", &files, Path::new(CWD)));
 
         let text = String::from_utf8(buf).unwrap();
         assert!(text.ends_with("}\n"));
@@ -451,6 +454,15 @@ mod tests {
         let epos = |key: &str| entry.find(&format!("\"{key}\"")).unwrap();
         let keys = ["source", "state", "outputs", "error"];
         assert!(keys.windows(2).all(|w| epos(w[0]) < epos(w[1])));
+    }
+
+    #[test]
+    fn report_json_names_the_preset_when_there_is_one() {
+        let mut buf = Vec::new();
+        write_json(&mut buf, Some("Half size"), "*", &sample(), Path::new(CWD)).unwrap();
+        let text = String::from_utf8(buf).unwrap();
+        // Still first in line: Filee's key order doesn't care who's asking.
+        assert!(text.starts_with("{\n  \"preset\": \"Half size\",\n  \"target\": \"*\","));
     }
 
     #[test]

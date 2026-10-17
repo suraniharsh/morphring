@@ -126,7 +126,7 @@ fn json_prints_only_the_document_and_beats_quiet() {
 }
 
 #[test]
-fn quiet_keeps_the_summary_and_the_failures() {
+fn quiet_prints_only_the_failures_on_stderr() {
     let tmp = TempDir::new().unwrap();
     touch(tmp.path(), "a.png");
     touch(tmp.path(), "notes.unknownext");
@@ -143,11 +143,64 @@ fn quiet_keeps_the_summary_and_the_failures() {
         ],
     );
     assert_eq!(r.code, 1);
+    // No ok line, no summary: the exit code does the talking.
+    assert_eq!(r.out, "");
     assert_eq!(
-        r.out,
-        "fail  notes.unknownext: This file type isn't supported (.unknownext)\n\
-         Converted 1 of 2 file(s), 1 failed.\n"
+        r.err,
+        "fail  notes.unknownext: This file type isn't supported (.unknownext)\n"
     );
+    assert!(tmp.path().join("a.jpg").is_file());
+}
+
+#[test]
+fn quiet_is_silent_when_everything_worked() {
+    let tmp = TempDir::new().unwrap();
+    touch(tmp.path(), "a.png");
+    let r = run_in(
+        tmp.path(),
+        png_to_jpg(),
+        &["convert", "a.png", "--to", "jpg", "--quiet"],
+    );
+    assert_eq!(r.code, 0, "{r:?}");
+    assert_eq!(r.out, "");
+    assert_eq!(r.err, "");
+    assert!(tmp.path().join("a.jpg").is_file());
+}
+
+#[test]
+fn json_preset_is_null_with_to_and_the_display_name_with_preset() {
+    let tmp = TempDir::new().unwrap();
+    touch(tmp.path(), "a.png");
+    let r = run_in(
+        tmp.path(),
+        png_to_jpg(),
+        &["convert", "a.png", "--to", "jpg", "--json"],
+    );
+    assert_eq!(r.code, 0, "{r:?}");
+    let v: Value = serde_json::from_str(&r.out).unwrap();
+    assert_eq!(v["preset"], Value::Null);
+
+    // Asked for by id, reported by the name people see in the ring.
+    let r = run_in(
+        tmp.path(),
+        png_to_jpg(),
+        &["convert", "a.png", "--preset", "jpg-70", "--json"],
+    );
+    assert_eq!(r.code, 0, "{r:?}");
+    let v: Value = serde_json::from_str(&r.out).unwrap();
+    let name = v["preset"].as_str().expect("preset is a string");
+    assert!(!name.is_empty() && name != "jpg-70", "{}", r.out);
+    assert_eq!(v["target"], "jpg");
+
+    // Asked for by display name, the same name comes back.
+    let r = run_in(
+        tmp.path(),
+        png_to_jpg(),
+        &["convert", "a.png", "--preset", name, "--json"],
+    );
+    assert_eq!(r.code, 0, "{r:?}");
+    let again: Value = serde_json::from_str(&r.out).unwrap();
+    assert_eq!(again["preset"], name);
 }
 
 #[test]

@@ -1,12 +1,20 @@
 //! `morphring convert`, ported from `ConvertAsync`, `RunJobAsync` and
 //! `ResolvePreset` in Filee's `src/Filee.Cli/Cli.cs`. Turning the flags into a
 //! job lives in [`crate::resolve`]; this file runs it and reports.
+//!
+//! Output, by flag:
+//! - default: one line per finished file and the summary, on stdout;
+//! - `--json`: only the JSON document on stdout (its `preset` field is the
+//!   preset's display name under `--preset`, `null` under `--to`);
+//! - `--quiet`: nothing but errors, i.e. the `fail` and `stop` lines, on
+//!   stderr, and no summary. The exit code still tells the whole story.
 
 use std::path::Path;
 use std::sync::mpsc;
 use std::thread;
 
 use morphring_core::job::{self, JobEvent};
+use morphring_core::preset;
 use morphring_core::profiles::Library;
 use morphring_core::settings::Store;
 use morphring_core::{Converter, FileResult, FileState, formats};
@@ -71,6 +79,14 @@ pub fn run(args: &ConvertArgs, ctx: &mut Ctx) -> i32 {
         return EXIT_NOTHING_TO_DO;
     }
 
+    // The JSON report names the preset the way the ring would. resolve already
+    // found it once; finding it again is a slice scan, cheaper than plumbing.
+    let preset_name = args
+        .preset
+        .as_deref()
+        .and_then(|key| preset::find(&library.presets, key))
+        .map(preset::Preset::display_name);
+
     let JobSpec {
         target,
         options,
@@ -81,11 +97,10 @@ pub fn run(args: &ConvertArgs, ctx: &mut Ctx) -> i32 {
     let cancel = ctx.cancel.clone();
 
     // Under --json, stdout is reserved for the one JSON document; under
-    // --quiet only the bad news makes it out.
-    let wants_line = |state: &FileState| {
-        !args.json
-            && (!args.quiet || matches!(state, FileState::Failed { .. } | FileState::Cancelled))
-    };
+    // --quiet only the bad news makes it out, and it leaves through stderr
+    // like any self-respecting error.
+    let is_bad =
+        |state: &FileState| matches!(state, FileState::Failed { .. } | FileState::Cancelled);
 
     // run_job blocks and fires events from its worker threads, but ctx.out is a
     // plain `&mut dyn Write` that no thread may share. So the job runs on its own
@@ -112,8 +127,14 @@ pub fn run(args: &ConvertArgs, ctx: &mut Ctx) -> i32 {
             )
         });
         for result in rx {
-            if wants_line(&result.state) {
-                let _ = writeln!(ctx.out, "{}", report::file_line(&result, &ctx.cwd));
+            if args.json {
+                continue;
+            }
+            let line = report::file_line(&result, &ctx.cwd);
+            if !args.quiet {
+                let _ = writeln!(ctx.out, "{line}");
+            } else if is_bad(&result.state) {
+                let _ = writeln!(ctx.err, "{line}");
             }
         }
         worker.join()
@@ -129,11 +150,13 @@ pub fn run(args: &ConvertArgs, ctx: &mut Ctx) -> i32 {
     };
 
     if args.json {
-        if let Err(e) = report::write_json(ctx.out, &label, &results, &ctx.cwd) {
+        if let Err(e) =
+            report::write_json(ctx.out, preset_name.as_deref(), &label, &results, &ctx.cwd)
+        {
             let _ = writeln!(ctx.err, "morphring: cannot write the report: {e}");
             return EXIT_SOME_FAILED;
         }
-    } else {
+    } else if !args.quiet {
         let _ = writeln!(ctx.out, "{}", report::summary(&results));
     }
 
