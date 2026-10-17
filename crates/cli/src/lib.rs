@@ -479,18 +479,17 @@ mod tests {
     }
 
     #[test]
-    fn presets_actions_are_declared_but_not_available_yet() {
-        for (args, action) in [
-            (&["presets", "export", "out.json"][..], "export"),
-            (&["presets", "import", "in.json"], "import"),
-            (&["presets", "reset", "--yes"], "reset"),
-            (&["presets", "reset"], "reset"),
+    fn presets_actions_without_a_config_folder_refuse_to_save() {
+        // Export is left out: with cwd "/" it would try to write to the root.
+        for args in [
+            &["presets", "import", "in.json"][..],
+            &["presets", "reset", "--yes"],
+            &["presets", "reset"],
         ] {
             let (code, out, err) = run_args(args);
-            assert_eq!((code, out.as_str()), (2, ""), "{args:?}");
+            assert_eq!((code, out.as_str()), (1, ""), "{args:?}");
             assert_eq!(
-                err,
-                format!("morphring: 'presets {action}' is not available yet.\n"),
+                err, "morphring: no config folder to keep the presets in.\n",
                 "{args:?}"
             );
         }
