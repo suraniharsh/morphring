@@ -10,7 +10,9 @@ use serde::{Deserialize, Serialize};
 use crate::contract::ConvertOptions;
 use crate::formats::{self, Format};
 use crate::job::Target;
-use crate::options::{ArchiveOptions, DocumentOptions, ImageOptions, MediaOptions, PdfOptions};
+use crate::options::{
+    ArchiveOptions, DocumentOptions, ImageOptions, MediaOptions, PdfOptions, TracingOptions,
+};
 use crate::output::{OutputLocation, OutputRule};
 
 /// Target id meaning "same format as the source file" (resize-only presets).
@@ -35,6 +37,8 @@ pub struct Preset {
     pub document: DocumentOptions,
     pub media: MediaOptions,
     pub archive: ArchiveOptions,
+    /// Raster to vector tracing; Filee calls the group `trace`.
+    pub trace: TracingOptions,
     pub output: OutputRule,
 }
 
@@ -52,6 +56,7 @@ impl Default for Preset {
             document: DocumentOptions::default(),
             media: MediaOptions::default(),
             archive: ArchiveOptions::default(),
+            trace: TracingOptions::default(),
             output: default_output(),
         }
     }
@@ -118,6 +123,7 @@ impl Preset {
             document: self.document.clone(),
             media: self.media.clone(),
             archive: self.archive.clone(),
+            trace: self.trace.clone(),
         }
     }
 }
@@ -262,5 +268,51 @@ mod tests {
         assert_eq!(preset.image.long_edge, 1920);
         assert_eq!(preset.output.location, OutputLocation::Default);
         assert_eq!(preset.name_key, None);
+    }
+
+    #[test]
+    fn preset_old_file_without_new_fields_still_loads() {
+        // A v0.1 presets.json entry: no trace group, no codecs, no background
+        // removal. Everything new should take its default without fuss.
+        let preset: Preset = serde_json::from_str(
+            r#"{"id":"old","name":"Old","target":"mp4","image":{"quality":80},
+                "media":{"quality":"High"},"output":{"location":"Default"}}"#,
+        )
+        .unwrap();
+        assert_eq!(preset.trace, TracingOptions::default());
+        assert_eq!(
+            preset.media.video_codec,
+            crate::options::VideoCodec::Default
+        );
+        assert!(!preset.image.remove_background);
+        assert_eq!(preset.image.background_tolerance, 25);
+    }
+
+    #[test]
+    fn preset_reads_a_filee_preset_with_the_new_groups() {
+        use crate::options::{AudioCodec, TracingMode, VideoCodec};
+        let preset: Preset = serde_json::from_str(
+            r#"{"id":"abc123","name":"Trace","targetFormat":"svg",
+                "image":{"removeBackground":true,"backgroundTolerance":30,"keepEnclosedBackground":true},
+                "media":{"videoCodec":"Hevc","audioCodec":"Alac"},
+                "trace":{"mode":"BlackAndWhite","colors":99,"detail":10}}"#,
+        )
+        .unwrap();
+        assert!(preset.image.remove_background);
+        assert_eq!(preset.image.background_tolerance, 30);
+        assert!(preset.image.keep_enclosed_background);
+        assert_eq!(preset.media.video_codec, VideoCodec::Hevc);
+        assert_eq!(preset.media.audio_codec, AudioCodec::Alac);
+        assert_eq!(preset.trace.mode, TracingMode::BlackAndWhite);
+        assert_eq!(preset.trace.colors, 64);
+        assert_eq!(preset.trace.detail, 10);
+
+        let options = preset.options();
+        assert_eq!(options.trace, preset.trace);
+        assert_eq!(options.media.video_codec, VideoCodec::Hevc);
+
+        let json = serde_json::to_value(&preset).unwrap();
+        assert_eq!(json["trace"]["mode"], "BlackAndWhite");
+        assert_eq!(serde_json::from_value::<Preset>(json).unwrap(), preset);
     }
 }

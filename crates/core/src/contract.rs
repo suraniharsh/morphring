@@ -8,7 +8,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::error::{EngineError, ErrorKey};
-use crate::options::{ArchiveOptions, DocumentOptions, ImageOptions, MediaOptions, PdfOptions};
+use crate::options::{
+    ArchiveOptions, DocumentOptions, ImageOptions, MediaOptions, PdfOptions, TracingOptions,
+};
 
 /// Identifier of a format, such as `"png"` or `"docx"`.
 ///
@@ -76,6 +78,7 @@ pub struct ConvertOptions {
     pub document: DocumentOptions,
     pub media: MediaOptions,
     pub archive: ArchiveOptions,
+    pub trace: TracingOptions,
 }
 
 impl ConvertOptions {
