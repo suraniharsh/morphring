@@ -75,6 +75,7 @@ pub fn run(args: &WatchArgs, ctx: &mut Ctx) -> i32 {
         } else {
             AfterConversion::Keep
         },
+        ..WatchRule::default()
     };
     if !rule.folder.is_dir() {
         let _ = writeln!(

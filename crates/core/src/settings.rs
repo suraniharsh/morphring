@@ -17,6 +17,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use tempfile::NamedTempFile;
 
 use crate::output::{DEFAULT_SUBFOLDER, OutputLocation, OutputRule};
+use crate::watch::{WatchRule, new_rule_id};
 
 /// File name of the app settings inside the store dir.
 pub const SETTINGS_FILE: &str = "settings.json";
@@ -112,8 +113,8 @@ fn quarantine(path: &Path, err: &dyn fmt::Display) {
     }
 }
 
-/// App settings: everything Filee keeps in `settings.json` except presets,
-/// profiles and watch folders, which live elsewhere. Anything unknown in the
+/// App settings: everything Filee keeps in `settings.json` (watch folders
+/// included) except presets and profiles, which live elsewhere. Anything unknown in the
 /// file is ignored, anything missing takes its default, and numbers out of
 /// range are clamped on the way in (see [`RawAppSettings`]).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -160,6 +161,9 @@ pub struct AppSettings {
     pub notified_update_version: Option<String>,
     /// Engine id -> the version its update notice was shown for.
     pub notified_engine_versions: BTreeMap<String, String>,
+    /// The watched folders, in the order the settings page lists them
+    /// (Filee's `AppSettings.WatchFolders`).
+    pub watch_folders: Vec<WatchRule>,
 }
 
 impl Default for AppSettings {
@@ -186,6 +190,7 @@ impl Default for AppSettings {
             engine_own_copies: BTreeMap::new(),
             notified_update_version: None,
             notified_engine_versions: BTreeMap::new(),
+            watch_folders: Vec::new(),
         }
     }
 }
@@ -226,6 +231,9 @@ struct RawAppSettings {
     engine_own_copies: BTreeMap<String, PathBuf>,
     notified_update_version: Option<String>,
     notified_engine_versions: BTreeMap<String, String>,
+    // Raw values, read one by one below, so one mangled rule costs that rule
+    // and not every other setting in the file.
+    watch_folders: Vec<serde_json::Value>,
 }
 
 impl From<RawAppSettings> for AppSettings {
@@ -286,8 +294,34 @@ impl From<RawAppSettings> for AppSettings {
             engine_own_copies: raw.engine_own_copies,
             notified_update_version: raw.notified_update_version,
             notified_engine_versions: raw.notified_engine_versions,
+            watch_folders: watch_folders_from(raw.watch_folders),
         }
     }
+}
+
+/// The watch rules that make sense out of what was in the file. A rule that
+/// is not even an object is dropped with a warning; a rule without an id gets
+/// one, and a second rule with an id already taken gets a fresh one, so the
+/// UI and the history can tell them apart.
+fn watch_folders_from(values: Vec<serde_json::Value>) -> Vec<WatchRule> {
+    let mut seen = std::collections::HashSet::new();
+    values
+        .into_iter()
+        .filter_map(|value| match serde_json::from_value::<WatchRule>(value) {
+            Ok(rule) => Some(rule),
+            Err(error) => {
+                tracing::warn!(%error, "skipping a watch folder that could not be read");
+                None
+            }
+        })
+        .map(|mut rule| {
+            rule.id = rule.id.trim().to_owned();
+            while rule.id.is_empty() || !seen.insert(rule.id.clone()) {
+                rule.id = new_rule_id();
+            }
+            rule
+        })
+        .collect()
 }
 
 /// `value` clamped to `lo..=hi`, or `default` when it is missing or not a
@@ -1303,7 +1337,11 @@ mod tests {
   "firstRunCompleted": true,
   "successfulConversions": 3,
   "feedbackPromptShown": false,
-  "watchFolders": [],
+  "watchFolders": [
+    { "id": "77aa88bb", "enabled": true, "folder": "C:\\Users\\me\\Inbox", "presetId": "to-pdf",
+      "includeSubfolders": true, "outputFolder": "", "originals": "MoveToOriginals",
+      "include": [ "*.heic" ], "fileNamePattern": "", "renames": [] }
+  ],
   "defaultOutput": { "location": "CustomFolder", "subfolderName": "converted", "customFolder": "D:\\out" },
   "engineOwnCopies": { "calibre": "C:\\Program Files\\Calibre2\\ebook-convert.exe" },
   "libreOfficeForSlides": false,
@@ -1368,6 +1406,18 @@ mod tests {
                 sheets: false,
             }
         );
+
+        assert_eq!(s.watch_folders.len(), 1);
+        let inbox = &s.watch_folders[0];
+        assert_eq!(inbox.id, "77aa88bb");
+        assert_eq!(inbox.preset_id, "to-pdf");
+        assert!(inbox.enabled && inbox.include_subfolders);
+        assert_eq!(
+            inbox.originals,
+            crate::watch::AfterConversion::MoveToOriginals
+        );
+        assert_eq!(inbox.include, vec!["*.heic"]);
+        assert_eq!(inbox.name_pattern, None);
     }
 
     #[test]
@@ -1397,5 +1447,77 @@ mod tests {
         ] {
             assert_eq!(load(json).theme.reduce_motion, want, "{json}");
         }
+    }
+
+    #[test]
+    fn watch_folders_round_trip() {
+        use crate::rename::RenameStep;
+        use crate::watch::AfterConversion;
+        let tmp = TempDir::new().unwrap();
+        let store = store(&tmp);
+        let settings = AppSettings {
+            watch_folders: vec![
+                WatchRule {
+                    id: "0000aaaa".into(),
+                    folder: "/home/me/Inbox".into(),
+                    preset_id: "to-pdf".into(),
+                    include_subfolders: true,
+                    originals: AfterConversion::MoveToOriginals,
+                    include: vec!["*.heic".into(), "/^scan_\\d+/".into()],
+                    name_pattern: Some("{name}_{date}".into()),
+                    renames: vec![RenameStep::SpacesToUnderscores],
+                    ..WatchRule::default()
+                },
+                WatchRule {
+                    id: "0000bbbb".into(),
+                    enabled: false,
+                    folder: "/home/me/Downloads".into(),
+                    preset_id: "to-jpg".into(),
+                    output_folder: Some("/home/me/Pictures".into()),
+                    ..WatchRule::default()
+                },
+            ],
+            ..AppSettings::default()
+        };
+        store.save_settings(&settings).unwrap();
+        assert_eq!(store.load_settings(), settings);
+
+        let text = fs::read_to_string(tmp.path().join(SETTINGS_FILE)).unwrap();
+        for key in [
+            "\"watchFolders\"",
+            "\"presetId\": \"to-pdf\"",
+            "\"includeSubfolders\": true",
+            "\"fileNamePattern\": \"{name}_{date}\"",
+            "\"originals\": \"MoveToOriginals\"",
+        ] {
+            assert!(text.contains(key), "{key} missing from {text}");
+        }
+    }
+
+    #[test]
+    fn a_broken_watch_folder_costs_only_itself() {
+        let s = load(
+            r#"{"language": "ko", "watchFolders": [
+                {"id": "aaaa0000", "folder": "/in"},
+                {"folder": 5},
+                "not a rule",
+                {"id": "aaaa0000", "folder": "/again"},
+                {"folder": "/no-id"}
+            ]}"#,
+        );
+        assert_eq!(s.language, "ko");
+        let folders: Vec<_> = s.watch_folders.iter().map(|r| r.folder.clone()).collect();
+        assert_eq!(
+            folders,
+            vec![
+                PathBuf::from("/in"),
+                PathBuf::from("/again"),
+                PathBuf::from("/no-id")
+            ]
+        );
+        assert_eq!(s.watch_folders[0].id, "aaaa0000");
+        assert_ne!(s.watch_folders[1].id, "aaaa0000");
+        let ids: std::collections::HashSet<_> = s.watch_folders.iter().map(|r| &r.id).collect();
+        assert_eq!(ids.len(), 3);
     }
 }

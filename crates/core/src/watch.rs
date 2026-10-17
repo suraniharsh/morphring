@@ -1,4 +1,5 @@
-//! Watch folders: the pure state machine that decides when a new file has
+//! Watch folders: the rules kept in settings (which folder, which files, how
+//! they are named) and the pure state machine that decides when a new file has
 //! settled and is ready to convert. Ported from Filee's
 //! `src/Filee.Core/Watching/FolderWatcher.cs`, `WatchRule.cs` and
 //! `FileNameFilter.cs`.
@@ -14,14 +15,21 @@
 //! it does not convert it twice. Filee kept that set forever; here it is an LRU
 //! bounded by the caller.
 
+use std::collections::hash_map::RandomState;
 use std::collections::{BTreeMap, HashMap};
 use std::ffi::OsString;
+use std::hash::{BuildHasher, Hasher};
 use std::path::{Component, Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, LazyLock, Mutex, PoisonError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use regex::{Regex, RegexBuilder};
 use serde::{Deserialize, Serialize};
 
 use crate::formats;
+use crate::output::{OutputLocation, OutputRule};
+use crate::rename::RenameStep;
 
 /// Name of the default output folder inside the watched folder.
 pub const DEFAULT_OUTPUT_NAME: &str = "converted";
@@ -48,7 +56,7 @@ const TEMPORARY_EXTENSIONS: &[&str] = &[
 const SYSTEM_FILES: &[&str] = &["desktop.ini", "thumbs.db"];
 
 /// What happens to a source file once it was converted.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
 pub enum AfterConversion {
     /// The source stays where it is.
     #[default]
@@ -58,12 +66,44 @@ pub enum AfterConversion {
     MoveToOriginals,
 }
 
-/// One watched folder and where its conversions go.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+impl<'de> Deserialize<'de> for AfterConversion {
+    /// Reads `Keep` / `MoveToOriginals` in any case, Filee's enum numbers
+    /// (0 and 1), and anything else as `Keep`. One odd value in a hand-edited
+    /// settings.json is not worth losing the whole watch folder over.
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Raw {
+            Name(String),
+            Number(u64),
+            Other(serde::de::IgnoredAny),
+        }
+        Ok(match Raw::deserialize(deserializer)? {
+            Raw::Name(name) if name.trim().eq_ignore_ascii_case("MoveToOriginals") => {
+                Self::MoveToOriginals
+            }
+            Raw::Number(1) => Self::MoveToOriginals,
+            Raw::Name(_) | Raw::Number(_) | Raw::Other(_) => Self::Keep,
+        })
+    }
+}
+
+/// One watched folder and how its files are converted. The JSON uses Filee's
+/// `WatchRule` names (`id`, `enabled`, `folder`, `presetId`,
+/// `includeSubfolders`, `outputFolder`, `originals`, `include`,
+/// `fileNamePattern`, `renames`), so a Filee `watchFolders` list loads as is.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct WatchRule {
+    /// Short random id (8 hex digits, like Filee's) that history entries and
+    /// the UI use to point at this rule.
+    pub id: String,
+    /// A switched-off rule stays in the settings but watches nothing.
+    pub enabled: bool,
     /// The folder being watched.
     pub folder: PathBuf,
+    /// The preset files are converted with ([`crate::preset::Preset::id`]).
+    pub preset_id: String,
     /// Whether files in subfolders are converted too.
     pub include_subfolders: bool,
     /// Where converted files go; `None` (or an empty path) means `converted`
@@ -71,6 +111,36 @@ pub struct WatchRule {
     pub output_folder: Option<PathBuf>,
     /// What happens to a source after it was converted.
     pub originals: AfterConversion,
+    /// Which files are converted ([`FileNameFilter`]), e.g. `*.heic` and
+    /// `scan_*`; empty for all.
+    pub include: Vec<String>,
+    /// File name pattern of converted files (tokens as in
+    /// [`OutputRule::pattern`]); `None` keeps the preset's.
+    #[serde(
+        rename = "fileNamePattern",
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "blank_is_none"
+    )]
+    pub name_pattern: Option<String>,
+    /// Name rules applied after the preset's own ones.
+    pub renames: Vec<RenameStep>,
+}
+
+impl Default for WatchRule {
+    fn default() -> Self {
+        Self {
+            id: new_rule_id(),
+            enabled: true,
+            folder: PathBuf::new(),
+            preset_id: String::new(),
+            include_subfolders: false,
+            output_folder: None,
+            originals: AfterConversion::Keep,
+            include: Vec::new(),
+            name_pattern: None,
+            renames: Vec::new(),
+        }
+    }
 }
 
 impl WatchRule {
@@ -86,6 +156,181 @@ impl WatchRule {
     pub fn originals_folder(&self) -> PathBuf {
         self.folder.join(ORIGINALS_NAME)
     }
+
+    /// The include filter of this rule (cached, so calling it per file event
+    /// does not recompile anything).
+    pub fn filter(&self) -> Arc<FileNameFilter> {
+        FileNameFilter::of(&self.include)
+    }
+
+    /// The preset's output rule as this folder converts with it (Filee's
+    /// `WatchRule.Apply`): output into [`WatchRule::resolved_output_folder`],
+    /// files from subfolders into the same subfolders there, the folder's own
+    /// name pattern when it has one, and its name rules after the preset's.
+    /// Steps still being typed (blank ones) are left out. Conflict policy and
+    /// keep-dates stay as the preset says.
+    pub fn output_rule(&self, preset_rule: &OutputRule) -> OutputRule {
+        let mut rule = preset_rule.clone();
+        rule.location = OutputLocation::CustomFolder {
+            path: self.resolved_output_folder(),
+            keep_folders_from: Some(self.folder.clone()),
+        };
+        if let Some(pattern) = self.name_pattern.as_deref().map(str::trim)
+            && !pattern.is_empty()
+        {
+            rule.pattern = pattern.to_owned();
+        }
+        rule.renames
+            .extend(self.renames.iter().filter(|r| !r.is_blank()).cloned());
+        rule
+    }
+}
+
+/// Reads an optional string where blank means "not set": Filee writes `""`
+/// for a folder that keeps the preset's name pattern.
+fn blank_is_none<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<String>, D::Error> {
+    let value = Option::<String>::deserialize(deserializer)?;
+    Ok(value.filter(|v| !v.trim().is_empty()))
+}
+
+/// A fresh rule id: 8 hex digits. Filee slices a GUID; we have no uuid crate
+/// and no wish to add one for eight characters, so std's randomly keyed
+/// hasher stirs the clock and a counter instead. Unique enough for a list a
+/// human scrolls through, which is the only place it has to be unique.
+pub fn new_rule_id() -> String {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let mut hasher = RandomState::new().build_hasher();
+    hasher.write_u64(COUNTER.fetch_add(1, Ordering::Relaxed));
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos());
+    hasher.write_u128(nanos);
+    format!("{:08x}", hasher.finish() as u32)
+}
+
+/// How big one compiled filter expression may get. The regex crate never
+/// backtracks, so Filee's 250 ms match timeout has nothing to guard against;
+/// a monster pattern is the only way to hurt us, and this caps it.
+const FILTER_SIZE_LIMIT: usize = 1 << 20;
+
+/// How many distinct filters [`FileNameFilter::of`] remembers before it
+/// starts over. Each rule has one, so this is "a lot of watch folders".
+const FILTER_CACHE_CAP: usize = 256;
+
+/// Which files of a watch folder are converted, ported from Filee's
+/// `FileNameFilter.cs`. Each entry is a wildcard pattern (`*.heic`,
+/// `scan_??.png`: `*` is any text, `?` one character), a regular expression
+/// between slashes (`/^IMG_\d+/`), or plain text, which matches names
+/// containing it (`scan`) or, for a known extension, names ending in it
+/// (`heic`). Case is ignored. A file matching any entry passes; no entries
+/// let every file through.
+#[derive(Debug, Clone, Default)]
+pub struct FileNameFilter {
+    patterns: Vec<Regex>,
+}
+
+impl FileNameFilter {
+    /// Builds the filter of `entries`. Entries that are not valid (a broken
+    /// regular expression edited by hand into settings.json) are left out; if
+    /// none is left, every file passes, as in Filee.
+    pub fn new(entries: &[String]) -> Self {
+        let patterns = entries
+            .iter()
+            .filter_map(|entry| Self::normalize(entry))
+            .filter_map(|pattern| to_regex(&pattern).ok())
+            .collect();
+        Self { patterns }
+    }
+
+    /// [`FileNameFilter::new`], remembered by its entries.
+    pub fn of(entries: &[String]) -> Arc<Self> {
+        static CACHE: LazyLock<Mutex<HashMap<String, Arc<FileNameFilter>>>> =
+            LazyLock::new(Mutex::default);
+        if entries.is_empty() {
+            return Arc::new(Self::default());
+        }
+        let key = entries.join("\n");
+        let mut cache = CACHE.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(filter) = cache.get(&key) {
+            return Arc::clone(filter);
+        }
+        if cache.len() >= FILTER_CACHE_CAP {
+            // Crude, but the cache is a convenience, not a contract.
+            cache.clear();
+        }
+        let filter = Arc::new(Self::new(entries));
+        cache.insert(key, Arc::clone(&filter));
+        filter
+    }
+
+    /// Turns what someone typed into a pattern: a known extension (`heic`,
+    /// `.HEIC`) becomes `*.heic`, text without `*` or `?` matches names
+    /// containing it (`scan` becomes `*scan*`), and a pattern or a
+    /// `/regular expression/` stays as it is. `None` for blank input.
+    pub fn normalize(typed: &str) -> Option<String> {
+        let text = typed.trim();
+        if text.is_empty() {
+            return None;
+        }
+        if is_regex(text) || text.contains(['*', '?']) {
+            return Some(text.to_owned());
+        }
+        let extension = text.trim_start_matches('.');
+        if !extension.is_empty()
+            && !extension.contains('.')
+            && formats::find_by_extension(extension).is_some()
+        {
+            return Some(format!("*.{}", extension.to_lowercase()));
+        }
+        Some(format!("*{text}*"))
+    }
+
+    /// Why `pattern` can't be used (a regular expression that is not valid),
+    /// or `None` when it can. For the settings page, before it saves.
+    pub fn validate(pattern: &str) -> Option<String> {
+        to_regex(pattern).err().map(|e| e.to_string())
+    }
+
+    /// True when the file name (without folder) matches one of the entries,
+    /// or there are none.
+    pub fn matches(&self, file_name: &str) -> bool {
+        self.patterns.is_empty() || self.patterns.iter().any(|p| p.is_match(file_name))
+    }
+}
+
+fn is_regex(pattern: &str) -> bool {
+    pattern.len() > 2 && pattern.starts_with('/') && pattern.ends_with('/')
+}
+
+fn to_regex(pattern: &str) -> Result<Regex, regex::Error> {
+    let source = if is_regex(pattern) {
+        pattern[1..pattern.len() - 1].to_owned()
+    } else {
+        from_wildcards(pattern)
+    };
+    RegexBuilder::new(&source)
+        .case_insensitive(true)
+        .size_limit(FILTER_SIZE_LIMIT)
+        .dfa_size_limit(FILTER_SIZE_LIMIT)
+        .build()
+}
+
+/// `scan_??.png` as an anchored expression. Only `*` and `?` are special;
+/// brackets and everything else are literal, as in Filee (which is why this
+/// is not the glob crate, which would read `song [remix]*` as a char class).
+fn from_wildcards(pattern: &str) -> String {
+    let mut regex = String::from("^");
+    for c in pattern.trim().chars() {
+        match c {
+            '*' => regex.push_str(".*"),
+            '?' => regex.push('.'),
+            _ => regex.push_str(&regex::escape(c.encode_utf8(&mut [0; 4]))),
+        }
+    }
+    regex.push('$');
+    regex
 }
 
 /// The settle time used when the user does not choose one: 2 s on Windows and
@@ -103,7 +348,8 @@ pub fn default_settle() -> Duration {
 /// True for paths a watch folder never converts: directories, Office lock
 /// files (`~$`), dot files, `desktop.ini` and `thumbs.db`, temporary download
 /// extensions, anything inside the output or originals folder, files in
-/// subfolders unless the rule includes them, and unknown formats.
+/// subfolders unless the rule includes them, unknown formats, and names the
+/// rule's include filter leaves out.
 pub fn should_ignore(rule: &WatchRule, path: &Path, is_dir: bool) -> bool {
     if is_dir {
         return true;
@@ -135,7 +381,7 @@ pub fn should_ignore(rule: &WatchRule, path: &Path, is_dir: bool) -> bool {
     if !rule.include_subfolders && !path.parent().is_some_and(|p| same_path(p, &rule.folder)) {
         return true;
     }
-    formats::detect(path).is_none()
+    formats::detect(path).is_none() || !rule.filter().matches(&name)
 }
 
 /// Where `source` goes when it is moved to the originals folder: the same
@@ -756,5 +1002,246 @@ mod tests {
         let moved = rule.originals_folder().join("photo.jpg");
         assert_eq!(originals_target(&rule, &moved, |_| false), None);
         assert_eq!(originals_target(&rule, &inbox(), |_| false), None);
+    }
+
+    // Filee's WatchRuleOptionsTests, ported table and all.
+    #[test]
+    fn a_pattern_lets_through_the_names_it_matches() {
+        for (pattern, name, want) in [
+            ("*.heic", "IMG_0001.HEIC", true),
+            ("*.heic", "IMG_0001.jpg", false),
+            ("scan_??.png", "scan_12.png", true),
+            ("scan_??.png", "scan_123.png", false),
+            (r"/^IMG_\d+\.jpg$/", "img_20261011.jpg", true),
+            (r"/^IMG_\d+\.jpg$/", "IMG_cat.jpg", false),
+            (r"/^report-\d{2,4}/", "report-2026 final.docx", true),
+            ("scan", "my scan 2.pdf", true),
+            ("scan", "notes.pdf", false),
+            ("heic", "a.HEIC", true),
+            ("heic", "heic-notes.txt", false),
+            ("song [remix]*", "song [remix] live.mp3", true),
+        ] {
+            assert_eq!(FileNameFilter::validate(pattern), None, "{pattern}");
+            assert_eq!(
+                FileNameFilter::new(&[pattern.to_owned()]).matches(name),
+                want,
+                "{pattern} vs {name}"
+            );
+        }
+    }
+
+    #[test]
+    fn any_matching_entry_passes_and_no_entries_let_everything_through() {
+        let filter = FileNameFilter::of(&["*.heic".to_owned(), "scan_*".to_owned()]);
+        assert!(filter.matches("scan_0412.pdf"));
+        assert!(filter.matches("a.heic"));
+        assert!(!filter.matches("notes.txt"));
+        assert!(FileNameFilter::of(&[]).matches("anything.pdf"));
+        // Same entries, same compiled filter.
+        let again = FileNameFilter::of(&["*.heic".to_owned(), "scan_*".to_owned()]);
+        assert!(Arc::ptr_eq(&filter, &again));
+    }
+
+    #[test]
+    fn what_is_typed_becomes_a_pattern() {
+        for (typed, want) in [
+            ("heic", Some("*.heic")),
+            (".HEIC", Some("*.heic")),
+            ("scan", Some("*scan*")),
+            ("scan_*", Some("scan_*")),
+            (r"/^IMG_\d+/", Some(r"/^IMG_\d+/")),
+            ("  ", None),
+        ] {
+            assert_eq!(
+                FileNameFilter::normalize(typed).as_deref(),
+                want,
+                "{typed:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_regular_expression_that_is_not_valid_is_reported_and_left_out() {
+        assert!(FileNameFilter::validate("/IMG_(/").is_some());
+        assert!(FileNameFilter::new(&["/IMG_(/".to_owned()]).matches("anything.jpg"));
+        let mixed = FileNameFilter::new(&["/IMG_(/".to_owned(), "*.png".to_owned()]);
+        assert!(mixed.matches("a.png"));
+        assert!(!mixed.matches("a.jpg"));
+    }
+
+    #[test]
+    fn files_the_include_filter_leaves_out_are_ignored() {
+        let rule = WatchRule {
+            include: vec!["*.heic".into()],
+            ..rule()
+        };
+        assert!(!should_ignore(&rule, &inbox().join("IMG_0001.heic"), false));
+        assert!(should_ignore(&rule, &inbox().join("IMG_0002.jpg"), false));
+    }
+
+    #[test]
+    fn new_rules_are_enabled_and_get_distinct_ids() {
+        let (a, b) = (WatchRule::default(), WatchRule::default());
+        assert!(a.enabled);
+        assert_eq!(a.id.len(), 8);
+        assert!(a.id.chars().all(|c| c.is_ascii_hexdigit()));
+        assert_ne!(a.id, b.id);
+    }
+
+    #[test]
+    fn a_filee_watch_rule_loads_with_its_names() {
+        let json = r#"{
+            "id": "1a2b3c4d", "enabled": false, "folder": "/home/me/Inbox",
+            "presetId": "to-pdf", "includeSubfolders": true, "outputFolder": "",
+            "originals": "MoveToOriginals", "include": ["*.heic", "scan_*"],
+            "fileNamePattern": "{name}_{date}",
+            "renames": [{"kind": "Regex", "find": "IMG_(\\d+)", "replace": "Photo_$1"}]
+        }"#;
+        let rule: WatchRule = serde_json::from_str(json).unwrap();
+        assert_eq!(rule.id, "1a2b3c4d");
+        assert!(!rule.enabled);
+        assert_eq!(rule.folder, PathBuf::from("/home/me/Inbox"));
+        assert_eq!(rule.preset_id, "to-pdf");
+        assert!(rule.include_subfolders);
+        assert_eq!(
+            rule.resolved_output_folder(),
+            PathBuf::from("/home/me/Inbox/converted")
+        );
+        assert_eq!(rule.originals, AfterConversion::MoveToOriginals);
+        assert_eq!(rule.include, vec!["*.heic", "scan_*"]);
+        assert_eq!(rule.name_pattern.as_deref(), Some("{name}_{date}"));
+        assert_eq!(
+            rule.renames,
+            vec![RenameStep::Regex {
+                pattern: r"IMG_(\d+)".into(),
+                replacement: "Photo_$1".into()
+            }]
+        );
+
+        let back: WatchRule = serde_json::from_value(serde_json::to_value(&rule).unwrap()).unwrap();
+        assert_eq!(back, rule);
+        let value = serde_json::to_value(&rule).unwrap();
+        for key in [
+            "presetId",
+            "includeSubfolders",
+            "fileNamePattern",
+            "renames",
+        ] {
+            assert!(value.get(key).is_some(), "{key} missing from {value}");
+        }
+    }
+
+    #[test]
+    fn odd_values_read_leniently() {
+        let rule: WatchRule =
+            serde_json::from_str(r#"{"originals": 1, "fileNamePattern": "  "}"#).unwrap();
+        assert_eq!(rule.originals, AfterConversion::MoveToOriginals);
+        assert_eq!(rule.name_pattern, None);
+        assert!(rule.enabled);
+        assert_eq!(rule.id.len(), 8);
+        for odd in [r#""keep""#, r#""Sideways""#, "7", "true", "null"] {
+            let rule: WatchRule =
+                serde_json::from_str(&format!(r#"{{"originals": {odd}}}"#)).unwrap();
+            assert_eq!(rule.originals, AfterConversion::Keep, "{odd}");
+        }
+        let rule: WatchRule = serde_json::from_str(r#"{"originals": "movetooriginals"}"#).unwrap();
+        assert_eq!(rule.originals, AfterConversion::MoveToOriginals);
+    }
+
+    fn preset_rule() -> OutputRule {
+        OutputRule {
+            pattern: "{name}_{preset}".into(),
+            renames: vec![RenameStep::UpperCase],
+            keep_dates: true,
+            ..OutputRule::default()
+        }
+    }
+
+    #[test]
+    fn the_folder_name_rules_replace_the_presets_and_empty_ones_keep_them() {
+        let plain = rule().output_rule(&preset_rule());
+        assert_eq!(plain.pattern, "{name}_{preset}");
+        assert_eq!(plain.renames, vec![RenameStep::UpperCase]);
+        assert!(plain.keep_dates);
+        assert_eq!(
+            plain.location,
+            OutputLocation::CustomFolder {
+                path: inbox().join("converted"),
+                keep_folders_from: Some(inbox()),
+            }
+        );
+
+        let own = WatchRule {
+            name_pattern: Some(" {name}_{date} ".into()),
+            renames: vec![
+                RenameStep::Regex {
+                    pattern: r"IMG_(\d+)".into(),
+                    replacement: "Photo_$1".into(),
+                },
+                RenameStep::Replace {
+                    find: String::new(),
+                    with: "typing".into(),
+                    match_case: false,
+                },
+            ],
+            ..rule()
+        }
+        .output_rule(&preset_rule());
+        assert_eq!(own.pattern, "{name}_{date}");
+        // The preset's step first, then ours; the one still being typed is left out.
+        assert_eq!(own.renames.len(), 2);
+        assert_eq!(own.renames[0], RenameStep::UpperCase);
+        assert!(
+            matches!(&own.renames[1], RenameStep::Regex { pattern, .. } if pattern == r"IMG_(\d+)")
+        );
+        assert_eq!(preset_rule().pattern, "{name}_{preset}");
+    }
+
+    #[test]
+    fn recursive_rules_keep_subfolders_in_the_output_folder() {
+        // Filee issue #72: Inbox/2024/a.jpg and Inbox/2025/a.jpg used to become
+        // converted/a.pdf and converted/a (2).pdf.
+        let out = std::env::temp_dir().join("Out");
+        let resolve = |rule: &WatchRule, source: PathBuf| {
+            let tokens = crate::output::Tokens {
+                source,
+                preset: "PDF".into(),
+                index: 1,
+                now: chrono::NaiveDateTime::default(),
+            };
+            crate::output::resolve(
+                &rule.output_rule(&OutputRule::default()),
+                &tokens,
+                "pdf",
+                "",
+                &|_| false,
+                &std::collections::HashSet::new(),
+            )
+        };
+        let custom = WatchRule {
+            include_subfolders: true,
+            output_folder: Some(out.clone()),
+            ..rule()
+        };
+        assert_eq!(
+            resolve(&custom, inbox().join("2024").join("a.jpg")),
+            Some(out.join("2024").join("a.pdf"))
+        );
+        assert_eq!(
+            resolve(&custom, inbox().join("2025").join("scans").join("a.jpg")),
+            Some(out.join("2025").join("scans").join("a.pdf"))
+        );
+        assert_eq!(
+            resolve(&custom, inbox().join("top.jpg")),
+            Some(out.join("top.pdf"))
+        );
+        let inside = WatchRule {
+            include_subfolders: true,
+            ..rule()
+        };
+        assert_eq!(
+            resolve(&inside, inbox().join("2025").join("a.jpg")),
+            Some(inbox().join("converted").join("2025").join("a.pdf"))
+        );
     }
 }
