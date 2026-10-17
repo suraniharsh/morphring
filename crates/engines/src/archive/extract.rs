@@ -168,15 +168,74 @@ impl Context<'_> {
             .map_err(|no_room| EngineError::Failed(no_room.message(&self.archive, &self.place)))
     }
 
-    /// Turns a copy failure into a message: a lying size is damage, anything
-    /// else (disk full, permissions) is an honest I/O error.
-    fn copy_error(&self, err: io::Error) -> EngineError {
-        if err.kind() == io::ErrorKind::InvalidData {
+    /// Turns a copy failure into a message. Anything the archive side threw
+    /// (a lying size, a deflate stream that stops mid-sentence, a bad
+    /// checksum) is damage; whatever the disk threw back (full, read-only,
+    /// permissions) is an honest I/O error. Codecs disagree wildly on which
+    /// `ErrorKind` means "your file is broken", so `from_reader` says which
+    /// side it came from instead of us guessing from the kind.
+    fn copy_error(&self, err: io::Error, from_reader: bool) -> EngineError {
+        if from_reader || err.kind() == io::ErrorKind::InvalidData {
             self.damaged(err)
         } else {
             EngineError::Io(err)
         }
     }
+
+    /// The message for an archive that wants `entry` to be a file and a
+    /// folder at the same time. Schrodinger would approve; the filesystem
+    /// does not.
+    fn clash(&self, entry: &str) -> EngineError {
+        EngineError::Failed(format!(
+            "{} has both a file and a folder called '{entry}'.",
+            self.archive
+        ))
+    }
+}
+
+/// A reader that remembers whether it failed, so a copy error can be pinned
+/// on the archive (read side) or the disk (write side).
+struct ReadSide<'a> {
+    inner: &'a mut dyn Read,
+    failed: bool,
+}
+
+impl Read for ReadSide<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let result = self.inner.read(buf);
+        if let Err(e) = &result
+            && e.kind() != io::ErrorKind::Interrupted
+        {
+            self.failed = true;
+        }
+        result
+    }
+}
+
+/// `fs::create_dir_all` for an entry's folder, except that a file from an
+/// earlier entry squatting on part of the path gets named instead of
+/// surfacing as a bare "File exists (os error 17)".
+fn make_dir(dest: &Path, dir: &Path, ctx: &Context<'_>) -> Result<(), EngineError> {
+    let Err(err) = fs::create_dir_all(dir) else {
+        return Ok(());
+    };
+    // Walk down from the staging root and find the first piece that exists
+    // but is not a folder. Checking the tree beats decoding ErrorKinds, which
+    // differ between Linux (EEXIST, ENOTDIR) and Windows.
+    if let Ok(rel) = dir.strip_prefix(dest) {
+        let mut at = dest.to_path_buf();
+        let mut shown = Vec::new();
+        for part in rel.components() {
+            at.push(part);
+            shown.push(part.as_os_str().to_string_lossy().into_owned());
+            match at.symlink_metadata() {
+                Ok(meta) if !meta.is_dir() => return Err(ctx.clash(&shown.join("/"))),
+                Ok(_) => {}
+                Err(_) => break,
+            }
+        }
+    }
+    Err(EngineError::Io(err))
 }
 
 /// Unpacks every entry of the ZIP at `input` into `dest`.
@@ -223,10 +282,10 @@ fn unzip(input: &Path, dest: &Path, ctx: &Context<'_>) -> Result<(), EngineError
             continue;
         };
         if entry.is_dir() {
-            fs::create_dir_all(&path)?;
+            make_dir(dest, &path, ctx)?;
         } else {
             let declared = entry.size();
-            write_file(&path, &mut entry, declared, ctx)?;
+            write_file(dest, &path, &mut entry, declared, ctx)?;
         }
         (ctx.progress)(0.02 + 0.93 * (index + 1) as f32 / count.max(1) as f32);
     }
@@ -289,12 +348,12 @@ fn untar<R: Read>(reader: R, dest: &Path, ctx: &Context<'_>) -> Result<(), Engin
         };
 
         if is_dir {
-            fs::create_dir_all(&path)?;
+            make_dir(dest, &path, ctx)?;
         } else {
             let declared = entry.header().size().map_err(|e| ctx.damaged(e))?;
             written = written.saturating_add(declared);
             ctx.ensure_room(declared)?;
-            write_file(&path, &mut entry, declared, ctx)?;
+            write_file(dest, &path, &mut entry, declared, ctx)?;
         }
         // Without a total, ease towards 0.95 instead of pretending to know.
         let done = written as f32 / (written as f32 + 64.0 * 1024.0 * 1024.0);
@@ -305,13 +364,14 @@ fn untar<R: Read>(reader: R, dest: &Path, ctx: &Context<'_>) -> Result<(), Engin
 
 /// Writes one entry to `path`, at most `declared` bytes of it.
 fn write_file(
+    dest: &Path,
     path: &Path,
     reader: &mut dyn Read,
     declared: u64,
     ctx: &Context<'_>,
 ) -> Result<(), EngineError> {
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
+        make_dir(dest, parent, ctx)?;
     }
     if path.is_dir() {
         // "a/" then a file "a": the folder got there first, and a folder is
@@ -319,7 +379,11 @@ fn write_file(
         return Ok(());
     }
     let mut file = File::create(path)?;
-    copy_limited(reader, &mut file, declared).map_err(|e| ctx.copy_error(e))?;
+    let mut source = ReadSide {
+        inner: reader,
+        failed: false,
+    };
+    copy_limited(&mut source, &mut file, declared).map_err(|e| ctx.copy_error(e, source.failed))?;
     Ok(())
 }
 

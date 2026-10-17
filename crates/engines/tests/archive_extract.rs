@@ -588,3 +588,113 @@ fn windows_hostile_names_are_made_safe() {
     assert!(sandbox.output().join("a").join("b").is_file());
     sandbox.assert_contained();
 }
+
+// --- damage found mid-entry and file/folder clashes (FX-13) -------------------
+
+/// Bytes that refuse to compress (a little xorshift), so a cut through the
+/// gzip lands squarely inside an entry instead of in a tidy header.
+fn noise(len: usize, mut seed: u64) -> Vec<u8> {
+    (0..len)
+        .map(|_| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed as u8
+        })
+        .collect()
+}
+
+#[test]
+fn a_tgz_cut_off_mid_entry_is_damaged_not_a_codec_error() {
+    let sandbox = Sandbox::new();
+    let tar = sandbox.input("multi.tar");
+    let (one, two) = (noise(300_000, 1), noise(300_000, 2));
+    write_tar(
+        &tar,
+        &[
+            TarEntry::Dir("folder one/"),
+            TarEntry::File("folder one/a.bin", &one),
+            TarEntry::File("rose.png", &two),
+        ],
+    );
+    let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    gz.write_all(&fs::read(&tar).unwrap()).unwrap();
+    let full = gz.finish().unwrap();
+    fs::remove_file(&tar).unwrap();
+
+    for cut in [1000, 2000, 5000, 7000] {
+        let input = sandbox.input("tr.tgz");
+        fs::write(&input, &full[..cut]).unwrap();
+        let err = message(sandbox.run(&input, "tgz"));
+        assert!(
+            err.starts_with("tr.tgz is damaged or incomplete ("),
+            "cut at {cut}: {err}"
+        );
+        assert_eq!(sandbox.tree(), ["out", "outside"], "cut at {cut}");
+    }
+}
+
+#[test]
+fn a_zip_with_corrupt_deflate_data_is_damaged_not_a_codec_error() {
+    let sandbox = Sandbox::new();
+    let input = sandbox.input("bent.zip");
+    let text = "the quick brown fox jumps over the lazy dog. ".repeat(2000);
+    {
+        let mut zip = zip::ZipWriter::new(File::create(&input).unwrap());
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated);
+        zip.start_file("fox.txt", options).unwrap();
+        zip.write_all(text.as_bytes()).unwrap();
+        zip.finish().unwrap();
+    }
+
+    // Flip a byte a little way into the compressed data (local header is 30
+    // bytes plus the name).
+    let mut bytes = fs::read(&input).unwrap();
+    let data = find_all(&bytes, LOCAL)[0] + 30 + "fox.txt".len();
+    bytes[data + 3] ^= 0xFF;
+    fs::write(&input, bytes).unwrap();
+
+    let err = message(sandbox.run(&input, "zip"));
+    assert!(
+        err.starts_with("bent.zip is damaged or incomplete ("),
+        "{err}"
+    );
+    assert_eq!(sandbox.tree(), ["out", "outside"]);
+}
+
+#[test]
+fn a_tar_with_a_file_then_a_folder_of_the_same_name_names_the_clash() {
+    let sandbox = Sandbox::new();
+    let input = sandbox.input("filedir.tar");
+    write_tar(
+        &input,
+        &[TarEntry::File("x", b"a"), TarEntry::File("x/y", b"b")],
+    );
+    let err = message(sandbox.run(&input, "tar"));
+    assert_eq!(err, "filedir.tar has both a file and a folder called 'x'.");
+    assert_eq!(sandbox.tree(), ["out", "outside"]);
+
+    // The same squatter, this time with an explicit folder entry and a
+    // deeper path, still gets named rather than errno 17'd.
+    write_tar(
+        &input,
+        &[TarEntry::File("a/b", b"a"), TarEntry::Dir("a/b/c/")],
+    );
+    let err = message(sandbox.run(&input, "tar"));
+    assert_eq!(
+        err,
+        "filedir.tar has both a file and a folder called 'a/b'."
+    );
+    assert_eq!(sandbox.tree(), ["out", "outside"]);
+}
+
+#[test]
+fn a_zip_with_a_file_then_a_folder_of_the_same_name_names_the_clash() {
+    let sandbox = Sandbox::new();
+    let input = sandbox.input("filedir.zip");
+    write_zip(&input, &[("x", b"a"), ("x/y", b"b")]);
+    let err = message(sandbox.run(&input, "zip"));
+    assert_eq!(err, "filedir.zip has both a file and a folder called 'x'.");
+    assert_eq!(sandbox.tree(), ["out", "outside"]);
+}
