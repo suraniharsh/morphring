@@ -14,6 +14,7 @@ use chrono::NaiveDateTime;
 use serde::{Deserialize, Serialize};
 
 use crate::contract::OutputAllocator;
+use crate::rename::{self, RenameStep};
 
 /// Name of the subfolder used when [`OutputLocation::Subfolder`] has no usable name.
 pub const DEFAULT_SUBFOLDER: &str = "converted";
@@ -64,6 +65,9 @@ pub struct OutputRule {
     /// File name without extension. Tokens: `{name}`, `{ext}`, `{preset}`,
     /// `{date}` (yyyyMMdd), `{time}` (HHmmss) and `{index}`, case-insensitive.
     pub pattern: String,
+    /// Name rules applied in order to the expanded pattern, before it is
+    /// sanitised (Filee's `renames`).
+    pub renames: Vec<RenameStep>,
     pub conflict: ConflictPolicy,
     /// Give each output the creation and modification times of its source.
     pub keep_dates: bool,
@@ -74,6 +78,7 @@ impl Default for OutputRule {
         Self {
             location: OutputLocation::SameFolder,
             pattern: DEFAULT_PATTERN.to_owned(),
+            renames: Vec::new(),
             conflict: ConflictPolicy::Rename,
             keep_dates: false,
         }
@@ -133,7 +138,10 @@ pub fn resolve(
     };
 
     let source_name = name_without_extension(&tokens.source);
-    let name = sanitize(&expand_pattern(&rule.pattern, tokens), &source_name) + suffix;
+    // Pattern, then name rules, then sanitise: a rule may well produce a ':' or
+    // strip the name bare, and sanitise is the bouncer for both.
+    let renamed = rename::apply_all(&expand_pattern(&rule.pattern, tokens), &rule.renames);
+    let name = sanitize(&renamed, &source_name) + suffix;
     let ext = target_ext.trim_start_matches('.');
     let path_for = |base: &str| {
         if ext.is_empty() {
@@ -776,6 +784,7 @@ mod tests {
                 keep_folders_from: Some(PathBuf::from("/in")),
             },
             pattern: "{name}_50".into(),
+            renames: vec![RenameStep::RemoveCopyNumber],
             conflict: ConflictPolicy::Skip,
             keep_dates: true,
         };
@@ -791,6 +800,80 @@ mod tests {
         assert_eq!(sparse.location, OutputLocation::Default);
         assert_eq!(sparse.conflict, ConflictPolicy::Rename);
         assert!(!sparse.keep_dates);
+        assert!(sparse.renames.is_empty());
+    }
+
+    #[test]
+    fn output_renames_run_after_the_pattern_and_before_sanitize() {
+        let rule = OutputRule {
+            pattern: "{name}_{index}".into(),
+            renames: vec![
+                RenameStep::RemoveLeadingNumber,
+                RenameStep::Regex {
+                    pattern: r"IMG_(\d+)".into(),
+                    replacement: "Photo:$1".into(),
+                },
+                RenameStep::SpacesToUnderscores,
+            ],
+            ..OutputRule::default()
+        };
+        let path = resolve(
+            &rule,
+            &tokens_at("/x/01 IMG_0412 (2).jpg", 7),
+            "png",
+            "_p1",
+            &never,
+            &none(),
+        )
+        .unwrap();
+        // The ':' from the rule is sanitised; the suffix comes after the rules.
+        assert_eq!(path.file_name().unwrap(), "Photo_0412_(2)_7_p1.png");
+    }
+
+    #[test]
+    fn output_copy_number_is_removed_from_the_name() {
+        let rule = OutputRule {
+            renames: vec![RenameStep::RemoveCopyNumber],
+            ..OutputRule::default()
+        };
+        let path = resolve(
+            &rule,
+            &tokens("/x/IMG_0001 (2).jpg"),
+            "png",
+            "",
+            &never,
+            &none(),
+        );
+        assert_eq!(path, Some(abs("/x/IMG_0001.png")));
+    }
+
+    #[test]
+    fn output_a_name_renamed_to_nothing_falls_back_to_the_source_name() {
+        let rule = OutputRule {
+            renames: vec![RenameStep::Remove {
+                text: "photo".into(),
+            }],
+            ..OutputRule::default()
+        };
+        let path = resolve(&rule, &tokens("/x/Photo.jpg"), "png", "", &never, &none());
+        assert_eq!(path, Some(abs("/x/Photo.png")));
+    }
+
+    #[test]
+    fn output_renames_load_from_filee_json() {
+        let rule: OutputRule = serde_json::from_str(
+            r#"{"pattern":"{name}","renames":[{"kind":"Replace","find":"IMG_","replace":"Photo_"}]}"#,
+        )
+        .unwrap();
+        let path = resolve(
+            &rule,
+            &tokens("/x/IMG_0412.jpg"),
+            "png",
+            "",
+            &never,
+            &none(),
+        );
+        assert_eq!(path, Some(abs("/x/Photo_0412.png")));
     }
 
     #[test]
