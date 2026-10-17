@@ -5,7 +5,7 @@
 //! `ConvertAsync`). Everything here is pure; [`super`] runs the process.
 
 use std::ffi::OsString;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use morphring_core::{Edge, FormatId};
 
@@ -93,10 +93,12 @@ pub fn edges() -> Vec<Edge> {
     edges
 }
 
-/// True when the output needs `--standalone` (a full HTML page or a LaTeX
-/// document with a preamble, rather than a fragment).
+/// True when the output needs `--standalone`: a full HTML page, a LaTeX
+/// document with a preamble, or an RTF file with its `{\rtf1\ansi...` header.
+/// Without it pandoc hands back a fragment, which for RTF means a file no word
+/// processor recognises as RTF at all. A body without a head, very gothic.
 pub fn standalone(to: FormatId) -> bool {
-    matches!(to.as_str(), "html" | "tex")
+    matches!(to.as_str(), "html" | "tex" | "rtf")
 }
 
 /// True when images in the input are written next to the output
@@ -105,29 +107,45 @@ pub fn extracts_media(to: FormatId) -> bool {
     matches!(to.as_str(), "md" | "html" | "rst" | "tex")
 }
 
-/// The folder that receives extracted images for `final_output`:
-/// `<outdir>/<stem>_files`.
-pub fn media_dir(final_output: &Path) -> std::path::PathBuf {
+/// The folder that receives extracted images for `final_output`, relative to
+/// the output's own folder: `<stem>_files`.
+///
+/// It is relative on purpose. Pandoc writes links exactly as the
+/// `--extract-media` path is spelled, so pandoc runs in the output's folder
+/// and gets this name, and the document links `<stem>_files/media/...`. An
+/// absolute path here would bake `/home/whoever/...` into every link, which
+/// breaks the moment the folder is moved, zipped or mailed to anyone.
+pub fn media_dir(final_output: &Path) -> PathBuf {
     let stem = final_output
         .file_stem()
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_default();
+    PathBuf::from(format!("{stem}_files"))
+}
+
+/// Where [`media_dir`] actually lands on disk: `<outdir>/<stem>_files`.
+pub fn media_path(final_output: &Path) -> PathBuf {
     let dir = final_output.parent().unwrap_or_else(|| Path::new(""));
-    dir.join(format!("{stem}_files"))
+    dir.join(media_dir(final_output))
 }
 
 /// The pandoc argument list that converts `input` (read as `reader`) into
 /// `output` (written as `writer`).
 ///
 /// `media_dir` is where linked images go; it is only passed for targets that
-/// [`extracts_media`]. `output` may be a temp path, but `media_dir` should be
-/// next to the final file, since the converted document links to it.
+/// [`extracts_media`]. It should be relative to the final file's folder (see
+/// [`media_dir`]), with pandoc running in that folder, so the converted
+/// document links to it relatively. `output` may be a temp path.
+///
+/// `resource_dir` is where pandoc looks up images the input refers to by a
+/// relative path: the input's own folder.
 pub fn args(
     input: &Path,
     from: FormatId,
     to: FormatId,
     output: &Path,
     media_dir: &Path,
+    resource_dir: &Path,
 ) -> Option<Vec<OsString>> {
     let mut args: Vec<OsString> = vec![
         input.as_os_str().to_owned(),
@@ -138,6 +156,11 @@ pub fn args(
         "-o".into(),
         output.as_os_str().to_owned(),
     ];
+    // pandoc no longer runs in the input's folder (see `media_dir`), so it is
+    // told where that folder is instead.
+    let mut resources = OsString::from("--resource-path=");
+    resources.push(resource_dir.as_os_str());
+    args.push(resources);
     if standalone(to) {
         args.push("--standalone".into());
     }
@@ -178,7 +201,8 @@ mod tests {
             f("md"),
             f("docx"),
             Path::new("/tmp/out.docx"),
-            Path::new("/out/a_files"),
+            Path::new("a_files"),
+            Path::new("/in"),
         )
         .unwrap();
         assert_eq!(
@@ -190,17 +214,48 @@ mod tests {
                 "-t",
                 "docx",
                 "-o",
-                "/tmp/out.docx"
+                "/tmp/out.docx",
+                "--resource-path=/in",
             ]
         );
     }
 
     #[test]
-    fn media_dir_is_next_to_the_output() {
+    fn media_dir_is_relative_and_lands_next_to_the_output() {
         assert_eq!(
             media_dir(Path::new("/out/report.html")),
+            Path::new("report_files")
+        );
+        assert_eq!(
+            media_path(Path::new("/out/report.html")),
             Path::new("/out/report_files")
         );
+    }
+
+    #[test]
+    fn rtf_is_standalone_so_it_gets_a_header() {
+        assert!(standalone(f("rtf")));
+        assert!(standalone(f("html")));
+        assert!(standalone(f("tex")));
+        assert!(!standalone(f("md")));
+        assert!(!standalone(f("docx")));
+    }
+
+    #[test]
+    fn extract_media_flag_is_relative() {
+        let a = strings(
+            &args(
+                Path::new("/in/a.docx"),
+                f("docx"),
+                f("md"),
+                Path::new("/tmp/out.md"),
+                &media_dir(Path::new("/out/a.md")),
+                Path::new("/in"),
+            )
+            .unwrap(),
+        );
+        assert!(a.contains(&"--extract-media=a_files".to_string()), "{a:?}");
+        assert!(a.contains(&"--resource-path=/in".to_string()), "{a:?}");
     }
 
     #[test]
@@ -211,6 +266,7 @@ mod tests {
             f("md"),
             Path::new("o.md"),
             Path::new("o_files"),
+            Path::new("."),
         );
         assert!(none.is_none());
     }

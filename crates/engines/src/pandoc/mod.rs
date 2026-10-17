@@ -90,14 +90,21 @@ impl Converter for PandocEngine {
             return Ok(Vec::new());
         };
 
-        // pandoc runs in the input's folder so relative image paths resolve,
-        // which means every other path had better be absolute.
+        // pandoc runs in the output's folder, so the relative --extract-media
+        // name turns into relative links in the document. The input's folder
+        // goes in --resource-path so its relative images still resolve. Every
+        // other path had better be absolute, since nobody is where they started.
         let input = std::path::absolute(&step.input)?;
         let target = std::path::absolute(&target)?;
-        let cwd = input
+        let resource_dir = input
             .parent()
             .map(Path::to_path_buf)
             .unwrap_or_else(|| PathBuf::from("."));
+        let cwd = target
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| PathBuf::from("."));
+        std::fs::create_dir_all(&cwd)?;
 
         // Pandoc writes into a private temp dir first, so a half-written file
         // never shows up under the user's chosen name. The TempDir cleans up
@@ -110,13 +117,14 @@ impl Converter for PandocEngine {
         let temp_out = temp_dir.join(format!("out.{}", step.to));
 
         // The media folder sits next to the final file, not the temp one: the
-        // converted document links to it by that path.
+        // converted document links to it, relative to where it will live.
         let argv = args::args(
             &input,
             step.from,
             step.to,
             &temp_out,
             &args::media_dir(&target),
+            &resource_dir,
         )
         .ok_or_else(|| {
             EngineError::Failed(format!(

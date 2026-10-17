@@ -23,7 +23,8 @@ fn argv(from: &'static str, to: &'static str) -> Vec<String> {
         f(from),
         f(to),
         Path::new(&out),
-        Path::new("/out/in_files"),
+        Path::new("in_files"),
+        Path::new("/docs"),
     )
     .unwrap_or_else(|| panic!("no args for {from} -> {to}"))
     .iter()
@@ -49,7 +50,8 @@ fn md_to_docx_is_the_bare_command() {
             "-t",
             "docx",
             "-o",
-            "/tmp/w/out.docx"
+            "/tmp/w/out.docx",
+            "--resource-path=/docs",
         ]
     );
 }
@@ -66,8 +68,9 @@ fn html_output_is_standalone_and_extracts_media() {
             "html",
             "-o",
             "/tmp/w/out.html",
+            "--resource-path=/docs",
             "--standalone",
-            "--extract-media=/out/in_files",
+            "--extract-media=in_files",
         ]
     );
 }
@@ -76,27 +79,47 @@ fn html_output_is_standalone_and_extracts_media() {
 fn tex_output_is_standalone_and_extracts_media() {
     let a = argv("md", "tex");
     assert_eq!(&a[1..5], ["-f", "markdown", "-t", "latex"]);
-    assert_eq!(&a[7..], ["--standalone", "--extract-media=/out/in_files"]);
+    assert_eq!(
+        &a[7..],
+        [
+            "--resource-path=/docs",
+            "--standalone",
+            "--extract-media=in_files"
+        ]
+    );
 }
 
 #[test]
 fn md_and_rst_output_extract_media_without_standalone() {
     let md = argv("docx", "md");
     assert_eq!(&md[1..5], ["-f", "docx", "-t", "gfm"]);
-    assert_eq!(&md[7..], ["--extract-media=/out/in_files"]);
+    assert_eq!(
+        &md[7..],
+        ["--resource-path=/docs", "--extract-media=in_files"]
+    );
     let rst = argv("tex", "rst");
     assert_eq!(&rst[1..5], ["-f", "latex", "-t", "rst"]);
-    assert_eq!(&rst[7..], ["--extract-media=/out/in_files"]);
+    assert_eq!(
+        &rst[7..],
+        ["--resource-path=/docs", "--extract-media=in_files"]
+    );
 }
 
 #[test]
-fn txt_odt_rtf_epub_get_no_extras() {
-    for (to, writer) in [("txt", "plain"), ("odt", "odt"), ("rtf", "rtf")] {
+fn txt_odt_epub_get_no_extras() {
+    for (to, writer) in [("txt", "plain"), ("odt", "odt")] {
         let a = argv("md", to);
-        assert_eq!(a.len(), 7, "{to}: {a:?}");
+        assert_eq!(&a[7..], ["--resource-path=/docs"], "{to}: {a:?}");
         assert_eq!(a[4], writer);
     }
-    assert_eq!(argv("rst", "epub").len(), 7);
+    assert_eq!(&argv("rst", "epub")[7..], ["--resource-path=/docs"]);
+}
+
+#[test]
+fn rtf_output_is_standalone_without_media() {
+    let a = argv("md", "rtf");
+    assert_eq!(a[4], "rtf");
+    assert_eq!(&a[7..], ["--resource-path=/docs", "--standalone"]);
 }
 
 #[test]
@@ -258,4 +281,64 @@ fn a_broken_input_reports_filees_message() {
     let msg = err.to_string();
     assert!(msg.starts_with("Pandoc failed (exit "), "{msg}");
     assert!(!dir.path().join("sample.md").exists());
+}
+
+#[test]
+fn sample_md_to_rtf_has_an_rtf_header() {
+    require_engine!("pandoc");
+    let dir = tempfile::tempdir().unwrap();
+    let outputs = convert_sample("rtf", dir.path()).expect("md -> rtf");
+    let rtf = read_text(&outputs[0]);
+    assert!(rtf.starts_with("{\\rtf1"), "headerless RTF: {rtf}");
+    assert!(rtf.contains("MorphRing sample"), "{rtf}");
+}
+
+#[test]
+fn extracted_images_are_linked_relative_to_the_output() {
+    require_engine!("pandoc");
+    let dir = tempfile::tempdir().unwrap();
+    // A docx with an image in it, made by pandoc from Markdown that links
+    // sample.png by a relative path. That leg also proves --resource-path
+    // finds images next to the input when pandoc runs somewhere else.
+    let src = dir.path().join("src");
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::copy(fixture("sample.png"), src.join("sample.png")).unwrap();
+    std::fs::write(src.join("pic.md"), "# Pic\n\n![a pic](sample.png)\n").unwrap();
+    let docx_dir = dir.path().join("docx");
+    let docx = convert_with(src.join("pic.md"), "md", "docx", &docx_dir, false)
+        .expect("md -> docx")
+        .remove(0);
+    assert!(
+        std::fs::read(&docx)
+            .unwrap()
+            .windows(11)
+            .any(|w| w == b"word/media/"),
+        "the image made it into the docx"
+    );
+
+    let out = dir.path().join("out");
+    let md = convert_with(docx, "docx", "md", &out, false)
+        .expect("docx -> md")
+        .remove(0);
+    let text = read_text(&md);
+    let start = text
+        .find("sample_files/media/")
+        .unwrap_or_else(|| panic!("no relative media link: {text}"));
+    let before = text[..start].chars().last();
+    assert!(
+        matches!(before, Some('"' | '(')),
+        "the link starts at sample_files/: {text}"
+    );
+    assert!(
+        !text.contains(out.to_str().unwrap()),
+        "absolute link: {text}"
+    );
+    let link: String = text[start..]
+        .chars()
+        .take_while(|c| !matches!(c, '"' | ')' | ' '))
+        .collect();
+    assert!(
+        out.join(&link).is_file(),
+        "{link} exists next to the output"
+    );
 }
