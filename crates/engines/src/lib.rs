@@ -98,11 +98,6 @@ pub(crate) mod parts {
         }
     }
 
-    /// What every part returns until its task fills it in.
-    pub(crate) fn not_implemented() -> EngineError {
-        EngineError::Failed("not implemented".to_owned())
-    }
-
     #[cfg(test)]
     pub(crate) mod test_support {
         use std::path::PathBuf;

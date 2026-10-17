@@ -3202,6 +3202,7 @@ dependencies = [
  "calamine",
  "cfb 0.15.0",
  "chardetng",
+ "chrono",
  "csv",
  "directories",
  "docx-rs",

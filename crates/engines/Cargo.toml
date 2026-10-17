@@ -34,7 +34,7 @@ default = [
 img = ["dep:image"]
 svg = ["dep:resvg", "dep:usvg", "dep:flate2"]
 pdf = ["dep:lopdf", "dep:krilla", "dep:krilla-svg", "dep:usvg", "dep:image"]
-archive = ["dep:zip", "dep:tar", "dep:flate2", "dep:bzip2", "dep:lzma-rust2", "dep:sevenz-rust2", "dep:encoding_rs"]
+archive = ["dep:zip", "dep:tar", "dep:flate2", "dep:bzip2", "dep:lzma-rust2", "dep:sevenz-rust2", "dep:encoding_rs", "dep:chrono"]
 subtitles = ["dep:encoding_rs", "dep:chardetng", "dep:quick-xml"]
 data = ["dep:saphyr", "dep:toml", "dep:quick-xml", "dep:csv", "dep:encoding_rs", "dep:chardetng"]
 model3d = ["dep:gltf", "dep:stl_io", "dep:tobj", "dep:ply-rs-bw", "dep:zip", "dep:quick-xml"]
@@ -118,6 +118,8 @@ visioncortex = { workspace = true, optional = true }
 icns = { workspace = true, optional = true }
 ureq = { workspace = true, optional = true }
 sha2 = { workspace = true, optional = true }
+# Local time for ZIP's DOS dates, which have never heard of time zones.
+chrono = { workspace = true, optional = true }
 
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true

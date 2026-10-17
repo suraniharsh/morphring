@@ -109,18 +109,14 @@ mod tests {
     }
 
     #[test]
-    fn the_pack_part_is_still_a_stub() {
-        let parts: [crate::parts::ConvertFn; 1] = [pack::convert];
-        for convert in parts {
-            let err = convert(
-                &step("pdf", "png"),
-                &mut NoOutputs,
-                &|_| {},
-                &CancelToken::new(),
-            )
-            .unwrap_err();
-            assert_eq!(err.to_string(), "not implemented");
-        }
+    fn the_engine_has_the_pack_edges() {
+        let engine = ArchiveEngine::new();
+        assert!(
+            engine
+                .edges()
+                .iter()
+                .any(|e| e.from.as_str() == "folder" && e.to.as_str() == "tgz")
+        );
     }
 
     #[test]
