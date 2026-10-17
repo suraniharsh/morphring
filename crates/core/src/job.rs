@@ -390,8 +390,14 @@ impl Job<'_> {
                 }
             };
 
+            // More than one input means an earlier hop fanned out into pages,
+            // and they come back in page order. Each page keeps its `_pN` in
+            // the names it asks for; otherwise every page wants the plain name,
+            // the conflict counter hands out "name (2)", and --overwrite has no
+            // idea which old file belongs to which page.
+            let paged = inputs.len() > 1;
             let mut outputs = Vec::new();
-            for input in &inputs {
+            for (page, input) in inputs.iter().enumerate() {
                 if self.cancel.is_cancelled() {
                     return Err(EngineError::Cancelled);
                 }
@@ -415,7 +421,16 @@ impl Job<'_> {
                     Some(gate) => Some(gate.acquire(self.cancel).ok_or(EngineError::Cancelled)?),
                     None => None,
                 };
-                outputs.extend(engine.convert(&step, out, &progress, self.cancel)?);
+                let converted = if paged {
+                    let mut paged_out = PageSuffixAllocator {
+                        inner: &mut *out,
+                        page: page + 1,
+                    };
+                    engine.convert(&step, &mut paged_out, &progress, self.cancel)?
+                } else {
+                    engine.convert(&step, out, &progress, self.cancel)?
+                };
+                outputs.extend(converted);
             }
             inputs = outputs;
         }
@@ -439,6 +454,21 @@ impl OutputAllocator for FinalAllocator<'_> {
             self.created.borrow_mut().push(path.clone());
         }
         Some(path)
+    }
+}
+
+/// Puts `_p{page}` in front of whatever suffix the engine asks for, so a hop
+/// fed one page of a fanned-out file names its output after that page. A
+/// second fan-out further down the route simply stacks up: `_p1_p2`.
+struct PageSuffixAllocator<'a> {
+    inner: &'a mut dyn OutputAllocator,
+    page: usize,
+}
+
+impl OutputAllocator for PageSuffixAllocator<'_> {
+    fn allocate(&mut self, ext: &str, suffix: &str) -> Option<PathBuf> {
+        self.inner
+            .allocate(ext, &format!("_p{}{suffix}", self.page))
     }
 }
 
@@ -961,11 +991,87 @@ mod tests {
 
         assert_eq!(counters.calls(), 3);
         assert_eq!(results[0].outputs.len(), 3);
-        // Each page asks for the plain name, so the shared reservations number
-        // them, exactly like Filee does.
+        // Each page keeps its page number instead of being mistaken for a
+        // name clash with its siblings.
         assert_eq!(
             names_in(dir.path()),
-            ["clip (2).webp", "clip (3).webp", "clip.pdf", "clip.webp"]
+            ["clip.pdf", "clip_p1.webp", "clip_p2.webp", "clip_p3.webp"]
+        );
+    }
+
+    #[test]
+    fn fanned_out_pages_keep_their_suffix_and_overwrite_replaces_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let files = [touch(&dir, "m3.pdf")];
+        let pages = FakeConverter::new("pages")
+            .edge("pdf", "png", 10)
+            .behaviour(Behaviour::Outputs(3));
+        let magick = FakeConverter::new("magick").edge("png", "webp", 10);
+        let expected = ["m3.pdf", "m3_p1.webp", "m3_p2.webp", "m3_p3.webp"];
+
+        let first = run(&files, "webp", &[&pages, &magick]);
+        assert_eq!(first[0].state, FileState::Done);
+        assert_eq!(names_in(dir.path()), expected);
+
+        // The rerun that used to leave "m3 (2).webp" and friends lying around.
+        let rule = OutputRule {
+            conflict: ConflictPolicy::Overwrite,
+            ..OutputRule::default()
+        };
+        let again = run_with(
+            &files,
+            "webp",
+            &rule,
+            &[&pages, &magick],
+            &CancelToken::new(),
+        );
+        assert_eq!(again[0].state, FileState::Done);
+        assert_eq!(names_in(dir.path()), expected);
+        let outputs: Vec<_> = again[0]
+            .outputs
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(outputs, ["m3_p1.webp", "m3_p2.webp", "m3_p3.webp"]);
+    }
+
+    #[test]
+    fn a_single_page_keeps_the_plain_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let files = [touch(&dir, "one.pdf")];
+        // An engine that hands back one page asks for no suffix at all.
+        let pages = FakeConverter::new("pages").edge("pdf", "png", 10);
+        let magick = FakeConverter::new("magick").edge("png", "webp", 10);
+
+        let results = run(&files, "webp", &[&pages, &magick]);
+
+        assert_eq!(results[0].state, FileState::Done);
+        assert_eq!(names_in(dir.path()), ["one.pdf", "one.webp"]);
+    }
+
+    #[test]
+    fn a_second_fan_out_stacks_the_page_suffixes() {
+        let dir = tempfile::tempdir().unwrap();
+        let files = [touch(&dir, "deck.pdf")];
+        let pages = FakeConverter::new("pages")
+            .edge("pdf", "png", 10)
+            .behaviour(Behaviour::Outputs(2));
+        let split = FakeConverter::new("split")
+            .edge("png", "webp", 10)
+            .behaviour(Behaviour::Outputs(2));
+
+        let results = run(&files, "webp", &[&pages, &split]);
+
+        assert_eq!(results[0].state, FileState::Done);
+        assert_eq!(
+            names_in(dir.path()),
+            [
+                "deck.pdf",
+                "deck_p1_p1.webp",
+                "deck_p1_p2.webp",
+                "deck_p2_p1.webp",
+                "deck_p2_p2.webp"
+            ]
         );
     }
 
