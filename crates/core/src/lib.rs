@@ -8,6 +8,7 @@ pub mod contract;
 pub mod dates;
 pub mod error;
 pub mod formats;
+pub mod group;
 pub mod history;
 pub mod job;
 pub mod migrate;

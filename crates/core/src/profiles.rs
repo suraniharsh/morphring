@@ -16,6 +16,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::builtin;
 use crate::formats::{self, Category};
+use crate::group;
 use crate::migrate;
 use crate::preset::Preset;
 use crate::settings::Store;
@@ -415,6 +416,9 @@ impl Library {
                 tracing::warn!("could not save the upgraded preset library: {err}");
             }
         }
+        // Once more after the upgrade: a migration step may have added or
+        // repaired presets, and a failed save above skipped its own pass.
+        library.ensure_consistency();
         library
     }
 
@@ -455,8 +459,10 @@ impl Library {
     /// at no preset, loses duplicates (first one stays) and is capped at
     /// [`MAX_SLICES`]; and if no mixed profile is left, the built-in one comes
     /// back (with only the presets that still exist), because a drop with no
-    /// ring at all is a sad drop.
+    /// ring at all is a sad drop. Groups are tidied first
+    /// ([`group::ensure_consistency`]).
     pub fn ensure_consistency(&mut self) {
+        group::ensure_consistency(self);
         let known: HashSet<&str> = self.presets.iter().map(|p| p.id.as_str()).collect();
         for profile in &mut self.profiles {
             let mut seen = HashSet::new();

@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::contract::ConvertOptions;
 use crate::formats::{self, Format};
+use crate::group::{self, PresetError, PresetKind};
 use crate::job::Target;
 use crate::options::{
     ArchiveOptions, DocumentOptions, ImageOptions, MediaOptions, PdfOptions, TracingOptions,
@@ -40,6 +41,14 @@ pub struct Preset {
     /// Raster to vector tracing; Filee calls the group `trace`.
     pub trace: TracingOptions,
     pub output: OutputRule,
+    /// A conversion, or a group that fans out other presets on the ring.
+    /// Written as `kind` plus a computed `isGroup` (Filee writes both and
+    /// reads only the first; see [`group::kind_fields`]).
+    #[serde(flatten, with = "group::kind_fields")]
+    pub kind: PresetKind,
+    /// For a group: the member presets by id, in ring order, at most
+    /// [`group::MAX_SUB_PRESETS`] and never a group. Ignored for a conversion.
+    pub sub_preset_ids: Vec<String>,
 }
 
 impl Default for Preset {
@@ -58,6 +67,8 @@ impl Default for Preset {
             archive: ArchiveOptions::default(),
             trace: TracingOptions::default(),
             output: default_output(),
+            kind: PresetKind::Conversion,
+            sub_preset_ids: Vec::new(),
         }
     }
 }
@@ -102,14 +113,33 @@ impl Preset {
             .map_or_else(|| self.target.to_uppercase(), str::to_owned)
     }
 
+    /// True for a [`PresetKind::Group`]. Members alone don't make a group.
+    pub fn is_group(&self) -> bool {
+        self.kind == PresetKind::Group
+    }
+
     /// The job target this preset converts to: [`Target::SameAsSource`] for
     /// `*`, otherwise the format the target id names. `None` when the target
-    /// is not a known format.
+    /// is not a known format, and always for a group.
     pub fn job_target(&self) -> Option<Target> {
-        if self.target.trim() == SAME_AS_SOURCE {
-            return Some(Target::SameAsSource);
+        self.conversion_target().ok()
+    }
+
+    /// Like [`Self::job_target`], but says why there is no target: a group
+    /// ([`PresetError::PresetIsGroup`], listing its members) or a target id
+    /// that names no format.
+    pub fn conversion_target(&self) -> Result<Target, PresetError> {
+        if self.is_group() {
+            return Err(PresetError::PresetIsGroup {
+                members: self.sub_preset_ids.clone(),
+            });
         }
-        formats::lookup_target(&self.target).map(|format| Target::Format(format.id))
+        if self.target.trim() == SAME_AS_SOURCE {
+            return Ok(Target::SameAsSource);
+        }
+        formats::lookup_target(&self.target)
+            .map(|format| Target::Format(format.id))
+            .ok_or_else(|| PresetError::UnknownTarget(self.target.clone()))
     }
 
     /// The options a job runs this preset with.
@@ -144,17 +174,31 @@ pub fn for_target(format: &Format) -> Preset {
 }
 
 /// Finds a preset by id (case-insensitive), else by display name
-/// (case-insensitive). Surrounding whitespace in `key` is ignored.
+/// (case-insensitive). Surrounding whitespace in `key` is ignored. Groups are
+/// found too; use [`find_conversion`] where only a conversion will do.
 pub fn find<'a>(presets: &'a [Preset], key: &str) -> Option<&'a Preset> {
+    find_in(presets.iter(), key)
+}
+
+/// Like [`find`], but only among conversions: a group never answers where a
+/// conversion is picked (Filee's `FindConversion`).
+pub fn find_conversion<'a>(presets: &'a [Preset], key: &str) -> Option<&'a Preset> {
+    find_in(presets.iter().filter(|p| !p.is_group()), key)
+}
+
+fn find_in<'a, I>(presets: I, key: &str) -> Option<&'a Preset>
+where
+    I: Iterator<Item = &'a Preset> + Clone,
+{
     let key = key.trim();
     presets
-        .iter()
+        .clone()
         .find(|p| p.id.eq_ignore_ascii_case(key))
         .or_else(|| {
             // Display names may hold non-ASCII text, so the full Unicode fold.
             let key = key.to_lowercase();
             presets
-                .iter()
+                .clone()
                 .find(|p| p.display_name().to_lowercase() == key)
         })
 }
@@ -188,6 +232,41 @@ mod tests {
             builtin::presets().remove(0),
         ];
         assert_eq!(find(&presets, "to-png").unwrap().id, "to-png");
+    }
+
+    #[test]
+    fn preset_find_conversion_skips_groups() {
+        // A "Rotate" group next to the user's own "Rotate" conversion must
+        // not hide it; `find` still sees the group so callers can say so.
+        let presets = vec![
+            Preset {
+                id: "rotate".into(),
+                name: "Rotate".into(),
+                kind: PresetKind::Group,
+                target: group::GROUP_TARGET.into(),
+                ..Preset::default()
+            },
+            Preset {
+                id: "my-rotate".into(),
+                name: "Rotate".into(),
+                ..Preset::default()
+            },
+        ];
+        assert_eq!(find(&presets, "rotate").unwrap().id, "rotate");
+        assert_eq!(find_conversion(&presets, "rotate").unwrap().id, "my-rotate");
+        assert!(find_conversion(&presets[..1], "rotate").is_none());
+    }
+
+    #[test]
+    fn preset_kind_round_trips_with_is_group() {
+        let json = serde_json::to_value(Preset::default()).unwrap();
+        assert_eq!(json["kind"], "Convert");
+        assert_eq!(json["isGroup"], false);
+        assert_eq!(json["subPresetIds"], serde_json::json!([]));
+        assert_eq!(
+            serde_json::from_value::<Preset>(json).unwrap(),
+            Preset::default()
+        );
     }
 
     #[test]
