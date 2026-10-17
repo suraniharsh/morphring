@@ -8,6 +8,8 @@
 //! Only drags that start in a file manager count, so Ctrl+dragging text in a
 //! browser doesn't summon a donut.
 
+use std::collections::HashSet;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -22,6 +24,8 @@ const DRAG_THRESHOLD: i32 = 12;
 const POLL: Duration = Duration::from_millis(20);
 /// An armed press that never turns into a drag stops polling after this long.
 const ARM_TIMEOUT: Duration = Duration::from_secs(15);
+/// How often to look for keyboards and mice that showed up after startup.
+const RESCAN: Duration = Duration::from_secs(2);
 
 /// A touch this short is a tap (libinput's own tap timeout is 180 ms).
 const TAP_MAX: Duration = Duration::from_millis(250);
@@ -164,59 +168,101 @@ fn in_file_manager() -> bool {
     }
 }
 
-/// Starts watching every keyboard and mouse. Returns false when no input
-/// device could be opened (no `input` group) or the user turned it off.
+/// Starts watching every keyboard and mouse, including ones plugged in later.
+/// Returns false when no input device could be opened (no `input` group) or
+/// the user turned it off.
 pub fn start<R: Runtime>(app: &AppHandle<R>) -> bool {
     if std::env::var_os("MORPHRING_NO_GESTURE").is_some() {
         return false;
     }
-    let devices: Vec<Device> = evdev::enumerate()
-        .map(|(_, device)| device)
-        .filter(|device| {
-            device.supported_keys().is_some_and(|keys| {
-                keys.contains(KeyCode::KEY_LEFTCTRL) || keys.contains(KeyCode::BTN_LEFT)
-            })
-        })
-        .collect();
-    if devices.is_empty() {
+    let state = Arc::new(Mutex::new(State::default()));
+    let watched = Arc::new(Mutex::new(HashSet::new()));
+    let found = scan(app, &state, &watched);
+    if found == 0 {
         tracing::info!(
             "no readable input devices; Ctrl+drag is off (join the input group to turn it on)"
         );
         return false;
     }
-    tracing::info!(devices = devices.len(), "Ctrl+drag watcher started");
-    let state = Arc::new(Mutex::new(State::default()));
-    for mut device in devices {
-        let state = Arc::clone(&state);
-        let app = app.clone();
-        std::thread::spawn(move || {
-            let touchpad = device.supported_keys().is_some_and(|keys| {
-                keys.contains(KeyCode::BTN_TOUCH) && keys.contains(KeyCode::BTN_TOOL_FINGER)
-            });
-            let mut tap = TapDrag::default();
-            loop {
-                let events = match device.fetch_events() {
-                    Ok(events) => events.collect::<Vec<_>>(),
-                    // Unplugged, most likely. One fewer mouse to listen to.
-                    Err(_) => return,
-                };
-                for event in events {
-                    // value 2 is key repeat; Ctrl held down repeats happily.
-                    if let EventSummary::Key(_, code, value @ (0 | 1)) = event.destructure() {
-                        if touchpad && code == KeyCode::BTN_TOUCH {
-                            if let Some(down) = tap.on_touch(value == 1, Instant::now()) {
-                                tracing::debug!(down, "touchpad tap-and-drag");
-                                handle(&app, &state, KeyCode::BTN_LEFT, down);
-                            }
-                            continue;
-                        }
-                        handle(&app, &state, code, value == 1);
-                    }
-                }
+    tracing::info!(devices = found, "Ctrl+drag watcher started");
+    // Mice get plugged in, receivers wake up, touchpads reset after a
+    // suspend. Looking once at startup meant the new mouse simply didn't
+    // exist to us, so look again every so often. Cheap: a readdir and a few
+    // ioctls, and only new paths get opened.
+    let app = app.clone();
+    std::thread::spawn(move || {
+        loop {
+            std::thread::sleep(RESCAN);
+            let added = scan(&app, &state, &watched);
+            if added > 0 {
+                tracing::info!(devices = added, "Ctrl+drag watching new input devices");
             }
+        }
+    });
+    true
+}
+
+/// Opens every keyboard or mouse not already watched and gives each its own
+/// reader thread. Returns how many it added.
+fn scan<R: Runtime>(
+    app: &AppHandle<R>,
+    state: &Arc<Mutex<State>>,
+    watched: &Arc<Mutex<HashSet<PathBuf>>>,
+) -> usize {
+    let mut added = 0;
+    for (path, device) in evdev::enumerate() {
+        let wanted = device.supported_keys().is_some_and(|keys| {
+            keys.contains(KeyCode::KEY_LEFTCTRL) || keys.contains(KeyCode::BTN_LEFT)
+        });
+        if !wanted
+            || !watched
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(path.clone())
+        {
+            continue;
+        }
+        added += 1;
+        let (app, state, watched) = (app.clone(), Arc::clone(state), Arc::clone(watched));
+        std::thread::spawn(move || {
+            read_device(&app, &state, device);
+            // Gone (unplugged, or reset by a suspend). Forget the path so the
+            // next scan picks it back up if it returns under the same name.
+            tracing::debug!(path = %path.display(), "input device went away");
+            watched
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(&path);
         });
     }
-    true
+    added
+}
+
+/// Feeds one device's key and button changes to the gesture until it fails.
+fn read_device<R: Runtime>(app: &AppHandle<R>, state: &Arc<Mutex<State>>, mut device: Device) {
+    let touchpad = device.supported_keys().is_some_and(|keys| {
+        keys.contains(KeyCode::BTN_TOUCH) && keys.contains(KeyCode::BTN_TOOL_FINGER)
+    });
+    let mut tap = TapDrag::default();
+    loop {
+        let events = match device.fetch_events() {
+            Ok(events) => events.collect::<Vec<_>>(),
+            Err(_) => return,
+        };
+        for event in events {
+            // value 2 is key repeat; Ctrl held down repeats happily.
+            if let EventSummary::Key(_, code, value @ (0 | 1)) = event.destructure() {
+                if touchpad && code == KeyCode::BTN_TOUCH {
+                    if let Some(down) = tap.on_touch(value == 1, Instant::now()) {
+                        tracing::debug!(down, "touchpad tap-and-drag");
+                        handle(app, state, KeyCode::BTN_LEFT, down);
+                    }
+                    continue;
+                }
+                handle(app, state, code, value == 1);
+            }
+        }
+    }
 }
 
 fn handle<R: Runtime>(app: &AppHandle<R>, state: &Arc<Mutex<State>>, code: KeyCode, down: bool) {
