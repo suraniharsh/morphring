@@ -157,6 +157,43 @@ body {
   fill: var(--hub-text-secondary);
 }
 
+/* The × on the running ring: a cream button on the ring's edge that fades
+   in when the pointer comes close (120 ms, Filee's number) and leaves at once,
+   because nobody waits for a cancel button to finish waving goodbye. */
+.cancel {
+  opacity: 0;
+  pointer-events: none;
+}
+
+.cancel.shown {
+  opacity: 1;
+  transition: opacity 120ms ease-out;
+}
+
+.cancel-disc {
+  fill: var(--hub-text);
+  stroke: var(--hub);
+  stroke-width: 2;
+}
+
+.cancel-mark {
+  fill: var(--hub);
+}
+
+#ring.pointing .cancel.shown .cancel-disc {
+  fill: var(--accent);
+}
+
+#ring.pointing .cancel.shown .cancel-mark {
+  fill: var(--on-accent);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .cancel.shown {
+    transition: none;
+  }
+}
+
 .percent {
   font-size: 15px;
   font-weight: 600;

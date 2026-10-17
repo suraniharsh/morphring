@@ -407,3 +407,58 @@ test("finishAll: a hidden ring is left alone", () => {
   assert.equal(M.finishAll(state), false);
   assert.equal(state.clock, 0.2);
 });
+
+// ───── the cancel button on the progress ring (DonutMenu.Progress.cs) ─────
+
+test("cancel: the button sits on the ring's outer edge at 45 degrees", () => {
+  const b = M.cancelButtonCenter(C);
+  const r = RING.ringRadius + RING.ringStroke;
+  close(b.x, 200 + r * Math.SQRT1_2);
+  close(b.y, 200 - r * Math.SQRT1_2);
+  close(RING.cancelFadeSeconds, 0.12);
+});
+
+test("cancel: progress hit test table", () => {
+  const b = M.cancelButtonCenter(C);
+  const plate = RING.ringRadius + RING.ringStroke + 2;
+  // [point, cancelShown, expected kind, why]
+  const rows = [
+    [b, true, "cancel", "dead centre of the ×"],
+    [{ x: b.x + RING.cancelHitRadius - 0.01, y: b.y }, true, "cancel", "just inside the × hit radius"],
+    [{ x: b.x, y: b.y - RING.cancelHitRadius - 0.5 }, true, "outside", "just past the ×, off the plate"],
+    [b, false, "ring", "a hidden × is not a button; its centre is on the plate"],
+    [C, true, "ring", "the middle of the ring"],
+    [C, false, "ring", "the middle of the ring, × hidden"],
+    [{ x: C.x - plate + 0.5, y: C.y }, true, "ring", "the plate's far edge"],
+    [{ x: C.x - plate - 0.5, y: C.y }, true, "outside", "just off the plate"],
+    [{ x: C.x, y: C.y + 120 }, true, "outside", "well away"],
+  ];
+  for (const [p, shown, kind, why] of rows) {
+    assert.equal(M.progressHitTest(C, p, shown).kind, kind, why);
+  }
+});
+
+test("cancel: hovering reaches 14 px past the ring's outer edge", () => {
+  const edge = RING.ringRadius + RING.ringStroke + RING.cancelHoverSlack;
+  assert.equal(M.progressHover(C, C), true);
+  assert.equal(M.progressHover(C, { x: C.x + edge, y: C.y }), true);
+  assert.equal(M.progressHover(C, { x: C.x + edge + 0.5, y: C.y }), false);
+  // The whole × is inside the hover zone, so reaching for it never hides it.
+  const b = M.cancelButtonCenter(C);
+  const reach = RING.cancelHitRadius * Math.SQRT1_2;
+  assert.equal(M.progressHover(C, { x: b.x + reach, y: b.y - reach }), true);
+});
+
+test("cancel: the × shows only while hovering a running, visible ring", () => {
+  // [hovering, ringVisible, running, cancelWanted, shown]
+  const rows = [
+    [true, true, true, false, true],
+    [false, true, true, false, false],
+    [true, false, true, false, false],
+    [true, true, false, false, false],
+    [true, true, true, true, false],
+  ];
+  for (const [h, v, r, w, want] of rows) {
+    assert.equal(M.showCancel(h, v, r, w), want, JSON.stringify([h, v, r, w]));
+  }
+});

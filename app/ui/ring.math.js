@@ -37,6 +37,13 @@
     minRingSeconds: 0.6,
     holdSeconds: Object.freeze({ succeeded: 0.9, failed: 1.4, cancelled: 0.2 }),
     fadeSeconds: 0.25,
+    // The × on the progress ring (DonutMenu.Progress.cs): a 10 px disc sat on
+    // the ring's outer edge at half past one, hit within 11 px, shown while
+    // the pointer is within 14 px of the ring, fading in over 120 ms.
+    cancelRadius: 10,
+    cancelHitRadius: 11,
+    cancelHoverSlack: 14,
+    cancelFadeSeconds: 0.12,
   });
 
   // Below this a "full turn" is a full turn. Same epsilons as ring.rs.
@@ -434,6 +441,47 @@
     }
   }
 
+  // ───── the cancel button on the progress ring ─────
+
+  /** Centre of the × button: on the ring's outer edge, 45° past noon. */
+  function cancelButtonCenter(c) {
+    return pointAt(c, RING.ringRadius + RING.ringStroke, Math.PI / 4);
+  }
+
+  /**
+   * Whether the pointer is close enough to the progress ring to bring up the
+   * × (HitTest's cousin OnProgressPointerMoved). Generous on purpose: the
+   * button sits on the edge, and it would be rude to vanish on the way to it.
+   */
+  function progressHover(c, p) {
+    return Math.hypot(p.x - c.x, p.y - c.y) <= RING.ringRadius + RING.ringStroke + RING.cancelHoverSlack;
+  }
+
+  /**
+   * What sits under `p` while the progress ring shows: `{ kind: "cancel" }`
+   * for the × (only when `cancelShown`, an invisible button is not a button),
+   * `{ kind: "ring" }` for the plate, `{ kind: "outside" }` for the rest. The
+   * × wins over the plate, since half of it overlaps the plate anyway.
+   */
+  function progressHitTest(c, p, cancelShown) {
+    if (cancelShown) {
+      const b = cancelButtonCenter(c);
+      if (Math.hypot(p.x - b.x, p.y - b.y) <= RING.cancelHitRadius) return { kind: "cancel" };
+    }
+    const plate = RING.ringRadius + RING.ringStroke + 2;
+    return Math.hypot(p.x - c.x, p.y - c.y) <= plate ? { kind: "ring" } : { kind: "outside" };
+  }
+
+  /**
+   * Whether the × should be up: the pointer hovers the ring, the ring has
+   * finished popping in (`ringVisible`), the job is still running and nobody
+   * asked to cancel it yet. Once there is an outcome, there is nothing left
+   * to cancel, and Filee hides the button for exactly that reason.
+   */
+  function showCancel(hovering, ringVisible, running, cancelWanted) {
+    return !!(hovering && ringVisible && running && !cancelWanted);
+  }
+
   // ───── frame-loop watchdog (DonutMenu.cs StalledLoopMs / CheckLoop) ─────
 
   /**
@@ -525,6 +573,10 @@
     wrapText,
     hintFor,
     ProgressRing,
+    cancelButtonCenter,
+    progressHover,
+    progressHitTest,
+    showCancel,
     WATCHDOG,
     watchdogCheck,
     finishAll,

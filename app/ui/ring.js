@@ -27,7 +27,8 @@
 //                             a failed job, and its error text is shown under
 //                             the ring
 //     cancel_job { jobId }    cancels the job the ring shows (Escape or a
-//                             click on the centre while it runs); the backend
+//                             click on the × that shows while the pointer
+//                             hovers the running ring); the backend
 //                             answers with ring-done "cancelled"
 //     ring_close              hides the window
 //     ping                    once at start-up, as a health check
@@ -67,6 +68,9 @@
   const badgeCheck = $("badge-check");
   const badgeBang = $("badge-bang");
   const message = $("message");
+  // The × lives in the progress layer, built here rather than in ring.html so
+  // its position comes from the same maths the hit test uses.
+  const cancelButton = buildCancelButton();
 
   // ───────────── state ─────────────
 
@@ -87,6 +91,9 @@
   let cancelSent = false;
   let failureText = "";
   let sliceEls = [];
+  // The pointer is near the progress ring, so the × may show (if the job is
+  // still running and nobody asked to cancel it yet).
+  let ringHover = false;
   // Focus-follows-mouse compositors (hello, Hyprland) hand focus to whatever
   // sits under the cursor, so a ring that pops up away from the mouse loses
   // focus on its first frame. We only treat blur as "clicked away" once the
@@ -118,6 +125,24 @@
   });
   attrs(badgeBang, { x: C.x, y: C.y + 1 });
   svg.classList.add("off");
+
+  function buildCancelButton() {
+    const at = M.cancelButtonCenter(C);
+    const g = svgEl("g", { id: "cancel", class: "cancel", "aria-hidden": "true" });
+    // Material's "close" glyph, 24 px wide with its strokes spanning 5..19.
+    // Squeeze those 14 px into 10 and centre them on the button.
+    const s = 10 / 14;
+    g.append(
+      svgEl("circle", { class: "cancel-disc", cx: M.num(at.x), cy: M.num(at.y), r: RING.cancelRadius }),
+      svgEl("path", {
+        class: "cancel-mark",
+        d: "M19,6.41L17.59,5L12,10.59L6.41,5L5,6.41L10.59,12L5,17.59L6.41,19L12,13.41L17.59,19L19,17.59L13.41,12L19,6.41Z",
+        transform: `translate(${M.num(at.x)} ${M.num(at.y)}) scale(${M.num(s)}) translate(-12 -12)`,
+      }),
+    );
+    progressLayer.append(g);
+    return g;
+  }
 
   // ───────────── text measuring ─────────────
 
@@ -274,6 +299,8 @@
     svg.removeAttribute("aria-busy");
     svg.removeAttribute("aria-activedescendant");
     svg.classList.remove("pointing", "cancelling");
+    ringHover = false;
+    setCancelShown(false);
     build();
     setHub(model.title, M.hintFor(null));
     svg.classList.remove("off");
@@ -299,6 +326,8 @@
     job++;
     message.hidden = true;
     svg.classList.remove("cancelling", "pointing");
+    ringHover = false;
+    setCancelShown(false);
     svg.classList.add("off");
     backend.close().catch((err) => console.warn("ring_close failed:", err));
   }
@@ -367,6 +396,8 @@
     backendJob = 0;
     cancelWanted = false;
     cancelSent = false;
+    // The click that got us here was on a slice, well clear of the ring.
+    ringHover = false;
     svg.setAttribute("aria-busy", "true");
     svg.classList.remove("pointing");
     startAnimation();
@@ -381,7 +412,22 @@
     return mode === "progress" && !!progress && !progress.pending;
   }
 
-  // Escape or a click on the centre while the job runs. The ring greys out
+  // Whether the × is up right now, per ring.math.js's rules.
+  function cancelShown() {
+    return (
+      mode === "progress" &&
+      !!progress &&
+      M.showCancel(ringHover, progress.collapseAll() >= 1, running(), cancelWanted)
+    );
+  }
+
+  // A class, not display: the fade-in is a CSS transition, and display would
+  // skip it. Hiding is instant, like Filee, which simply stops drawing it.
+  function setCancelShown(on) {
+    cancelButton.classList.toggle("shown", on);
+  }
+
+  // Escape or a click on the × while the job runs. The ring greys out
   // at once, then fades like any other cancelled job when ring-done says so.
   // Asking twice is fine; the second ask just closes the ring.
   function requestCancel() {
@@ -392,6 +438,7 @@
     cancelWanted = true;
     svg.classList.add("cancelling");
     svg.classList.remove("pointing");
+    setCancelShown(false);
     sendCancel();
   }
 
@@ -609,6 +656,7 @@
     setVisible(hole, false);
     setVisible(progressLayer, true);
 
+    setCancelShown(cancelShown());
     const look = progress.ringLook();
     place(progressLayer, 0, look.scale, 0, 0, look.opacity);
     const outcome = progress.outcome;
@@ -645,13 +693,15 @@
 
   // ───────────── input ─────────────
 
-  function hitAt(e) {
+  function svgPoint(e) {
     const ctm = svg.getScreenCTM();
-    if (!ctm) return { kind: "outside" };
-    const p = new DOMPoint(e.clientX, e.clientY).matrixTransform(ctm.inverse());
-    if (mode === "progress") {
-      return Math.hypot(p.x - C.x, p.y - C.y) <= PLATE_R ? { kind: "ring" } : { kind: "outside" };
-    }
+    return ctm ? new DOMPoint(e.clientX, e.clientY).matrixTransform(ctm.inverse()) : null;
+  }
+
+  function hitAt(e) {
+    const p = svgPoint(e);
+    if (!p) return { kind: "outside" };
+    if (mode === "progress") return M.progressHitTest(C, p, cancelShown());
     // Slack of one pop-out, so a slice that jumped towards the pointer is
     // still the slice under it.
     return M.hitTest(C, p, R_IN, R_OUT, model.slices.length, RING.popOut);
@@ -670,8 +720,11 @@
 
   svg.addEventListener("pointermove", (e) => {
     if (mode === "progress") {
-      // The centre is a cancel button while the job runs; say so with the cursor.
-      svg.classList.toggle("pointing", running() && !cancelWanted && hitAt(e).kind === "ring");
+      // Near the ring the × fades in; on the × itself the cursor says "click me".
+      const p = svgPoint(e);
+      ringHover = !!p && M.progressHover(C, p);
+      setCancelShown(cancelShown());
+      svg.classList.toggle("pointing", hitAt(e).kind === "cancel");
       return;
     }
     if (mode !== "menu") return;
@@ -680,6 +733,11 @@
   });
 
   svg.addEventListener("pointerleave", () => {
+    if (mode === "progress") {
+      ringHover = false;
+      setCancelShown(false);
+      svg.classList.remove("pointing");
+    }
     if (mode === "menu" && !pressed) setHover(-1);
   });
 
@@ -700,7 +758,7 @@
       else if (hit.kind !== "empty") requestClose();
     } else if (mode === "progress" && progress && progress.phase === "failed") {
       requestClose();
-    } else if (running() && hit.kind === "ring") {
+    } else if (running() && hit.kind === "cancel") {
       requestCancel();
     }
   });
