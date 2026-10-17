@@ -55,7 +55,7 @@ pub(super) fn try_run(job: &Job<'_>, files: &[PathBuf]) -> Option<Vec<FileResult
         .run(),
         // Converting the files one by one instead would quietly hand back 40
         // single-file zips to someone who asked for one. Better to say no.
-        None => fail_all(job, files, no_combiner(job, format)),
+        None => fail_all(job, files, no_combiner(job)),
     })
 }
 
@@ -88,7 +88,7 @@ fn find_combiner<'a>(
 
 /// Why nobody can pack this job: an engine that could is not installed, or
 /// there simply is no such engine.
-fn no_combiner(job: &Job<'_>, format: FormatId) -> FileState {
+fn no_combiner(job: &Job<'_>) -> FileState {
     let missing: Vec<String> = job
         .engines
         .iter()
@@ -103,7 +103,9 @@ fn no_combiner(job: &Job<'_>, format: FormatId) -> FileState {
     if missing.is_empty() {
         FileState::Failed {
             key: ErrorKey::NoRoute,
-            detail: format!("no installed engine can pack files into one {format} archive"),
+            // "No installed engine" sent people hunting for an engine that
+            // doesn't exist yet, the archive engine being right there and all.
+            detail: "packing several files into one archive is not supported yet".to_owned(),
         }
     } else {
         FileState::Failed {
@@ -852,7 +854,10 @@ mod tests {
                 panic!("expected a failure, got {:?}", result.state);
             };
             assert_eq!(*key, ErrorKey::NoRoute);
-            assert!(detail.contains("zip archive"), "{detail}");
+            assert_eq!(
+                detail,
+                "packing several files into one archive is not supported yet"
+            );
         }
         // Certainly not one zip per file.
         assert!(!dir.path().join("a.zip").exists());

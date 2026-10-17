@@ -101,7 +101,9 @@ pub fn accepts(image: &ImageOptions) -> bool {
         image.tiff_compression,
         TiffCompression::Lzw | TiffCompression::None
     );
-    !(selective_strip || dpi || tiff || image.webp_lossless)
+    // Background removal: nobody implements it yet, us included, and a
+    // decline beats an opaque PNG labelled `_transparent`.
+    !(selective_strip || dpi || tiff || image.webp_lossless || image.remove_background)
 }
 
 /// The `image` crate format for a MorphRing format id.
@@ -434,6 +436,10 @@ mod tests {
             },
             ImageOptions {
                 webp_lossless: true,
+                ..ImageOptions::default()
+            },
+            ImageOptions {
+                remove_background: true,
                 ..ImageOptions::default()
             },
         ];

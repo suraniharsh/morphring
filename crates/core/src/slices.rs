@@ -226,8 +226,10 @@ fn target_text(preset: &Preset) -> String {
 }
 
 /// Modes that exist in the preset model but not yet in any v0.2 engine.
+/// Multi-page TIFF stays ring-only: the CLI does it (job/tiff.rs), the ring
+/// doesn't yet, so it can't live in [`Preset::unsupported_mode`].
 fn not_yet_supported(preset: &Preset) -> bool {
-    preset.archive.combine_into_one || preset.image.multi_page_tiff || preset.pdf.combine_pages
+    preset.unsupported_mode().is_some() || preset.image.multi_page_tiff
 }
 
 /// Filee's merge test: merge mode on, and the target is PDF.
@@ -497,6 +499,36 @@ mod tests {
                 assert_eq!(reason.key(), "slice.not_yet_supported");
                 assert_eq!(reason.to_string(), "This preset is not supported yet");
             }
+        }
+    }
+
+    #[test]
+    fn modes_no_engine_implements_are_not_yet_supported() {
+        // The ring used to offer these as if they worked. The CLI refuses
+        // them with the same verdict, so the two stop disagreeing.
+        // mp4-hevc sits on the default video ring, so check it right there.
+        let ring = builtin_ring(&["a.mp4"]);
+        assert_eq!(
+            by_id(&ring, "mp4-hevc").disabled,
+            Some(DisabledReason::NotYetSupported)
+        );
+
+        let builtin = Library::builtin();
+        let mut library = library_of(Vec::new());
+        for id in ["remove-background", "to-alac", "mp4-av1"] {
+            let preset = builtin.preset(id).cloned().unwrap();
+            library.profiles[0].preset_ids.push(preset.id.clone());
+            library.presets.push(preset);
+        }
+        let ring = suggest(&["a.png", "b.wav", "c.mp4"], &library, &ready());
+        assert_eq!(ids(&ring), ["remove-background", "to-alac", "mp4-av1"]);
+        for slice in &ring.slices {
+            assert_eq!(
+                slice.disabled,
+                Some(DisabledReason::NotYetSupported),
+                "{}",
+                slice.preset_id
+            );
         }
     }
 

@@ -12,7 +12,8 @@ use crate::formats::{self, Format};
 use crate::group::{self, PresetError, PresetKind};
 use crate::job::Target;
 use crate::options::{
-    ArchiveOptions, DocumentOptions, ImageOptions, MediaOptions, PdfOptions, TracingOptions,
+    ArchiveOptions, AudioCodec, DocumentOptions, ImageOptions, MediaOptions, PdfOptions,
+    TracingOptions, VideoCodec,
 };
 use crate::output::{OutputLocation, OutputRule};
 
@@ -142,6 +143,29 @@ impl Preset {
             .ok_or_else(|| PresetError::UnknownTarget(self.target.clone()))
     }
 
+    /// Why this preset can't run yet, or `None` when it can.
+    ///
+    /// These modes exist in the preset model (Filee has them) but no engine
+    /// implements them, so running such a preset would quietly write
+    /// something else under a promising name. Callers refuse it instead.
+    pub fn unsupported_mode(&self) -> Option<&'static str> {
+        // The preset model wrote cheques the engines can't cash yet. Until
+        // they can, we bounce them politely instead of paying in H.264.
+        if self.archive.combine_into_one {
+            Some("packing several files into one archive")
+        } else if self.pdf.combine_pages {
+            Some("stitching PDF pages into one image")
+        } else if self.image.remove_background {
+            Some("removing the background")
+        } else if self.media.video_codec != VideoCodec::Default {
+            Some("choosing the video codec")
+        } else if self.media.audio_codec != AudioCodec::Default {
+            Some("choosing the audio codec")
+        } else {
+            None
+        }
+    }
+
     /// The options a job runs this preset with.
     ///
     /// `quality` is only set when the preset's image quality differs from the
@@ -209,6 +233,30 @@ mod tests {
     use crate::builtin;
     use crate::contract::FormatId;
     use crate::options::Resize;
+
+    #[test]
+    fn preset_unsupported_modes_in_the_builtins() {
+        // The exact list of built-ins that promise more than we deliver. A new
+        // name here means a new fib on the ring; a missing one, a new engine.
+        let unsupported: Vec<_> = builtin::presets()
+            .into_iter()
+            .filter(|p| p.unsupported_mode().is_some())
+            .map(|p| p.id)
+            .collect();
+        let mut got = unsupported.clone();
+        got.sort();
+        let mut want = vec![
+            "mp4-av1",
+            "mp4-hevc",
+            "pdf-long-image",
+            "remove-background",
+            "to-alac",
+            "zip-all",
+        ];
+        want.sort();
+        assert_eq!(got, want);
+        assert_eq!(Preset::default().unsupported_mode(), None);
+    }
 
     #[test]
     fn preset_find_by_id_name_and_key_text() {

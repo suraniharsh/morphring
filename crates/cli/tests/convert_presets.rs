@@ -236,6 +236,51 @@ fn an_unknown_preset_is_a_usage_error() {
     );
 }
 
+#[test]
+fn presets_no_engine_implements_are_refused_with_exit_2() {
+    // These used to "succeed": an opaque PNG called `_transparent`, a zip
+    // nobody could pack. Now they own up before touching a single file.
+    for (preset, reason) in [
+        ("remove-background", "removing the background"),
+        ("zip-all", "packing several files into one archive"),
+        ("mp4-hevc", "choosing the video codec"),
+        ("to-alac", "choosing the audio codec"),
+        ("pdf-long-image", "stitching PDF pages into one image"),
+    ] {
+        let tmp = TempDir::new().unwrap();
+        touch(tmp.path(), "x.png");
+        let r = run_in(
+            tmp.path(),
+            png_engines(),
+            &["convert", "x.png", "--preset", preset],
+        );
+        assert_eq!(r.code, 2, "{preset}: {r:?}");
+        assert_eq!(r.out, "", "{preset}");
+        assert_eq!(
+            r.err,
+            format!("morphring: Preset '{preset}' is not supported yet ({reason}).\n")
+        );
+        let left: Vec<_> = fs::read_dir(tmp.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(left, ["x.png"], "{preset} wrote something");
+    }
+}
+
+#[test]
+fn watch_refuses_an_unsupported_preset_too() {
+    let tmp = TempDir::new().unwrap();
+    fs::create_dir(tmp.path().join("inbox")).unwrap();
+    let r = run_in(
+        tmp.path(),
+        png_engines(),
+        &["watch", "inbox", "--preset", "zip-all"],
+    );
+    assert_eq!(r.code, 2, "{r:?}");
+    assert!(r.err.contains("is not supported yet"), "{r:?}");
+}
+
 /// A presets.json with two conversions, a `rotate` group holding them (plus
 /// an id that isn't there, which loading drops) and a group with nobody left.
 fn write_groups(config: &Path) {

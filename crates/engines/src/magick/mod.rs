@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use morphring_core::{
-    CancelToken, Converter, Edge, EngineError, EngineStatus, OutputAllocator, Step,
+    CancelToken, ConvertOptions, Converter, Edge, EngineError, EngineStatus, OutputAllocator, Step,
 };
 
 use crate::discovery::{self, Tool};
@@ -58,6 +58,12 @@ impl Converter for MagickEngine {
 
     fn status(&self) -> EngineStatus {
         discovery::status(Tool::Magick)
+    }
+
+    fn accepts(&self, options: &ConvertOptions) -> bool {
+        // Background removal isn't wired into the arguments yet; saying yes
+        // would hand back the same opaque picture with `_transparent` on it.
+        !options.image.remove_background
     }
 
     fn convert(
@@ -263,6 +269,15 @@ fn parse_frame_number(name: &str, suffix: &str) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn declines_background_removal() {
+        let engine = MagickEngine::new();
+        let mut options = ConvertOptions::default();
+        assert!(engine.accepts(&options));
+        options.image.remove_background = true;
+        assert!(!engine.accepts(&options));
+    }
 
     #[test]
     fn frame_count_counts_size_lines_only() {

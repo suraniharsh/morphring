@@ -14,7 +14,8 @@ use std::thread;
 use std::time::Duration;
 
 use morphring_core::{
-    CancelToken, Converter, Edge, EngineError, EngineStatus, OutputAllocator, Step,
+    AudioCodec, CancelToken, ConvertOptions, Converter, Edge, EngineError, EngineStatus,
+    OutputAllocator, Step, VideoCodec,
 };
 
 use crate::discovery::{self, Tool};
@@ -74,6 +75,14 @@ impl Converter for FfmpegEngine {
     fn status(&self) -> EngineStatus {
         // discovery only reports ffmpeg as found when ffprobe sits next to it.
         discovery::status(Tool::Ffmpeg)
+    }
+
+    fn accepts(&self, options: &ConvertOptions) -> bool {
+        // The encoders don't read the codec choice yet, so an HEVC request
+        // would come back as H.264 with an `_hevc` name. Declining is the
+        // honest move until they learn to.
+        options.media.video_codec == VideoCodec::Default
+            && options.media.audio_codec == AudioCodec::Default
     }
 
     fn convert(
@@ -294,6 +303,20 @@ fn with_reason(head: &str, reason: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn declines_a_codec_choice_it_cannot_honour() {
+        let engine = FfmpegEngine::new();
+        let mut options = ConvertOptions::default();
+        assert!(engine.accepts(&options));
+        for codec in [VideoCodec::Hevc, VideoCodec::Av1] {
+            options.media.video_codec = codec;
+            assert!(!engine.accepts(&options), "{codec:?}");
+        }
+        options.media.video_codec = VideoCodec::Default;
+        options.media.audio_codec = AudioCodec::Alac;
+        assert!(!engine.accepts(&options));
+    }
 
     #[test]
     fn engine_identity() {

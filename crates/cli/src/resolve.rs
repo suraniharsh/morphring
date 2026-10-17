@@ -130,6 +130,13 @@ fn choose_preset(
             // Conversions first, so a "Rotate" group can't hide your own
             // "Rotate" preset; a group is only found to say what it holds.
             if let Some(found) = preset::find_conversion(&library.presets, key) {
+                // Same rule as the ring's greyed slice: better a clear "not
+                // yet" than an H.264 file wearing a `_hevc` name tag.
+                if let Some(reason) = found.unsupported_mode() {
+                    return Err(UsageError(format!(
+                        "Preset '{key}' is not supported yet ({reason})."
+                    )));
+                }
                 return Ok(found.clone());
             }
             match preset::find(&library.presets, key) {
