@@ -36,6 +36,36 @@ impl fmt::Display for FormatId {
     }
 }
 
+/// Which routes an edge may take part in, judged by the format the job's file
+/// started as. Ported from the two flags on Filee's `ConversionEdge`
+/// (`src/Filee.Core/Conversion/IConverter.cs`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub struct EdgeFlags {
+    /// Used only in routes that start from a raster image (category `Image`).
+    /// Image tracing may follow `icns -> png`, but must never redraw a PDF or a
+    /// video frame that happened to become a PNG along the way.
+    pub image_sources_only: bool,
+    /// Never used in routes that start from a raster image. `pdf -> svg`
+    /// through LibreOffice keeps a PDF's vectors, but a photo that went through
+    /// a PDF would only come back as a picture inside an SVG.
+    pub not_for_image_sources: bool,
+}
+
+impl EdgeFlags {
+    /// No restriction: the edge is usable in every route.
+    pub const NONE: Self = Self {
+        image_sources_only: false,
+        not_for_image_sources: false,
+    };
+
+    /// Whether an edge with these flags may be used in a route whose source
+    /// file is (`true`) or is not (`false`) a raster image.
+    pub const fn allows(self, image_source: bool) -> bool {
+        !((self.image_sources_only && !image_source)
+            || (self.not_for_image_sources && image_source))
+    }
+}
+
 /// One direct conversion an engine can perform, for example `docx -> pdf`.
 ///
 /// `from` may equal `to` (a self edge, used to re-encode or resize).
@@ -45,6 +75,8 @@ pub struct Edge {
     pub to: FormatId,
     /// Relative cost used by the planner; multi-step routes add up their costs.
     pub cost: u32,
+    /// Which routes the edge may take part in; none by default.
+    pub flags: EdgeFlags,
 }
 
 impl Edge {
@@ -62,7 +94,20 @@ impl Edge {
             from: FormatId::new(from),
             to: FormatId::new(to),
             cost,
+            flags: EdgeFlags::NONE,
         }
+    }
+
+    /// The same edge, usable only in routes that start from a raster image.
+    pub const fn image_sources_only(mut self) -> Self {
+        self.flags.image_sources_only = true;
+        self
+    }
+
+    /// The same edge, never used in routes that start from a raster image.
+    pub const fn not_for_image_sources(mut self) -> Self {
+        self.flags.not_for_image_sources = true;
+        self
     }
 }
 
@@ -149,6 +194,46 @@ pub trait Merger: Send + Sync {
     ) -> Result<Vec<PathBuf>, EngineError>;
 }
 
+/// Packs many files, unchanged, into one archive ("Compress into one
+/// archive"). Ported from Filee's `IFileCombiner`; the job runner uses it when
+/// a preset sets `archive.combine_into_one`.
+pub trait Combiner: Send + Sync {
+    /// True when files can be packed into `format` right now (for example the
+    /// tool it needs is installed).
+    fn can_combine_into(&self, format: FormatId) -> bool;
+
+    /// Writes every file of `inputs` into one archive of `format`, each under
+    /// its own name, and returns the files actually written.
+    ///
+    /// The same rules as [`Converter::convert`] apply.
+    fn combine(
+        &self,
+        inputs: &[PathBuf],
+        format: FormatId,
+        options: &ConvertOptions,
+        out: &mut dyn OutputAllocator,
+        progress: &dyn Fn(f32),
+        cancel: &CancelToken,
+    ) -> Result<Vec<PathBuf>, EngineError>;
+}
+
+/// Writes TIFF pages (and every page of multi-page TIFFs) into one multi-page
+/// TIFF, in order. Ported from Filee's `ITiffMerger`; the job runner uses it
+/// when a preset sets `image.multi_page_tiff`.
+pub trait TiffMerger: Send + Sync {
+    /// Merges `inputs`, in order, and returns the files actually written.
+    ///
+    /// The same rules as [`Converter::convert`] apply.
+    fn merge_tiff(
+        &self,
+        inputs: &[PathBuf],
+        options: &ImageOptions,
+        out: &mut dyn OutputAllocator,
+        progress: &dyn Fn(f32),
+        cancel: &CancelToken,
+    ) -> Result<Vec<PathBuf>, EngineError>;
+}
+
 /// Whether an engine can currently be used.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum EngineStatus {
@@ -217,6 +302,16 @@ pub trait Converter: Send + Sync {
 
     /// The engine's merge mode, if it has one.
     fn merger(&self) -> Option<&dyn Merger> {
+        None
+    }
+
+    /// The engine's "many files into one archive" mode, if it has one.
+    fn combiner(&self) -> Option<&dyn Combiner> {
+        None
+    }
+
+    /// The engine's multi-page TIFF mode, if it has one.
+    fn tiff_merger(&self) -> Option<&dyn TiffMerger> {
         None
     }
 
@@ -360,5 +455,21 @@ mod tests {
         assert_eq!(edge.cost, 10);
         assert_eq!(edge.from.as_str(), "png");
         assert_eq!(Edge::with_cost("pptx", "pdf", 0).cost, 0);
+        assert_eq!(edge.flags, EdgeFlags::NONE);
+    }
+
+    #[test]
+    fn edge_flags_gate_image_sources() {
+        let trace = Edge::with_cost("png", "svg", 40).image_sources_only();
+        assert!(trace.flags.image_sources_only);
+        assert!(trace.flags.allows(true));
+        assert!(!trace.flags.allows(false));
+
+        let office = Edge::with_cost("pdf", "svg", 25).not_for_image_sources();
+        assert!(office.flags.not_for_image_sources);
+        assert!(!office.flags.allows(true));
+        assert!(office.flags.allows(false));
+
+        assert!(EdgeFlags::NONE.allows(true) && EdgeFlags::NONE.allows(false));
     }
 }

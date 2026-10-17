@@ -6,10 +6,16 @@
 //! and then hit the hop cap, hiding a valid route behind it. The graph here is
 //! tiny, so we simply walk every simple path of up to three hops and keep the
 //! cheapest. Exact, deterministic, and short enough to read over coffee.
+//!
+//! Two of Filee's refinements ride along: edge flags that keep image tracing
+//! away from anything that was not a raster image to begin with
+//! (RoutePlanner.cs:62-81), and [`EngineTuning`], the user's engine priority
+//! and per-edge cost overrides (ConverterCatalog.cs:53-69).
 
 use std::collections::HashMap;
 
-use crate::contract::{Converter, FormatId};
+use crate::contract::{Converter, EdgeFlags, FormatId};
+use crate::formats::{self, Category};
 
 /// Longest route the planner returns. Longer chains are slow and lossy.
 pub const MAX_HOPS: usize = 3;
@@ -44,14 +50,60 @@ impl Route {
     }
 }
 
+/// How the user bent the planner's defaults: which engine wins a tie, and
+/// edges whose cost they want different.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct EngineTuning {
+    /// Engine ids, first wins. Empty means registry order. Engines missing
+    /// from a non-empty list rank after every listed one, like Filee's.
+    pub priority: Vec<String>,
+    /// `(engine id, from, to, cost)`: that engine's `from -> to` edge costs
+    /// `cost` instead of what the engine says. The priority penalty still applies.
+    pub cost_overrides: Vec<(String, String, String, u32)>,
+}
+
+impl EngineTuning {
+    /// The priority penalty of the engine with id `id`, registered at
+    /// position `index`, capped at [`MAX_PRIORITY_PENALTY`].
+    pub fn penalty(&self, id: &str, index: usize) -> u32 {
+        let rank = if self.priority.is_empty() {
+            index
+        } else {
+            self.priority
+                .iter()
+                .position(|p| p.eq_ignore_ascii_case(id))
+                .unwrap_or(self.priority.len())
+        };
+        u32::try_from(rank)
+            .unwrap_or(u32::MAX)
+            .min(MAX_PRIORITY_PENALTY)
+    }
+
+    /// The cost the user wants for engine `id`'s `from -> to` edge, if any.
+    /// The last matching override wins.
+    pub fn cost_override(&self, id: &str, from: FormatId, to: FormatId) -> Option<u32> {
+        self.cost_overrides
+            .iter()
+            .rev()
+            .find(|(engine, f, t, _)| {
+                engine.eq_ignore_ascii_case(id)
+                    && f.eq_ignore_ascii_case(from.as_str())
+                    && t.eq_ignore_ascii_case(to.as_str())
+            })
+            .map(|(.., cost)| *cost)
+    }
+}
+
 /// Plans routes over a fixed set of engines. Build one per job.
 #[derive(Clone, Debug, Default)]
 pub struct Planner {
     /// Every usable edge, in registration order (engine order, then edge order).
     edges: Vec<Hop>,
     /// For each source format, the cheapest edge to each target format, ordered
-    /// by the target's first appearance among that source's edges.
-    adjacency: HashMap<FormatId, Vec<usize>>,
+    /// by the target's first appearance among that source's edges. Index 0 is
+    /// for routes from a non-image source, index 1 for routes from a raster
+    /// image: each only holds the edges its flags allow.
+    adjacency: [HashMap<FormatId, Vec<usize>>; 2],
 }
 
 impl Planner {
@@ -60,35 +112,61 @@ impl Planner {
     ///
     /// An engine's priority is its position in `engines`: earlier engines win ties.
     pub fn new(engines: &[&dyn Converter], assume_all_available: bool) -> Self {
+        Self::with_tuning(engines, assume_all_available, &EngineTuning::default())
+    }
+
+    /// Like [`Planner::new`], with the user's engine priority and cost
+    /// overrides applied. `Hop::engine` still indexes into `engines`.
+    pub fn with_tuning(
+        engines: &[&dyn Converter],
+        assume_all_available: bool,
+        tuning: &EngineTuning,
+    ) -> Self {
         let mut edges = Vec::new();
+        // Flags only matter while building the adjacency, so `Hop` stays a
+        // plain step and they live here, index for index with `edges`.
+        let mut flags: Vec<EdgeFlags> = Vec::new();
         for (index, engine) in engines.iter().enumerate() {
             if !assume_all_available && !engine.status().is_available() {
                 continue;
             }
-            let penalty = u32::try_from(index)
-                .unwrap_or(u32::MAX)
-                .min(MAX_PRIORITY_PENALTY);
-            edges.extend(engine.edges().iter().map(|edge| Hop {
-                engine: index,
-                from: edge.from,
-                to: edge.to,
-                cost: edge.cost.saturating_add(penalty),
-            }));
+            let id = engine.id();
+            let penalty = tuning.penalty(id, index);
+            for edge in engine.edges() {
+                let cost = tuning
+                    .cost_override(id, edge.from, edge.to)
+                    .unwrap_or(edge.cost);
+                edges.push(Hop {
+                    engine: index,
+                    from: edge.from,
+                    to: edge.to,
+                    cost: cost.saturating_add(penalty),
+                });
+                flags.push(edge.flags);
+            }
         }
 
         // Parallel edges (two engines doing png -> jpg) collapse into the
         // cheapest one, first registered on a tie. Any optimal path can swap in
         // that edge for free, so the search stays exact while the walk shrinks
-        // from "every engine combination" to "every format combination".
-        let mut adjacency: HashMap<FormatId, Vec<usize>> = HashMap::new();
-        for (index, edge) in edges.iter().enumerate() {
-            let out = adjacency.entry(edge.from).or_default();
-            match out.iter_mut().find(|i| edges[**i].to == edge.to) {
-                Some(best) if edges[*best].cost <= edge.cost => {}
-                Some(best) => *best = index,
-                None => out.push(index),
+        // from "every engine combination" to "every format combination". Done
+        // once per kind of source, because a flagged edge may be the cheapest
+        // for images and not even allowed for anything else.
+        let adjacency = [false, true].map(|image_source| {
+            let mut adjacency: HashMap<FormatId, Vec<usize>> = HashMap::new();
+            for (index, edge) in edges.iter().enumerate() {
+                if !flags[index].allows(image_source) {
+                    continue;
+                }
+                let out = adjacency.entry(edge.from).or_default();
+                match out.iter_mut().find(|i| edges[**i].to == edge.to) {
+                    Some(best) if edges[*best].cost <= edge.cost => {}
+                    Some(best) => *best = index,
+                    None => out.push(index),
+                }
             }
-        }
+            adjacency
+        });
 
         Self { edges, adjacency }
     }
@@ -98,6 +176,7 @@ impl Planner {
     ///
     /// Same-format targets only use an explicit self edge. On equal cost the
     /// route with fewer hops wins, then the one found first in registration order.
+    /// Edge flags are judged by `from`: whether it is a raster image.
     pub fn plan(&self, from: FormatId, to: FormatId) -> Option<Route> {
         if from == to {
             return self.self_edge(from).map(|hop| Route {
@@ -165,16 +244,19 @@ impl Planner {
 
     /// Calls `visit` with every simple path of 1 to `MAX_HOPS` hops starting at
     /// `from` (no format visited twice, no self edges), depth first in
-    /// registration order. Paths are edge indices; the cost is their sum.
+    /// registration order, using only the edges whose flags allow a route
+    /// from `from`. Paths are edge indices; the cost is their sum.
     fn walk(&self, from: FormatId, visit: &mut dyn FnMut(&[usize], u32)) {
+        let adjacency = &self.adjacency[usize::from(is_image(from))];
         let mut path = Vec::with_capacity(MAX_HOPS);
         let mut seen = Vec::with_capacity(MAX_HOPS + 1);
         seen.push(from);
-        self.walk_from(from, 0, &mut path, &mut seen, visit);
+        self.walk_from(adjacency, from, 0, &mut path, &mut seen, visit);
     }
 
     fn walk_from(
         &self,
+        adjacency: &HashMap<FormatId, Vec<usize>>,
         node: FormatId,
         cost: u32,
         path: &mut Vec<usize>,
@@ -184,7 +266,7 @@ impl Planner {
         if path.len() == MAX_HOPS {
             return;
         }
-        let Some(out) = self.adjacency.get(&node) else {
+        let Some(out) = adjacency.get(&node) else {
             return;
         };
         for &index in out {
@@ -198,11 +280,17 @@ impl Planner {
             path.push(index);
             seen.push(edge.to);
             visit(path, cost);
-            self.walk_from(edge.to, cost, path, seen, visit);
+            self.walk_from(adjacency, edge.to, cost, path, seen, visit);
             seen.pop();
             path.pop();
         }
     }
+}
+
+/// True when `format` is a raster image, which is what edge flags ask about.
+/// Unknown formats are not images (fake test formats land here, harmlessly).
+fn is_image(format: FormatId) -> bool {
+    formats::find_by_id(format.as_str()).is_some_and(|f| f.category == Category::Image)
 }
 
 /// True when the candidate path strictly beats the best so far: cheaper, or as
@@ -214,6 +302,7 @@ fn better(cost: u32, path: &[usize], best: &(u32, Vec<usize>)) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::contract::Edge;
     use crate::testing::FakeConverter;
 
     fn f(id: &'static str) -> FormatId {
@@ -466,6 +555,186 @@ mod tests {
             ]
         );
         assert!(planner(&engines).targets_from(f("docx")).is_empty());
+    }
+
+    /// A routing-only engine with hand-made edges, flags and all. It never
+    /// converts anything; the planner doesn't ask it to.
+    struct Edges(&'static str, Vec<Edge>);
+
+    impl Converter for Edges {
+        fn id(&self) -> &'static str {
+            self.0
+        }
+        fn display_name(&self) -> &'static str {
+            self.0
+        }
+        fn edges(&self) -> &[Edge] {
+            &self.1
+        }
+        fn status(&self) -> crate::contract::EngineStatus {
+            crate::contract::EngineStatus::Available {
+                path: "/usr/bin/edges".into(),
+                version: "1".into(),
+            }
+        }
+        fn convert(
+            &self,
+            _step: &crate::contract::Step,
+            _out: &mut dyn crate::contract::OutputAllocator,
+            _progress: &dyn Fn(f32),
+            _cancel: &crate::contract::CancelToken,
+        ) -> Result<Vec<std::path::PathBuf>, crate::error::EngineError> {
+            unreachable!("routing only")
+        }
+    }
+
+    fn flagged(engines: &[Edges]) -> Planner {
+        let refs: Vec<&dyn Converter> = engines.iter().map(|e| e as &dyn Converter).collect();
+        Planner::new(&refs, false)
+    }
+
+    // Ported from RoutePlannerTests.cs:29-51.
+    #[test]
+    fn edges_for_image_sources_only_are_skipped_for_other_sources() {
+        let engines = [
+            Edges(
+                "trace",
+                vec![Edge::with_cost("png", "svg", 40).image_sources_only()],
+            ),
+            Edges(
+                "render",
+                vec![Edge::new("pdf", "png"), Edge::new("icns", "png")],
+            ),
+        ];
+        let p = flagged(&engines);
+        assert_eq!(steps(&p.plan(f("png"), f("svg")).unwrap()), ["png→svg"]);
+        // An ICNS is a raster image too, so it may be traced via PNG.
+        assert_eq!(
+            steps(&p.plan(f("icns"), f("svg")).unwrap()),
+            ["icns→png", "png→svg"]
+        );
+        // A document rendered to PNG is never traced.
+        assert!(p.plan(f("pdf"), f("svg")).is_none());
+        assert!(!p.targets_from(f("pdf")).iter().any(|(t, _)| *t == f("svg")));
+    }
+
+    #[test]
+    fn edges_not_for_image_sources_leave_images_to_tracing() {
+        let engines = [
+            Edges(
+                "trace",
+                vec![Edge::with_cost("png", "svg", 40).image_sources_only()],
+            ),
+            Edges(
+                "pdf",
+                vec![
+                    Edge::new("png", "pdf"),
+                    Edge::with_cost("pdf", "svg", 25).not_for_image_sources(),
+                ],
+            ),
+        ];
+        let p = flagged(&engines);
+        // png→pdf→svg would cost 11 + 26 = 37 with penalties, less than
+        // tracing's 40, but the flag keeps the photo away from LibreOffice's
+        // vector export.
+        assert_eq!(steps(&p.plan(f("png"), f("svg")).unwrap()), ["png→svg"]);
+        assert_eq!(steps(&p.plan(f("pdf"), f("svg")).unwrap()), ["pdf→svg"]);
+    }
+
+    #[test]
+    fn a_flagged_edge_does_not_shadow_a_parallel_plain_one() {
+        // The cheap edge is image-only; a PDF must still get the plain one,
+        // even though both collapse to the same format pair.
+        let engines = [
+            Edges(
+                "trace",
+                vec![Edge::with_cost("png", "svg", 5).image_sources_only()],
+            ),
+            Edges(
+                "plain",
+                vec![Edge::new("pdf", "png"), Edge::with_cost("png", "svg", 30)],
+            ),
+        ];
+        let p = flagged(&engines);
+        let route = p.plan(f("pdf"), f("svg")).unwrap();
+        assert_eq!(route.engines().collect::<Vec<_>>(), [1, 1]);
+        assert_eq!(p.plan(f("png"), f("svg")).unwrap().cost, 5);
+    }
+
+    fn tuned(engines: &[FakeConverter], tuning: &EngineTuning) -> Planner {
+        let refs: Vec<&dyn Converter> = engines.iter().map(|e| e as &dyn Converter).collect();
+        Planner::with_tuning(&refs, false, tuning)
+    }
+
+    #[test]
+    fn default_tuning_is_registry_order() {
+        let engines = [
+            FakeConverter::new("libreoffice").edge("docx", "pdf", 10),
+            FakeConverter::new("word").edge("docx", "pdf", 10),
+        ];
+        let default = tuned(&engines, &EngineTuning::default());
+        assert_eq!(
+            default.plan(f("docx"), f("pdf")),
+            planner(&engines).plan(f("docx"), f("pdf"))
+        );
+    }
+
+    #[test]
+    fn reordering_the_priority_flips_a_tie() {
+        let engines = [
+            FakeConverter::new("libreoffice").edge("docx", "pdf", 10),
+            FakeConverter::new("word").edge("docx", "pdf", 10),
+        ];
+        let tuning = EngineTuning {
+            priority: vec!["WORD".into(), "libreoffice".into()],
+            ..EngineTuning::default()
+        };
+        let route = tuned(&engines, &tuning).plan(f("docx"), f("pdf")).unwrap();
+        assert_eq!(engines[route.hops[0].engine].id(), "word");
+        assert_eq!(route.cost, 10);
+    }
+
+    #[test]
+    fn engines_missing_from_the_priority_rank_after_the_listed_ones() {
+        let tuning = EngineTuning {
+            priority: vec!["a".into(), "b".into()],
+            ..EngineTuning::default()
+        };
+        assert_eq!(tuning.penalty("a", 5), 0);
+        assert_eq!(tuning.penalty("b", 0), 1);
+        assert_eq!(tuning.penalty("stranger", 0), 2);
+        let long = EngineTuning {
+            priority: (0..20).map(|i| format!("e{i}")).collect(),
+            ..EngineTuning::default()
+        };
+        assert_eq!(long.penalty("e15", 0), MAX_PRIORITY_PENALTY);
+        assert_eq!(EngineTuning::default().penalty("any", 3), 3);
+        assert_eq!(
+            EngineTuning::default().penalty("any", 30),
+            MAX_PRIORITY_PENALTY
+        );
+    }
+
+    #[test]
+    fn a_cost_override_flips_a_route() {
+        let engines = [
+            FakeConverter::new("soffice").edge("pptx", "pdf", 30),
+            FakeConverter::new("other").edge("pptx", "pdf", 10),
+        ];
+        let route = tuned(&engines, &EngineTuning::default())
+            .plan(f("pptx"), f("pdf"))
+            .unwrap();
+        assert_eq!(engines[route.hops[0].engine].id(), "other");
+
+        let tuning = EngineTuning {
+            cost_overrides: vec![("soffice".into(), "pptx".into(), "pdf".into(), 0)],
+            ..EngineTuning::default()
+        };
+        let route = tuned(&engines, &tuning).plan(f("pptx"), f("pdf")).unwrap();
+        assert_eq!(engines[route.hops[0].engine].id(), "soffice");
+        assert_eq!(route.cost, 0);
+        // Only the named engine's edge moves.
+        assert_eq!(tuning.cost_override("other", f("pptx"), f("pdf")), None);
     }
 
     #[test]

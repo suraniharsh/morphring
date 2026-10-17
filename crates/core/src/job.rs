@@ -2,10 +2,13 @@
 //! parallel, with a concurrency limit per engine.
 //!
 //! Ported from Filee's `src/Filee.Core/Conversion/JobQueue.cs`, minus the
-//! queue itself (the CLI runs a single job). The merge mode lives next door in
-//! [`merge`]; multi-page TIFF and combine-into-one-archive are still to come.
+//! queue itself (the CLI runs a single job). The job modes live next door:
+//! merge in [`merge`], multi-page TIFF in [`tiff`] and combine-into-one-archive
+//! in [`combine`] (the last two are still hooks waiting for their engines).
 
+mod combine;
 mod merge;
+mod tiff;
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -130,7 +133,12 @@ pub fn run_job(
         work_dir: create_work_dir(),
     };
 
-    if let Some(results) = merge::try_run(&job, files) {
+    // Filee's order (JobQueue.cs:81-86): merge, then multi-page TIFF, then
+    // combine. The first mode that claims the job runs all of it.
+    if let Some(results) = merge::try_run(&job, files)
+        .or_else(|| tiff::try_run(&job, files))
+        .or_else(|| combine::try_run(&job, files))
+    {
         return results;
     }
 
@@ -173,6 +181,35 @@ pub fn run_job(
                 },
                 outputs: Vec::new(),
             })
+        })
+        .collect()
+}
+
+/// Fails every file of a job with `detail`, for a job mode that is wired up
+/// but not implemented yet. Each file still gets its started and finished
+/// events, so nobody's progress bar waits for Godot.
+fn not_yet_supported(job: &Job<'_>, files: &[PathBuf], detail: &str) -> Vec<FileResult> {
+    files
+        .iter()
+        .enumerate()
+        .map(|(index, source)| {
+            job.emit(JobEvent::FileStarted {
+                index,
+                source: source.clone(),
+            });
+            let result = FileResult {
+                source: source.clone(),
+                state: FileState::Failed {
+                    key: ErrorKey::ConversionFailed,
+                    detail: detail.to_owned(),
+                },
+                outputs: Vec::new(),
+            };
+            job.emit(JobEvent::FileFinished {
+                index,
+                result: result.clone(),
+            });
+            result
         })
         .collect()
 }
