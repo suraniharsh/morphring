@@ -29,21 +29,26 @@ pub(crate) enum Device {
     Jpeg,
     /// 24-bit RGB TIFF, uncompressed.
     Tiff24nc,
+    /// A real PDF: vectors stay vectors, text stays text, and every page
+    /// lands in the one file.
+    PdfWrite,
 }
 
 impl Device {
-    /// The device for converting `from` to the image format `to`, if we
-    /// render that pair at all.
+    /// The device for converting `from` to `to`, if we handle that pair at
+    /// all.
     ///
     /// PNG gets the alpha device for EPS, PS and AI (Filee's `pngalpha`,
     /// which keeps the drawing's transparent background) and the opaque one
-    /// for PDF, where white paper is the honest answer.
+    /// for PDF, where white paper is the honest answer. EPS, PS and AI to PDF
+    /// go through `pdfwrite`, so nothing gets flattened into pixels.
     pub(crate) fn for_pair(from: &str, to: &str) -> Option<Self> {
         let vector = matches!(from, "eps" | "ps" | "ai");
         if !vector && from != "pdf" {
             return None;
         }
         match to {
+            "pdf" if vector => Some(Self::PdfWrite),
             "png" if vector => Some(Self::PngAlpha),
             "png" => Some(Self::Png16m),
             "jpg" | "jpeg" => Some(Self::Jpeg),
@@ -59,6 +64,7 @@ impl Device {
             Self::Png16m => "png16m",
             Self::Jpeg => "jpeg",
             Self::Tiff24nc => "tiff24nc",
+            Self::PdfWrite => "pdfwrite",
         }
     }
 
@@ -68,9 +74,20 @@ impl Device {
             Self::PngAlpha | Self::Png16m => "png",
             Self::Jpeg => "jpg",
             Self::Tiff24nc => "tiff",
+            Self::PdfWrite => "pdf",
         }
     }
+
+    /// True for the image devices, which write one file per page; `pdfwrite`
+    /// keeps the whole document together.
+    pub(crate) fn is_raster(self) -> bool {
+        self != Self::PdfWrite
+    }
 }
+
+/// The file `pdfwrite` writes inside the run's temp folder. A plain name with
+/// no `%` in it, for the same reason as [`output_pattern`].
+pub(crate) const PDF_OUTPUT: &str = "out.pdf";
 
 /// One Ghostscript render run.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -124,6 +141,48 @@ pub(crate) fn render_args(spec: &RenderSpec, input: &Path) -> Vec<OsString> {
     args.push("-f".into());
     args.push(input.into());
     args
+}
+
+/// The full argument list for turning `input` into one vector PDF.
+///
+/// `eps_crop` trims the page to the EPS bounding box (EPS and PostScript
+/// `.ai`); `page_list` is gs's `-sPageList` (`1,3,5`) for a PDF-based `.ai`
+/// when only some pages were asked for. No resolution here: the whole point
+/// is that nothing gets rasterised.
+pub(crate) fn pdfwrite_args(
+    input: &Path,
+    eps_crop: bool,
+    page_list: Option<&str>,
+) -> Vec<OsString> {
+    let mut args: Vec<OsString> = BASE.iter().map(OsString::from).collect();
+    args.push("-sstdout=%stderr".into());
+    args.push(format!("-sDEVICE={}", Device::PdfWrite.name()).into());
+    if eps_crop {
+        args.push("-dEPSCrop".into());
+    }
+    if let Some(list) = page_list {
+        args.push(format!("-sPageList={list}").into());
+    }
+    args.push("-o".into());
+    args.push(PDF_OUTPUT.into());
+    args.push("-f".into());
+    args.push(input.into());
+    args
+}
+
+/// The `-sPageList` value for the 1-based `pages` out of `count`, or `None`
+/// when every page is wanted (gs's default, so no need to spell it out).
+pub(crate) fn page_list(pages: &[usize], count: usize) -> Option<String> {
+    if pages.len() == count {
+        return None;
+    }
+    Some(
+        pages
+            .iter()
+            .map(usize::to_string)
+            .collect::<Vec<_>>()
+            .join(","),
+    )
 }
 
 /// The arguments that make gs print a PDF's page count and nothing else.
@@ -203,6 +262,14 @@ pub(crate) fn ai_kind(head: &[u8]) -> AiKind {
     }
 }
 
+/// Whether a run from `from` (with `ai` saying what an `.ai` file really is)
+/// should crop to the EPS bounding box: EPS and PostScript `.ai` do, since
+/// their page size lives in `%%BoundingBox`; PS and PDF-based `.ai` already
+/// know how big their pages are.
+pub(crate) fn wants_eps_crop(from: &str, ai: Option<AiKind>) -> bool {
+    from == "eps" || ai == Some(AiKind::PostScript)
+}
+
 /// The interesting bit of what gs said before giving up: its `Error:` line
 /// when there is one (the operand stack dump after it helps nobody), or the
 /// usual short summary otherwise.
@@ -244,6 +311,11 @@ mod tests {
             assert_eq!(Device::for_pair(from, "jpg"), Some(Device::Jpeg));
             assert_eq!(Device::for_pair(from, "tiff"), Some(Device::Tiff24nc));
         }
+        for from in ["eps", "ps", "ai"] {
+            assert_eq!(Device::for_pair(from, "pdf"), Some(Device::PdfWrite));
+        }
+        // PDF to PDF is not a conversion, however much pdfwrite would enjoy it.
+        assert_eq!(Device::for_pair("pdf", "pdf"), None);
         assert_eq!(Device::for_pair("pdf", "webp"), None);
         assert_eq!(Device::for_pair("svg", "png"), None);
     }
@@ -255,11 +327,66 @@ mod tests {
             Device::Png16m,
             Device::Jpeg,
             Device::Tiff24nc,
+            Device::PdfWrite,
         ];
         let names: Vec<_> = all.iter().map(|d| d.name()).collect();
         let exts: Vec<_> = all.iter().map(|d| d.ext()).collect();
-        assert_eq!(names, ["pngalpha", "png16m", "jpeg", "tiff24nc"]);
-        assert_eq!(exts, ["png", "png", "jpg", "tiff"]);
+        assert_eq!(
+            names,
+            ["pngalpha", "png16m", "jpeg", "tiff24nc", "pdfwrite"]
+        );
+        assert_eq!(exts, ["png", "png", "jpg", "tiff", "pdf"]);
+        let raster: Vec<_> = all.iter().map(|d| d.is_raster()).collect();
+        assert_eq!(raster, [true, true, true, true, false]);
+    }
+
+    #[test]
+    fn eps_to_pdf_uses_pdfwrite_with_the_bounding_box() {
+        assert_eq!(
+            strings(&pdfwrite_args(Path::new("/in/a.eps"), true, None)),
+            [
+                "-dSAFER",
+                "-dBATCH",
+                "-dNOPAUSE",
+                "-dQUIET",
+                "-sstdout=%stderr",
+                "-sDEVICE=pdfwrite",
+                "-dEPSCrop",
+                "-o",
+                "out.pdf",
+                "-f",
+                "/in/a.eps",
+            ]
+        );
+    }
+
+    #[test]
+    fn ps_to_pdf_keeps_its_pages_and_never_rasterises() {
+        let args = strings(&pdfwrite_args(Path::new("/in/a.ps"), false, None));
+        assert!(args.contains(&"-sDEVICE=pdfwrite".to_string()));
+        assert!(!args.iter().any(|a| a == "-dEPSCrop"
+            || a.starts_with("-r")
+            || a.starts_with("-sPageList")
+            || a.starts_with("-dFirstPage")
+            || a.contains('%') && a != "-sstdout=%stderr"));
+        let pick = strings(&pdfwrite_args(Path::new("/in/a.ai"), false, Some("1,3")));
+        assert!(pick.contains(&"-sPageList=1,3".to_string()));
+    }
+
+    #[test]
+    fn only_eps_and_postscript_ai_are_cropped() {
+        assert!(wants_eps_crop("eps", None));
+        assert!(wants_eps_crop("ai", Some(AiKind::PostScript)));
+        assert!(!wants_eps_crop("ai", Some(AiKind::Pdf)));
+        assert!(!wants_eps_crop("ps", None));
+        assert!(!wants_eps_crop("pdf", None));
+    }
+
+    #[test]
+    fn page_list_is_left_out_when_every_page_is_wanted() {
+        assert_eq!(page_list(&[1, 2, 3], 3), None);
+        assert_eq!(page_list(&[1, 3], 3).as_deref(), Some("1,3"));
+        assert_eq!(page_list(&[2], 5).as_deref(), Some("2"));
     }
 
     #[test]

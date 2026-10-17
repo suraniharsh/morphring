@@ -149,3 +149,23 @@ fn eps_to_webp_renders_a_png_first() {
     assert_eq!(steps.len(), 2, "{steps:?}");
     assert_eq!(steps[0], "ghostscript(eps->png)");
 }
+
+#[test]
+fn eps_ps_and_ai_become_pdf_through_ghostscript_pdfwrite() {
+    let g = Graph::dream();
+    for from in ["eps", "ps", "ai"] {
+        // Straight through pdfwrite, not a PNG wrapped in a PDF.
+        assert_eq!(g.steps(from, "pdf"), [format!("ghostscript({from}->pdf)")]);
+    }
+}
+
+#[test]
+fn eps_ps_and_ai_to_txt_go_through_a_vector_pdf() {
+    let g = Graph::dream();
+    for from in ["eps", "ps", "ai"] {
+        let steps = g.steps(from, "txt");
+        assert_eq!(steps.len(), 2, "{steps:?}");
+        assert_eq!(steps[0], format!("ghostscript({from}->pdf)"));
+        assert!(steps[1].ends_with("(pdf->txt)"), "{steps:?}");
+    }
+}

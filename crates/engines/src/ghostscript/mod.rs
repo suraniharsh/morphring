@@ -1,5 +1,6 @@
 //! The Ghostscript engine: PDF, EPS, PostScript and Illustrator files rendered
-//! to PNG, JPEG or TIFF through `gs`.
+//! to PNG, JPEG or TIFF through `gs`, and EPS, PostScript and Illustrator
+//! files turned into vector PDF through `pdfwrite`.
 //!
 //! Ported from Filee's `GhostscriptConverter` (reverse-engineering/02, section
 //! 8.2). EPS, PS and AI render through `pngalpha`, so the background stays
@@ -7,6 +8,10 @@
 //! is missing, because its edges cost a little more. Every page lands as its
 //! own file with a `_p{n}` suffix, exactly like Poppler, so nobody can tell
 //! which engine did the work. (Ghostscript would like the credit, though.)
+//!
+//! PDF output is the exception: `pdfwrite` keeps the vectors and the text and
+//! writes the whole document as one file, because a two-page PostScript file
+//! deserves a two-page PDF, not two blurry one-page ones.
 
 mod args;
 
@@ -47,8 +52,10 @@ const NOT_AN_AI_FILE: &str =
     "The file is not an Adobe Illustrator document (neither PDF nor PostScript inside).";
 
 /// The edges: vector sources at the default 10, PDF at 12 so Poppler (10)
-/// wins whenever it's installed and gs only steps in when it isn't.
-static EDGES: [Edge; 12] = [
+/// wins whenever it's installed and gs only steps in when it isn't. The
+/// vector-to-PDF edges cost 10 too, which beats rendering a PNG and wrapping
+/// it in a PDF (20) and keeps the text where `pdftotext` can find it.
+static EDGES: [Edge; 15] = [
     Edge::with_cost("eps", "png", 10),
     Edge::with_cost("eps", "jpg", 10),
     Edge::with_cost("eps", "tiff", 10),
@@ -58,6 +65,9 @@ static EDGES: [Edge; 12] = [
     Edge::with_cost("ai", "png", 10),
     Edge::with_cost("ai", "jpg", 10),
     Edge::with_cost("ai", "tiff", 10),
+    Edge::with_cost("eps", "pdf", 10),
+    Edge::with_cost("ps", "pdf", 10),
+    Edge::with_cost("ai", "pdf", 10),
     Edge::with_cost("pdf", "png", 12),
     Edge::with_cost("pdf", "jpg", 12),
     Edge::with_cost("pdf", "tiff", 12),
@@ -122,7 +132,7 @@ impl Converter for GhostscriptEngine {
             None
         };
         let paged = step.from.as_str() == "pdf" || ai == Some(AiKind::Pdf);
-        let eps_crop = step.from.as_str() == "eps" || ai == Some(AiKind::PostScript);
+        let eps_crop = args::wants_eps_crop(step.from.as_str(), ai);
 
         let Some(found) = discovery::find(Tool::Ghostscript) else {
             return Err(EngineError::NotInstalled {
@@ -162,6 +172,18 @@ impl Converter for GhostscriptEngine {
         } else {
             None
         };
+        if !device.is_raster() {
+            let range = count.map(|count| {
+                let pages: Vec<usize> = page_range::parse(&step.options.pdf.page_range, count)
+                    .into_iter()
+                    .map(|index| index + 1)
+                    .collect();
+                (pages, count)
+            });
+            let written = run.document(tmp.path(), range, out, progress)?;
+            progress(1.0);
+            return Ok(written);
+        }
         let written = match count {
             Some(count) => run.pages(
                 tmp.path(),
@@ -289,6 +311,38 @@ impl Runner<'_> {
         Ok(written)
     }
 
+    /// Writes the whole document as one vector PDF through `pdfwrite`.
+    /// `range` is the selected 1-based pages out of the page count, known
+    /// only for a PDF-based `.ai`; PostScript goes through whole, like it
+    /// does when rendering.
+    fn document(
+        &self,
+        dir: &Path,
+        range: Option<(Vec<usize>, usize)>,
+        out: &mut dyn OutputAllocator,
+        progress: &dyn Fn(f32),
+    ) -> Result<Vec<PathBuf>, EngineError> {
+        let page_list = match &range {
+            Some((pages, _)) if pages.is_empty() => return Ok(Vec::new()),
+            Some((pages, count)) => args::page_list(pages, *count),
+            None => None,
+        };
+        // One document, one name: no _p suffixes for a file that keeps its
+        // pages together.
+        let Some(target) = out.allocate(self.ext, "") else {
+            return Ok(Vec::new());
+        };
+        let argv = args::pdfwrite_args(self.input, self.spec.eps_crop, page_list.as_deref());
+        self.run_gs(dir, &argv, progress)?;
+        let written = dir.join(args::PDF_OUTPUT);
+        match fs::metadata(&written) {
+            Ok(meta) if meta.len() > 0 => {}
+            _ => return Err(self.failure("Ghostscript wrote no PDF".to_owned())),
+        }
+        process::move_into_place(&written, &target)?;
+        Ok(vec![target])
+    }
+
     /// One gs run over `pages` (or all of them) into `dir`; returns the files
     /// it wrote by run-relative index, starting at 1.
     fn render(
@@ -297,19 +351,35 @@ impl Runner<'_> {
         pages: Option<(usize, usize)>,
         progress: &dyn Fn(f32),
     ) -> Result<BTreeMap<usize, PathBuf>, EngineError> {
-        if self.cancel.is_cancelled() {
-            return Err(EngineError::Cancelled);
-        }
         let spec = RenderSpec {
             pages,
             ..self.spec.clone()
         };
         let argv = args::render_args(&spec, self.input);
+        self.run_gs(dir, &argv, progress)?;
+        let rendered = collect(dir, spec.device.ext())?;
+        if rendered.is_empty() {
+            return Err(self.failure("Ghostscript wrote no image".to_owned()));
+        }
+        Ok(rendered)
+    }
+
+    /// Runs gs with `argv` inside `dir`, turning its many ways of failing
+    /// into engine errors.
+    fn run_gs(
+        &self,
+        dir: &Path,
+        argv: &[OsString],
+        progress: &dyn Fn(f32),
+    ) -> Result<(), EngineError> {
+        if self.cancel.is_cancelled() {
+            return Err(EngineError::Cancelled);
+        }
         // gs works in silence, so the ring gets an estimate meanwhile.
         let result = Estimate::during(progress, TYPICAL, || {
             process::run(
                 self.program,
-                &argv,
+                argv,
                 RunOptions {
                     timeout: Some(TIMEOUT),
                     cwd: Some(dir.to_path_buf()),
@@ -337,11 +407,7 @@ impl Runner<'_> {
             }
             Err(err) => return Err(EngineError::Failed(format!("Ghostscript {err}"))),
         }
-        let rendered = collect(dir, spec.device.ext())?;
-        if rendered.is_empty() {
-            return Err(self.failure("Ghostscript wrote no image".to_owned()));
-        }
-        Ok(rendered)
+        Ok(())
     }
 
     /// A gs failure, with Filee's advice attached for PostScript `.ai` files:
@@ -447,7 +513,13 @@ mod tests {
     #[test]
     fn vector_edges_cost_ten_and_pdf_edges_twelve() {
         let pairs = pairs();
-        assert_eq!(pairs.len(), 12);
+        assert_eq!(pairs.len(), 15);
+        for from in ["eps", "ps", "ai"] {
+            assert!(
+                pairs.contains(&(from.into(), "pdf".into(), 10)),
+                "{from} -> pdf"
+            );
+        }
         for from in ["eps", "ps", "ai", "pdf"] {
             let cost = if from == "pdf" { 12 } else { 10 };
             for to in ["png", "jpg", "tiff"] {

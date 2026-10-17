@@ -265,3 +265,102 @@ fn a_cancelled_conversion_writes_nothing() {
     assert!(matches!(err, EngineError::Cancelled), "{err}");
     assert!(fs::read_dir(&out_dir).expect("list").next().is_none());
 }
+
+/// Runs a poppler helper on `path` and returns its stdout.
+fn poppler(tool: &str, path: &Path) -> String {
+    let output = std::process::Command::new(tool)
+        .arg(path)
+        .output()
+        .unwrap_or_else(|e| panic!("{tool}: {e}"));
+    assert!(
+        output.status.success(),
+        "{tool} failed on {}",
+        path.display()
+    );
+    String::from_utf8_lossy(&output.stdout).into_owned()
+}
+
+/// A two-page PostScript file with real text on both pages.
+const TWO_PAGES: &str = "%!PS-Adobe-3.0\n%%Pages: 2\n\
+%%Page: 1 1\n/Helvetica findfont 24 scalefont setfont\n72 700 moveto (Page one text) show\n\
+newpath 72 600 moveto 300 600 lineto stroke\nshowpage\n\
+%%Page: 2 2\n/Helvetica findfont 24 scalefont setfont\n72 700 moveto (Page two text) show\nshowpage\n%%EOF\n";
+
+#[test]
+fn a_two_page_ps_becomes_one_vector_pdf() {
+    require_engine!("gs");
+    let tmp = TempDir::new().expect("temp dir");
+    let ps = tmp.path().join("v.ps");
+    fs::write(&ps, TWO_PAGES).expect("write");
+    let run = convert_path(ps, "ps", "pdf", ConvertOptions::default());
+    // One file, no _p suffixes: pdfwrite keeps the pages together.
+    assert_eq!(run.names(), ["sample.pdf"]);
+    let pdf = run.output("sample.pdf");
+    assert!(fs::read(&pdf).expect("read").starts_with(b"%PDF-"));
+    assert_progress_rises_to_one(&run.progress);
+    if !common::engine_available("pdfinfo") {
+        println!("SKIP: pdfinfo not found");
+        return;
+    }
+    let info = poppler("pdfinfo", &pdf);
+    let pages = info
+        .lines()
+        .find_map(|l| l.strip_prefix("Pages:"))
+        .map(str::trim);
+    assert_eq!(pages, Some("2"), "{info}");
+    // A rasterised page has no fonts; a vector one keeps Helvetica.
+    let fonts = poppler("pdffonts", &pdf);
+    assert!(fonts.contains("Helvetica"), "{fonts}");
+}
+
+#[test]
+fn eps_to_pdf_is_cropped_to_its_bounding_box() {
+    require_engine!("gs");
+    let run = convert("sample.eps", "eps", "pdf", ConvertOptions::default());
+    assert_eq!(run.names(), ["sample.pdf"]);
+    if !common::engine_available("pdfinfo") {
+        println!("SKIP: pdfinfo not found");
+        return;
+    }
+    let info = poppler("pdfinfo", &run.output("sample.pdf"));
+    // -dEPSCrop: the page is the 100 x 80 pt box, not a letter sheet.
+    assert!(info.contains("100 x 80 pts"), "{info}");
+}
+
+#[test]
+fn a_postscript_ai_file_becomes_a_cropped_vector_pdf() {
+    require_engine!("gs");
+    let tmp = TempDir::new().expect("temp dir");
+    let ai = tmp.path().join("drawing.ai");
+    fs::copy(fixture("sample.eps"), &ai).expect("copy");
+    let run = convert_path(ai, "ai", "pdf", ConvertOptions::default());
+    assert_eq!(run.names(), ["sample.pdf"]);
+    if !common::engine_available("pdfinfo") {
+        println!("SKIP: pdfinfo not found");
+        return;
+    }
+    let info = poppler("pdfinfo", &run.output("sample.pdf"));
+    assert!(info.contains("100 x 80 pts"), "{info}");
+}
+
+#[test]
+fn a_pdf_based_ai_file_keeps_only_the_selected_pages() {
+    require_engine!("gs");
+    let tmp = TempDir::new().expect("temp dir");
+    let ai = tmp.path().join("drawing.ai");
+    fs::copy(fixture("sample.pdf"), &ai).expect("copy");
+    let mut options = ConvertOptions::default();
+    options.pdf.page_range = "1,3".to_string();
+    let run = convert_path(ai, "ai", "pdf", options);
+    assert_eq!(run.names(), ["sample.pdf"]);
+    if !common::engine_available("pdfinfo") {
+        println!("SKIP: pdfinfo not found");
+        return;
+    }
+    let info = poppler("pdfinfo", &run.output("sample.pdf"));
+    assert!(
+        info.lines()
+            .any(|l| l.starts_with("Pages:") && l.trim_end().ends_with(" 2")),
+        "{info}"
+    );
+}
