@@ -1,11 +1,11 @@
 //! The built-in presets Filee ships with.
-//! Ported from Filee's `src/Filee.Core/Presets/BuiltInData.cs` (lines 15-161).
+//! Ported from Filee's `src/Filee.Core/Presets/BuiltInData.cs` (lines 15-235).
 //!
 //! Ids are stable: toolbar profiles and settings files point at them, so they
 //! never change, and neither does the order (it is the order the editor lists
 //! them in). Lookup by id or name lives in [`crate::preset::find`].
 
-use crate::options::{MediaQuality, Resize};
+use crate::options::{AudioCodec, MediaQuality, Resize, TracingMode, VideoCodec};
 use crate::output::OutputLocation;
 use crate::preset::{Preset, SAME_AS_SOURCE};
 
@@ -41,8 +41,9 @@ fn pattern(mut preset: Preset, pattern: &str) -> Preset {
     preset
 }
 
-/// Every built-in preset, in Filee's order. There are 68 of them, which is
-/// more than anyone will ever put on one ring, and that is fine.
+/// Every built-in preset, in Filee's order. There are 94 of them, which is
+/// more than anyone will ever put on one ring, and that is fine: the ring
+/// only shows what a toolbar profile picks, the rest wait in the editor.
 pub fn presets() -> Vec<Preset> {
     let mut list = vec![
         named("to-png", "PNG", "png"),
@@ -65,6 +66,13 @@ pub fn presets() -> Vec<Preset> {
             let mut p = keyed("grayscale", "preset.grayscale", SAME_AS_SOURCE);
             p.image.grayscale = true;
             pattern(p, "{name}_gray")
+        },
+        {
+            // Always PNG: a JPG with a transparent background is just a JPG
+            // with a white background and extra disappointment.
+            let mut p = keyed("remove-background", "preset.remove_background", "png");
+            p.image.remove_background = true;
+            pattern(p, "{name}_transparent")
         },
         {
             let mut p = named("tiff-300", "TIFF 300dpi", "tiff");
@@ -105,7 +113,80 @@ pub fn presets() -> Vec<Preset> {
         named("to-csv", "CSV", "csv"),
     ];
     list.extend(catalog());
+    list.extend(data());
+    list.extend(codecs_and_subtitles());
+    list.extend(models());
+    list.extend(tracing());
     list
+}
+
+/// Filee's `DataPresets()` (its settings schema 14). EML is meant for Outlook
+/// MSG files and vCard for contact lists kept in CSV; neither sits on a ring.
+fn data() -> Vec<Preset> {
+    vec![
+        named("to-json", "JSON", "json"),
+        named("to-yaml", "YAML", "yaml"),
+        named("to-toml", "TOML", "toml"),
+        named("to-xml", "XML", "xml"),
+        named("to-eml", "EML", "eml"),
+        named("to-vcf", "vCard", "vcf"),
+    ]
+}
+
+/// Filee's `CodecAndSubtitlePresets()` (its settings schema 11): HEVC and AV1
+/// video, ALAC, and the subtitle targets.
+fn codecs_and_subtitles() -> Vec<Preset> {
+    vec![
+        // Video codecs and lossless audio
+        {
+            let mut p = named("mp4-hevc", "MP4 HEVC", "mp4");
+            p.media.video_codec = VideoCodec::Hevc;
+            pattern(p, "{name}_hevc")
+        },
+        {
+            // Smaller files, longer coffee breaks while the encoder thinks.
+            let mut p = named("mp4-av1", "MP4 AV1", "mp4");
+            p.media.video_codec = VideoCodec::Av1;
+            pattern(p, "{name}_av1")
+        },
+        {
+            let mut p = named("to-alac", "ALAC", "m4a");
+            p.media.audio_codec = AudioCodec::Alac;
+            p
+        },
+        // Subtitles. On the video ring, SRT means "pull the first text
+        // subtitle track out of this video", hence the separate preset.
+        keyed("extract-subtitles", "preset.extract_subtitles", "srt"),
+        named("to-srt", "SRT", "srt"),
+        named("to-vtt", "WebVTT", "vtt"),
+        named("to-ass", "ASS", "ass"),
+        named("to-smi", "SAMI", "smi"),
+        named("to-lrc", "LRC", "lrc"),
+        named("to-ttml", "TTML", "ttml"),
+    ]
+}
+
+/// Filee's `ModelPresets()` (its settings schema 15). glTF is on no ring:
+/// GLB is the same thing in one file, and one file is easier to email.
+fn models() -> Vec<Preset> {
+    vec![
+        named("to-glb", "GLB", "glb"),
+        named("to-stl", "STL", "stl"),
+        named("to-obj", "OBJ", "obj"),
+        named("to-3mf", "3MF", "3mf"),
+        named("to-ply", "PLY", "ply"),
+        named("to-gltf", "glTF", "gltf"),
+    ]
+}
+
+/// Filee's `TracePresets()` (its settings schema 16): raster to SVG, in
+/// colour and as black line art.
+fn tracing() -> Vec<Preset> {
+    vec![keyed("trace-svg", "preset.trace_svg", "svg"), {
+        let mut p = keyed("trace-line-art", "preset.trace_line_art", "svg");
+        p.trace.mode = TracingMode::BlackAndWhite;
+        p
+    }]
 }
 
 /// Filee's `CatalogPresets()`: the formats added in its settings schema 6.
@@ -126,6 +207,7 @@ fn catalog() -> Vec<Preset> {
         named("to-epub", "EPUB", "epub"),
         named("to-mobi", "MOBI", "mobi"),
         named("to-azw3", "AZW3", "azw3"),
+        named("to-kepub", "KEPUB", "kepub"),
         named("to-fb2", "FB2", "fb2"),
         named("to-cbz", "CBZ", "cbz"),
         // Video
@@ -185,13 +267,37 @@ mod tests {
     use crate::options::ImageOptions;
 
     #[test]
-    fn preset_builtins_are_68_with_unique_ids() {
+    fn preset_builtins_are_94_with_unique_ids() {
         let list = presets();
-        assert_eq!(list.len(), 68);
+        assert_eq!(list.len(), 94);
         let ids: HashSet<_> = list.iter().map(|p| p.id.as_str()).collect();
-        assert_eq!(ids.len(), 68);
+        assert_eq!(ids.len(), 94);
         assert_eq!(list.first().unwrap().id, "to-png");
-        assert_eq!(list.last().unwrap().id, "to-eot");
+        assert_eq!(list.last().unwrap().id, "trace-line-art");
+    }
+
+    #[test]
+    fn preset_builtin_order_matches_filee() {
+        let ids: Vec<String> = presets().into_iter().map(|p| p.id).collect();
+        let at = |id: &str| {
+            ids.iter()
+                .position(|i| i == id)
+                .unwrap_or_else(|| panic!("no built-in {id}"))
+        };
+        // Each pair is "a comes right before b" in BuiltInData.cs.
+        for (a, b) in [
+            ("grayscale", "remove-background"),
+            ("remove-background", "tiff-300"),
+            ("to-azw3", "to-kepub"),
+            ("to-kepub", "to-fb2"),
+            ("to-eot", "to-json"),
+            ("to-vcf", "mp4-hevc"),
+            ("to-ttml", "to-glb"),
+            ("to-gltf", "trace-svg"),
+            ("trace-svg", "trace-line-art"),
+        ] {
+            assert_eq!(at(a) + 1, at(b), "{a} then {b}");
+        }
     }
 
     #[test]
@@ -203,6 +309,13 @@ mod tests {
             // By id, not extension: a target must be a real registry id.
             let format = formats::find_by_id(&preset.target)
                 .unwrap_or_else(|| panic!("{}: unknown target {}", preset.id, preset.target));
+            assert_eq!(format.id.as_str(), preset.target, "{}", preset.id);
+            if preset.id == "to-eml" {
+                // Filee writes EML; the registry keeps it read-only until an
+                // engine here can (see formats::tests::table_matches_filee).
+                // The preset still ships so settings files line up with Filee.
+                continue;
+            }
             assert!(
                 format.writable,
                 "{}: {} is read-only",
@@ -263,5 +376,101 @@ mod tests {
         );
         assert_eq!(by_id("mp3-128").media.audio_bitrate_kbps, 128);
         assert_eq!(by_id("to-mkv").image, ImageOptions::default());
+    }
+
+    #[test]
+    fn preset_builtin_newer_filee_options() {
+        let by_id = |id: &str| presets().into_iter().find(|p| p.id == id).unwrap();
+
+        let bg = by_id("remove-background");
+        assert!(bg.image.remove_background);
+        assert_eq!(bg.target, "png");
+        assert_eq!(bg.output.pattern, "{name}_transparent");
+        assert_eq!(bg.name_key.as_deref(), Some("preset.remove_background"));
+
+        let hevc = by_id("mp4-hevc");
+        assert_eq!(hevc.media.video_codec, VideoCodec::Hevc);
+        assert_eq!(hevc.output.pattern, "{name}_hevc");
+        let av1 = by_id("mp4-av1");
+        assert_eq!(av1.media.video_codec, VideoCodec::Av1);
+        assert_eq!(av1.output.pattern, "{name}_av1");
+        let alac = by_id("to-alac");
+        assert_eq!(
+            (alac.target.as_str(), alac.media.audio_codec),
+            ("m4a", AudioCodec::Alac)
+        );
+        assert_eq!(alac.output.pattern, "{name}");
+
+        let extract = by_id("extract-subtitles");
+        assert_eq!(extract.target, "srt");
+        assert_eq!(
+            extract.name_key.as_deref(),
+            Some("preset.extract_subtitles")
+        );
+        assert_eq!(by_id("to-vtt").name, "WebVTT");
+        assert_eq!(by_id("to-smi").name, "SAMI");
+        assert_eq!(by_id("to-vcf").name, "vCard");
+        assert_eq!(by_id("to-gltf").name, "glTF");
+        assert_eq!(by_id("to-kepub").target, "kepub");
+
+        assert_eq!(by_id("trace-svg").trace.mode, TracingMode::default());
+        assert_eq!(
+            by_id("trace-line-art").trace.mode,
+            TracingMode::BlackAndWhite
+        );
+        assert_eq!(by_id("trace-line-art").target, "svg");
+
+        // Everything else stays on the stock codecs and tracing.
+        for preset in presets() {
+            if !["mp4-hevc", "mp4-av1"].contains(&preset.id.as_str()) {
+                assert_eq!(
+                    preset.media.video_codec,
+                    VideoCodec::Default,
+                    "{}",
+                    preset.id
+                );
+            }
+            if preset.id != "to-alac" {
+                assert_eq!(
+                    preset.media.audio_codec,
+                    AudioCodec::Default,
+                    "{}",
+                    preset.id
+                );
+            }
+            if preset.id != "remove-background" {
+                assert!(!preset.image.remove_background, "{}", preset.id);
+            }
+        }
+    }
+
+    #[test]
+    fn preset_builtin_name_keys_have_english_text() {
+        // A key with no English text quietly falls back to the target in
+        // upper case, and "Remove background" ends up cosplaying as "PNG".
+        let list = presets();
+        for preset in &list {
+            if preset.name.is_empty() && preset.name_key.is_some() {
+                assert_ne!(
+                    preset.display_name(),
+                    preset.target.to_uppercase(),
+                    "{} has no English text for {:?}",
+                    preset.id,
+                    preset.name_key
+                );
+            }
+        }
+        for (name, id) in [
+            ("Remove background", "remove-background"),
+            ("Extract subtitles", "extract-subtitles"),
+            ("Trace to SVG", "trace-svg"),
+            ("Line art to SVG", "trace-line-art"),
+        ] {
+            assert_eq!(
+                crate::preset::find(&list, name).map(|p| p.id.as_str()),
+                Some(id),
+                "{name}"
+            );
+        }
     }
 }

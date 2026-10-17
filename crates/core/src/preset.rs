@@ -81,6 +81,10 @@ fn english_name(key: &str) -> Option<&'static str> {
         "preset.long_image" => "Long image",
         "preset.extract" => "Extract",
         "preset.zip_all" => "One ZIP",
+        "preset.remove_background" => "Remove background",
+        "preset.extract_subtitles" => "Extract subtitles",
+        "preset.trace_svg" => "Trace to SVG",
+        "preset.trace_line_art" => "Line art to SVG",
         _ => return None,
     })
 }
