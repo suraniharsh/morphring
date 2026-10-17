@@ -1,7 +1,7 @@
 //! Toolbar profiles, the rules that pick one for a set of files, and the
 //! preset library (presets plus profiles) as it lives on disk.
 //! Ported from Filee's `src/Filee.Core/Profiles/ToolbarProfile.cs`, the
-//! profile half of `Presets/BuiltInData.cs` (lines 164-273) and the library
+//! profile half of `Presets/BuiltInData.cs` (lines 238-383) and the library
 //! parts of `Settings/UserDataStore.cs`.
 //!
 //! A profile is one ring layout: "for these extensions, show these presets,
@@ -89,8 +89,11 @@ pub fn extensions_of(category: Category) -> Vec<String> {
         .collect()
 }
 
-/// The 15 built-in profiles in Filee's order, with Filee's preset lists. The
-/// mixed one goes last, where it can sulk about catching everything.
+/// The 18 built-in profiles in Filee's order (`BuiltInData.CreateProfiles`),
+/// with Filee's preset lists. Filee grew these over many settings schemas:
+/// "subtitles" squeezed in after "audio" (schema 11), "data" and "models"
+/// queued up after "fonts" (schemas 14 and 15). The mixed one goes last,
+/// where it can sulk about catching everything.
 pub fn builtin_profiles() -> Vec<ToolbarProfile> {
     use Category::*;
     vec![
@@ -102,6 +105,8 @@ pub fn builtin_profiles() -> Vec<ToolbarProfile> {
                 "to-jpg",
                 "to-webp",
                 "to-pdf",
+                "trace-svg",
+                "trace-line-art",
                 "to-tiff",
                 "to-bmp",
                 "to-ico",
@@ -149,6 +154,7 @@ pub fn builtin_profiles() -> Vec<ToolbarProfile> {
                 "to-pdf",
                 "to-xlsx",
                 "to-csv",
+                "to-json",
                 "to-ods",
                 "to-hwpx",
                 "to-hwp",
@@ -196,15 +202,24 @@ pub fn builtin_profiles() -> Vec<ToolbarProfile> {
             "ebooks",
             extensions_of(Ebook),
             &[
-                "to-pdf", "to-epub", "to-docx", "to-txt", "to-azw3", "to-mobi", "to-hwpx",
-                "to-hwp", "to-html",
+                "to-pdf", "to-epub", "to-docx", "to-txt", "to-azw3", "to-mobi", "to-kepub",
+                "to-hwpx", "to-hwp", "to-html",
             ],
         ),
         profile(
             "video",
             extensions_of(Video),
             &[
-                "to-mp4", "mp4-720", "to-webm", "to-mov", "to-gif", "to-mp3", "to-mkv", "to-avi",
+                "to-mp4",
+                "mp4-720",
+                "mp4-hevc",
+                "to-webm",
+                "to-mov",
+                "to-gif",
+                "to-mp3",
+                "extract-subtitles",
+                "to-mkv",
+                "to-avi",
             ],
         ),
         profile(
@@ -213,6 +228,11 @@ pub fn builtin_profiles() -> Vec<ToolbarProfile> {
             &[
                 "to-mp3", "mp3-128", "to-m4a", "to-wav", "to-flac", "to-ogg", "to-opus", "to-aac",
             ],
+        ),
+        profile(
+            "subtitles",
+            extensions_of(Subtitle),
+            &["to-srt", "to-vtt", "to-ass", "to-smi", "to-lrc", "to-ttml"],
         ),
         profile(
             "vector",
@@ -233,6 +253,18 @@ pub fn builtin_profiles() -> Vec<ToolbarProfile> {
             "fonts",
             extensions_of(Font),
             &["to-woff2", "to-woff", "to-ttf", "to-otf", "to-eot"],
+        ),
+        profile(
+            "data",
+            extensions_of(Data),
+            &[
+                "to-json", "to-yaml", "to-toml", "to-xml", "to-csv", "to-xlsx",
+            ],
+        ),
+        profile(
+            "models",
+            extensions_of(Model3D),
+            &["to-glb", "to-stl", "to-obj", "to-3mf", "to-ply", "to-png"],
         ),
         ToolbarProfile {
             is_fallback: true,
@@ -665,49 +697,188 @@ mod tests {
 
     // ---- Built-ins ----
 
+    /// Every built-in ring, slice by slice, as Filee's `CreateProfiles` lays it
+    /// out. If this fails, someone rearranged a donut; make sure it was Filee.
     #[test]
-    fn builtin_profiles_are_filee_s_fifteen_in_order() {
-        assert_eq!(
-            ids(&builtin_profiles()),
-            [
-                "images",
-                "pdf",
-                "office",
-                "spreadsheets",
-                "presentations",
-                "hwp",
-                "text",
-                "ebooks",
-                "video",
-                "audio",
-                "vector",
-                "archives",
-                "cad",
-                "fonts",
-                "mixed",
-            ]
-        );
+    fn builtin_profiles_are_filee_s_eighteen_in_order() {
         let builtin = builtin_profiles();
+        let expected: &[(&str, &[&str])] = &[
+            (
+                "images",
+                &[
+                    "to-png",
+                    "to-jpg",
+                    "to-webp",
+                    "to-pdf",
+                    "trace-svg",
+                    "trace-line-art",
+                    "to-tiff",
+                    "to-bmp",
+                    "to-ico",
+                    "half-size",
+                ],
+            ),
+            (
+                "pdf",
+                &[
+                    "to-png",
+                    "to-jpg",
+                    "pdf-long-image",
+                    "to-docx",
+                    "to-txt",
+                    "to-md",
+                    "to-epub",
+                    "to-hwpx",
+                    "to-hwp",
+                    "to-tiff",
+                    "pdf-split",
+                    "merge-pdf",
+                ],
+            ),
+            (
+                "office",
+                &[
+                    "to-pdf",
+                    "to-hwpx",
+                    "to-hwp",
+                    "to-docx",
+                    "to-odt",
+                    "to-txt",
+                    "to-html",
+                    "to-epub",
+                    "to-png",
+                    "merge-pdf",
+                ],
+            ),
+            (
+                "spreadsheets",
+                &[
+                    "to-pdf",
+                    "to-xlsx",
+                    "to-csv",
+                    "to-json",
+                    "to-ods",
+                    "to-hwpx",
+                    "to-hwp",
+                    "to-html",
+                    "merge-pdf",
+                ],
+            ),
+            (
+                "presentations",
+                &[
+                    "to-pdf",
+                    "to-png",
+                    "to-jpg",
+                    "to-pptx",
+                    "to-hwpx",
+                    "to-hwp",
+                    "merge-pdf",
+                ],
+            ),
+            (
+                "hwp",
+                &[
+                    "to-pdf",
+                    "to-docx",
+                    "to-hwpx",
+                    "to-hwp",
+                    "to-png",
+                    "to-jpg",
+                    "to-txt",
+                    "to-md",
+                    "to-epub",
+                    "merge-pdf",
+                ],
+            ),
+            (
+                "text",
+                &[
+                    "to-pdf", "to-hwpx", "to-hwp", "to-docx", "to-html", "to-txt", "to-epub",
+                ],
+            ),
+            (
+                "ebooks",
+                &[
+                    "to-pdf", "to-epub", "to-docx", "to-txt", "to-azw3", "to-mobi", "to-kepub",
+                    "to-hwpx", "to-hwp", "to-html",
+                ],
+            ),
+            (
+                "video",
+                &[
+                    "to-mp4",
+                    "mp4-720",
+                    "mp4-hevc",
+                    "to-webm",
+                    "to-mov",
+                    "to-gif",
+                    "to-mp3",
+                    "extract-subtitles",
+                    "to-mkv",
+                    "to-avi",
+                ],
+            ),
+            (
+                "audio",
+                &[
+                    "to-mp3", "mp3-128", "to-m4a", "to-wav", "to-flac", "to-ogg", "to-opus",
+                    "to-aac",
+                ],
+            ),
+            (
+                "subtitles",
+                &["to-srt", "to-vtt", "to-ass", "to-smi", "to-lrc", "to-ttml"],
+            ),
+            (
+                "vector",
+                &["to-png", "to-pdf", "to-svg", "to-jpg", "to-webp", "to-eps"],
+            ),
+            (
+                "archives",
+                &["extract", "to-zip", "to-7z", "to-tgz", "to-tar"],
+            ),
+            ("cad", &["to-pdf", "to-png", "to-svg", "to-dxf", "to-dwg"]),
+            (
+                "fonts",
+                &["to-woff2", "to-woff", "to-ttf", "to-otf", "to-eot"],
+            ),
+            (
+                "data",
+                &[
+                    "to-json", "to-yaml", "to-toml", "to-xml", "to-csv", "to-xlsx",
+                ],
+            ),
+            (
+                "models",
+                &["to-glb", "to-stl", "to-obj", "to-3mf", "to-ply", "to-png"],
+            ),
+            (
+                "mixed",
+                &["to-pdf", "merge-pdf", "zip-all", "to-png", "to-txt"],
+            ),
+        ];
+        assert_eq!(builtin.len(), 18);
+        assert_eq!(
+            ids(&builtin),
+            expected.iter().map(|(id, _)| *id).collect::<Vec<_>>()
+        );
+        for (profile, (id, slices)) in builtin.iter().zip(expected) {
+            assert_eq!(profile.preset_ids, *slices, "{id}");
+            assert!(profile.preset_ids.len() <= MAX_SLICES, "{id}");
+        }
         let fallbacks: Vec<_> = builtin.iter().filter(|p| p.is_fallback).collect();
         assert_eq!(fallbacks.len(), 1);
+        assert_eq!(fallbacks[0].id, "mixed");
         assert!(fallbacks[0].extensions.is_empty());
-        assert_eq!(
-            builtin[0].preset_ids,
-            [
-                "to-png",
-                "to-jpg",
-                "to-webp",
-                "to-pdf",
-                "to-tiff",
-                "to-bmp",
-                "to-ico",
-                "half-size"
-            ]
-        );
-        assert_eq!(
-            fallbacks[0].preset_ids,
-            ["to-pdf", "merge-pdf", "zip-all", "to-png", "to-txt"]
-        );
+    }
+
+    #[test]
+    fn the_new_donuts_take_their_files() {
+        let builtin = builtin_profiles();
+        assert_eq!(pick(&builtin, &["a.srt"]), Some("subtitles"));
+        assert_eq!(pick(&builtin, &["a.json"]), Some("data"));
+        assert_eq!(pick(&builtin, &["a.stl"]), Some("models"));
     }
 
     #[test]

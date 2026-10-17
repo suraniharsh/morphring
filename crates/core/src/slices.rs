@@ -373,6 +373,8 @@ mod tests {
                 "to-jpg",
                 "to-webp",
                 "to-pdf",
+                "trace-svg",
+                "trace-line-art",
                 "to-tiff",
                 "to-bmp",
                 "to-ico",
