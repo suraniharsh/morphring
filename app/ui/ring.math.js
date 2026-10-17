@@ -37,6 +37,10 @@
     minRingSeconds: 0.6,
     holdSeconds: Object.freeze({ succeeded: 0.9, failed: 1.4, cancelled: 0.2 }),
     fadeSeconds: 0.25,
+    // RadialController.HandOffAfter: a job still going after this long moves
+    // to the toast. Long enough for LibreOffice to finish a typical document
+    // where it was dropped, short enough not to hold the screen hostage.
+    handOffSeconds: 5,
     // The × on the progress ring (DonutMenu.Progress.cs): a 10 px disc sat on
     // the ring's outer edge at half past one, hit within 11 px, shown while
     // the pointer is within 14 px of the ring, fading in over 120 ms.
@@ -319,9 +323,10 @@
    * and fades. `reduced` snaps every animation but keeps the holds, so a ✓
    * is still on screen long enough to be seen.
    *
-   * One deliberate change: Filee hands a failure to its toast window. We have
-   * no toast yet, so with `keepFailure` a failed ring stays up (phase "failed")
-   * until the user dismisses it and can read the message.
+   * A failure normally goes to the toast (see handOffAction) and fades like
+   * Filee's. A failure with no backend job to hand over (the request never
+   * made it into the queue) has nowhere else to be read, so with
+   * `keepFailure` it stays up (phase "failed") until the user dismisses it.
    */
   class ProgressRing {
     constructor(sliceCount, opts) {
@@ -559,6 +564,36 @@
     return false;
   }
 
+  /**
+   * What the ring does with its job, RadialController's hand-off rules.
+   * `elapsed` is seconds since the slice was clicked; `key` is what just
+   * happened: null for a tick (the timer or an outcome arriving), "Escape",
+   * "Enter", or "dismiss" (a click away or lost focus). `state` is
+   * `{ running, outcome, jobKnown, handedOff, cancelWanted, failedHeld }`,
+   * where `outcome` is the one the backend reported (null while running) and
+   * `jobKnown` says the backend's job id has arrived.
+   *
+   * Returns "hand-off" (the toast shows the job now, the ring hides),
+   * "report" (the toast shows it now, the ring plays out its own ending),
+   * "close" (the ring just hides), or "none".
+   */
+  function handOffAction(elapsed, state, key) {
+    const s = state || {};
+    // A job the user already asked to stop is about to end on its own; no
+    // point giving it a card just to say "cancelled".
+    const handable = !!s.running && !s.cancelWanted && !!s.jobKnown && !s.handedOff;
+    if (key === "Escape" || key === "dismiss") {
+      // Filee's Close(): Esc or a click elsewhere while the job runs lets the
+      // toast carry on. Cancelling is the ×'s job, and the toast's.
+      return handable ? "hand-off" : "close";
+    }
+    if (key === "Enter") return s.failedHeld ? "close" : "none";
+    if (key != null) return "none";
+    if (s.outcome === "failed" && s.jobKnown && !s.handedOff) return "report";
+    if (handable && Number(elapsed) >= RING.handOffSeconds) return "hand-off";
+    return "none";
+  }
+
   return {
     TAU,
     RING,
@@ -595,6 +630,7 @@
     progressHitTest,
     showCancel,
     progressClickAction,
+    handOffAction,
     WATCHDOG,
     watchdogCheck,
     finishAll,

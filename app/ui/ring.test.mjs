@@ -505,3 +505,63 @@ test("click: the state machine's done hold is when a click can reveal", () => {
   assert.notEqual(ring.phase, "done");
   assert.equal(M.progressClickAction("ring", state()), "reveal");
 });
+
+// ───── hand-off to the toast (RadialController's HandOffToToast) ─────
+
+const runningJob = {
+  running: true,
+  outcome: null,
+  jobKnown: true,
+  handedOff: false,
+  cancelWanted: false,
+  failedHeld: false,
+};
+
+test("hand-off: a job still running after 5 s moves to the toast", () => {
+  assert.equal(RING.handOffSeconds, 5);
+  assert.equal(M.handOffAction(0, runningJob, null), "none");
+  assert.equal(M.handOffAction(4.99, runningJob, null), "none");
+  assert.equal(M.handOffAction(5, runningJob, null), "hand-off");
+  assert.equal(M.handOffAction(42, runningJob, null), "hand-off");
+});
+
+test("hand-off: once is enough, and only with a job id to hand over", () => {
+  assert.equal(M.handOffAction(6, { ...runningJob, handedOff: true }, null), "none");
+  assert.equal(M.handOffAction(6, { ...runningJob, jobKnown: false }, null), "none");
+  // A job being cancelled ends by itself; it gets no card.
+  assert.equal(M.handOffAction(6, { ...runningJob, cancelWanted: true }, null), "none");
+});
+
+test("hand-off: a failure goes to the toast at once, whenever it happens", () => {
+  const failed = { ...runningJob, running: false, outcome: "failed" };
+  assert.equal(M.handOffAction(0.2, failed, null), "report");
+  assert.equal(M.handOffAction(9, failed, null), "report");
+  assert.equal(M.handOffAction(0.2, { ...failed, handedOff: true }, null), "none");
+  // Never queued, so no job for the toast: the ring keeps the failure itself.
+  assert.equal(M.handOffAction(0.2, { ...failed, jobKnown: false }, null), "none");
+  // Good news and cancels stay on the ring.
+  for (const outcome of ["succeeded", "cancelled"]) {
+    assert.equal(M.handOffAction(9, { ...runningJob, running: false, outcome }, null), "none");
+  }
+});
+
+test("hand-off: Escape while running hands off instead of cancelling", () => {
+  assert.equal(M.handOffAction(0.1, runningJob, "Escape"), "hand-off");
+  assert.equal(M.handOffAction(0.1, runningJob, "dismiss"), "hand-off");
+  // Nothing to hand over, or already stopping: Escape just closes.
+  assert.equal(M.handOffAction(0.1, { ...runningJob, jobKnown: false }, "Escape"), "close");
+  assert.equal(M.handOffAction(0.1, { ...runningJob, cancelWanted: true }, "Escape"), "close");
+  const finishing = { ...runningJob, running: false, outcome: "succeeded" };
+  assert.equal(M.handOffAction(0.1, finishing, "Escape"), "close");
+  // No key ever means "cancel": that stays on the × and the toast.
+  for (const key of [null, "Escape", "Enter", "dismiss", "x"]) {
+    assert.notEqual(M.handOffAction(10, runningJob, key), "cancel");
+  }
+});
+
+test("hand-off: Enter closes a held failure and nothing else", () => {
+  const held = { ...runningJob, running: false, outcome: "failed", jobKnown: false, failedHeld: true };
+  assert.equal(M.handOffAction(3, held, "Enter"), "close");
+  assert.equal(M.handOffAction(3, runningJob, "Enter"), "none");
+  assert.equal(M.handOffAction(10, runningJob, "a"), "none");
+});

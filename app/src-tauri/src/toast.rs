@@ -10,11 +10,14 @@
 //! - [`dismiss_after`]: finished cards leave after 5 s, or 15 s when something
 //!   went wrong, so there is time to read the bad news.
 //! - [`place`]: bottom-right of the primary monitor's work area, 12 px in.
+//! - [`show_now`]: the ring hands a job over (still running after 5 s, failed,
+//!   or Escape pressed), so its card skips the 1.5 s wait.
 //!
 //! The webview asks [`toast_check`] whether a job's card may show yet,
 //! [`toast_dismiss_delay`] how long a finished card stays, and hands its
 //! height to [`toast_layout`], which sizes, places, shows or hides the window.
 
+use std::collections::VecDeque;
 use std::sync::{Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -30,6 +33,10 @@ pub const TOAST_WINDOW: &str = "toast";
 
 /// Event sent to the toast window with a job id when that job's card should go.
 pub const TOAST_DISMISS: &str = "toast-dismiss";
+
+/// Event sent to the toast window with a job id when that job's card should
+/// show right away, finished or not.
+pub const TOAST_SHOW: &str = "toast-show";
 
 /// Width of the toast window, in logical pixels.
 pub const TOAST_WIDTH: f64 = 360.0;
@@ -203,6 +210,59 @@ fn move_to_corner<R: Runtime>(app: &AppHandle<R>, toast: &WebviewWindow<R>) {
     }
 }
 
+/// How many hand-offs [`HandOffs`] remembers. Jobs run one at a time and the
+/// ring shows one of them, so this is generous; it only has to outlive the
+/// double hand-off of a job that fails right as its five seconds run out.
+pub const HAND_OFF_MEMORY: usize = 16;
+
+/// The jobs the ring already handed to the toast, newest last, so a job is
+/// handed over once even when the ring asks twice.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct HandOffs {
+    recent: VecDeque<u64>,
+}
+
+impl HandOffs {
+    /// An empty memory; `const` so it can sit in a static.
+    pub const fn new() -> Self {
+        Self {
+            recent: VecDeque::new(),
+        }
+    }
+
+    /// Records the hand-off of `job_id`. Returns true the first time, false
+    /// for a job already handed over (or for job 0, which is nobody).
+    pub fn claim(&mut self, job_id: u64) -> bool {
+        if job_id == 0 || self.recent.contains(&job_id) {
+            return false;
+        }
+        if self.recent.len() >= HAND_OFF_MEMORY {
+            self.recent.pop_front();
+        }
+        self.recent.push_back(job_id);
+        true
+    }
+}
+
+static HAND_OFFS: Mutex<HandOffs> = Mutex::new(HandOffs::new());
+
+/// Shows the card of job `job_id` at once, skipping [`SHOW_DELAY`]: the ring
+/// is handing the job over. Returns whether a card was asked for; a job that
+/// was handed over before is not asked about twice.
+pub fn show_now<R: Runtime>(app: &AppHandle<R>, job_id: u64) -> Result<bool, String> {
+    // Same deal as the ring watch: poison changes nothing about a list of ids.
+    let first = HAND_OFFS
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .claim(job_id);
+    if !first {
+        return Ok(false);
+    }
+    app.emit_to(TOAST_WINDOW, TOAST_SHOW, job_id)
+        .map_err(|e| format!("Could not show the job in the toast: {e}"))?;
+    Ok(true)
+}
+
 /// Removes the card of job `job_id` from the toast.
 #[tauri::command]
 pub fn toast_dismiss<R: Runtime>(app: AppHandle<R>, job_id: u64) -> Result<(), String> {
@@ -269,6 +329,29 @@ mod tests {
         // The ring comes back: the clock resets.
         assert_eq!(watch.observe(true, t0 + ms(700)), None);
         assert_eq!(watch.observe(false, t0 + ms(900)), Some(Duration::ZERO));
+    }
+
+    #[test]
+    fn show_now_hands_a_job_over_once() {
+        let mut offs = HandOffs::new();
+        assert!(offs.claim(7));
+        // The five-second timer and a failure can both ask; one card is plenty.
+        assert!(!offs.claim(7));
+        assert!(offs.claim(8));
+        assert!(!offs.claim(0), "job 0 is nobody");
+    }
+
+    #[test]
+    fn show_now_forgets_old_jobs_but_not_recent_ones() {
+        let mut offs = HandOffs::new();
+        for id in 1..=HAND_OFF_MEMORY as u64 {
+            assert!(offs.claim(id));
+        }
+        assert!(offs.claim(100));
+        // Job 1 fell off the end; the rest are still remembered.
+        assert!(offs.claim(1));
+        assert!(!offs.claim(HAND_OFF_MEMORY as u64));
+        assert!(!offs.claim(100));
     }
 
     fn rect(x: i32, y: i32, w: u32, h: u32) -> PhysicalRect<i32, u32> {

@@ -40,6 +40,7 @@ pub fn run() -> anyhow::Result<()> {
             commands::ring_close,
             commands::ping,
             commands::cancel_job,
+            commands::ring_hand_off,
             settings::settings_get,
             settings::settings_set,
             settings::presets_list,

@@ -40,6 +40,12 @@
 //! Either way the job ends with the [`Outcome::Cancelled`] outcome. The ring
 //! learns which job it shows from the `jobId` of [`RING_PROGRESS`], whose
 //! first event (progress 0) is sent as soon as the job is queued.
+//!
+//! # Handing off
+//!
+//! [`ring_hand_off`] moves the ring's job to the toast at once (see
+//! [`crate::toast::show_now`]): the ring does so for a job still running 5 s
+//! in, for a failed job, and on Escape while the job runs.
 
 use std::collections::HashMap;
 use std::panic::{self, AssertUnwindSafe};
@@ -984,6 +990,15 @@ pub fn cancel_job<R: Runtime>(app: AppHandle<R>, job_id: u64) -> Result<(), Stri
         conversions.cancel(job_id);
     }
     Ok(())
+}
+
+/// Hands job `jobId` from the ring to the toast: its card shows right away
+/// instead of after the usual delay. The ring calls this when a job is still
+/// running 5 s in, when it fails, and on Escape while it runs. Handing the
+/// same job over twice does nothing the second time.
+#[tauri::command]
+pub fn ring_hand_off<R: Runtime>(app: AppHandle<R>, job_id: u64) -> Result<(), String> {
+    crate::toast::show_now(&app, job_id).map(|_| ())
 }
 
 #[cfg(test)]

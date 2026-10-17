@@ -14,6 +14,8 @@
 //                                message?: string } }
 //                   Last event of a job, whatever the outcome.
 //   "toast-dismiss" jobId           drop that job's card (sent by toast_dismiss)
+//   "toast-show"    jobId           show that job's card now, running or
+//                                   finished (sent when the ring hands it off)
 // Job ids start at 1 and go up by one per job. Jobs run one at a time, so the
 // events of two jobs never interleave.
 //   commands the toast invokes
@@ -34,7 +36,11 @@
   // closing the ring feels answered, long enough not to chatter.
   const POLL_MS = 250;
 
-  /** jobId -> { job, el, parts, startedAt, shown, finished, timer } */
+  // How long a job that ended without a card is remembered, in case the ring
+  // hands it over a beat after job-finished (a failure always is).
+  const HAND_OFF_GRACE_MS = 3000;
+
+  /** jobId -> { job, el, parts, startedAt, shown, finished, summary, timer } */
   const jobs = new Map();
 
   function invoke(cmd, args) {
@@ -196,11 +202,17 @@
     if (!entry) return;
     entry.finished = true;
     clearTimeout(entry.timer);
-    // A job that ended before it earned a card leaves without a word.
+    entry.summary = f;
+    // A job that ended before it earned a card leaves without a word, unless
+    // the ring hands it over in the next moment.
     if (!entry.shown) {
-      jobs.delete(f.jobId);
+      entry.timer = setTimeout(remove, HAND_OFF_GRACE_MS, f.jobId);
       return;
     }
+    showFinished(entry, f);
+  }
+
+  function showFinished(entry, f) {
     const summary = f.summary;
     entry.outputs = summary.outputs || [];
     entry.el.classList.add("finished", summary.outcome);
@@ -221,6 +233,15 @@
       });
   }
 
+  // The ring handed this job over: no waiting, card up now.
+  function onShow(jobId) {
+    const entry = jobs.get(jobId);
+    if (!entry || entry.shown) return;
+    clearTimeout(entry.timer);
+    reveal(entry);
+    if (entry.finished && entry.summary) showFinished(entry, entry.summary);
+  }
+
   function listen(name, handler) {
     tauri.event.listen(name, function (event) {
       handler(event.payload);
@@ -234,4 +255,5 @@
   listen("job-progress", onProgress);
   listen("job-finished", onFinished);
   listen("toast-dismiss", remove);
+  listen("toast-show", onShow);
 })();

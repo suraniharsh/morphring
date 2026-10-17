@@ -31,10 +31,15 @@
 //                             the ring. It resolves with the job's summary,
 //                             whose outputs[0] a click on the finished ring
 //                             reveals (opener plugin, revealItemInDir)
-//     cancel_job { jobId }    cancels the job the ring shows (Escape or a
-//                             click on the × that shows while the pointer
-//                             hovers the running ring); the backend
-//                             answers with ring-done "cancelled"
+//     cancel_job { jobId }    cancels the job the ring shows (a click on
+//                             the × that shows while the pointer hovers the
+//                             running ring); the backend answers with
+//                             ring-done "cancelled"
+//     ring_hand_off { jobId } shows the job's toast card at once: sent for a
+//                             job still running 5 s after the click (the ring
+//                             then hides), for Escape or a click away while
+//                             it runs (likewise), and for a failed job (the
+//                             ring plays its ✗ and fades; the toast explains)
 //     ring_close              hides the window
 //     ping                    once at start-up, as a health check
 "use strict";
@@ -90,7 +95,7 @@
   let chosen = -1;
   let job = 0;
   // The backend's id for the job on the ring, from ring-progress; 0 until the
-  // first one arrives. cancelWanted remembers an Escape that beat it there.
+  // first one arrives. cancelWanted remembers a × click that beat it there.
   let backendJob = 0;
   let cancelWanted = false;
   let cancelSent = false;
@@ -99,6 +104,12 @@
   // click on the finished ring shows it in the file manager, Filee's
   // ProgressClicked; until then the plate is just a plate.
   let firstOutput = "";
+  // The hand-off to the toast: when the slice was clicked, the timer that
+  // checks back at the five-second mark, and whether the toast has the job.
+  let startedAt = 0;
+  let handOffTimer = 0;
+  let handedOff = false;
+  const HAND_OFF_RETRY_MS = 250;
   let sliceEls = [];
   // The pointer is near the progress ring, so the × may show (if the job is
   // still running and nobody asked to cancel it yet).
@@ -322,14 +333,17 @@
       mode = "closing";
       clock = 0;
       startAnimation();
-    } else if (mode === "menu" || mode === "progress") {
-      // Closing mid-conversion (by clicking away) only hides the ring. The
-      // job carries on in the backend; we just stop staring at it.
+    } else if (mode === "menu") {
       hide();
+    } else if (mode === "progress") {
+      // Closing mid-conversion (by clicking away) hands the job to the toast
+      // and hides the ring. The job carries on; we just stop staring at it.
+      decide("dismiss");
     }
   }
 
   function hide() {
+    clearTimeout(handOffTimer);
     mode = "hidden";
     dragMode = false;
     job++;
@@ -406,6 +420,9 @@
     backendJob = 0;
     cancelWanted = false;
     cancelSent = false;
+    startedAt = performance.now();
+    handedOff = false;
+    scheduleHandOff(RING.handOffSeconds * 1000);
     // The click that got us here was on a slice, well clear of the ring.
     ringHover = false;
     svg.setAttribute("aria-busy", "true");
@@ -420,6 +437,54 @@
         if (mine === job) finish("failed", errorText(err));
       },
     );
+  }
+
+  // ───────────── handing off to the toast ─────────────
+
+  function scheduleHandOff(ms) {
+    clearTimeout(handOffTimer);
+    const mine = job;
+    handOffTimer = setTimeout(() => {
+      if (mine === job) decide(null);
+    }, ms);
+  }
+
+  // Asks ring.math.js what to do with the job right now (key is null for a
+  // tick, else "Escape", "Enter" or "dismiss") and does it.
+  function decide(key) {
+    if (mode !== "progress" || !progress) return;
+    const action = M.handOffAction(
+      (performance.now() - startedAt) / 1000,
+      {
+        running: running(),
+        outcome: progress.pending,
+        jobKnown: backendJob > 0,
+        handedOff,
+        cancelWanted,
+        failedHeld: progress.phase === "failed",
+      },
+      key,
+    );
+    if (action === "hand-off") {
+      handOff();
+      hide();
+    } else if (action === "report") {
+      handOff();
+    } else if (action === "close") {
+      hide();
+    } else if (key === null && running() && !handedOff) {
+      // Too early, no job id yet, or a cancel in flight that may still
+      // bounce: look again shortly. Cheaper than being clever about it.
+      const left = RING.handOffSeconds * 1000 - (performance.now() - startedAt);
+      scheduleHandOff(Math.max(HAND_OFF_RETRY_MS, left));
+    }
+  }
+
+  function handOff() {
+    if (handedOff || !backendJob) return;
+    handedOff = true;
+    clearTimeout(handOffTimer);
+    backend.handOff(backendJob).catch((err) => console.warn("ring_hand_off failed:", err));
   }
 
   // Keeps the first written file, whichever of ring-done and the convert
@@ -471,7 +536,7 @@
     cancelButton.classList.toggle("shown", on);
   }
 
-  // Escape or a click on the × while the job runs. The ring greys out
+  // A click on the × while the job runs. The ring greys out
   // at once, then fades like any other cancelled job when ring-done says so.
   // Asking twice is fine; the second ask just closes the ring.
   function requestCancel() {
@@ -505,9 +570,13 @@
     if (mode !== "progress" || !progress || progress.pending) return;
     const known = outcome === "succeeded" || outcome === "cancelled";
     failureText = text || "";
+    // A failure the toast can explain fades like Filee's; one with no job
+    // behind it (never queued) stays up, as the ring is all there is.
+    progress.keepFailure = !backendJob;
     progress.complete(known ? outcome : "failed");
     svg.classList.remove("pointing");
     startAnimation();
+    decide(null);
   }
 
   function errorText(err) {
@@ -816,13 +885,14 @@
     if (mode === "hidden") return;
     if (e.key === "Escape") {
       e.preventDefault();
-      // Mid-conversion, Escape means "stop that"; anywhere else, "go away".
-      if (running()) requestCancel();
+      // Mid-conversion, Escape means "carry on without me": the toast takes
+      // the job. Stopping it is the ×'s business. Anywhere else, "go away".
+      if (mode === "progress") decide("Escape");
       else requestClose();
       return;
     }
-    if (mode === "progress" && progress && progress.phase === "failed" && e.key === "Enter") {
-      requestClose();
+    if (mode === "progress" && e.key === "Enter") {
+      decide("Enter");
       return;
     }
     const n = model.slices.length;
@@ -892,6 +962,7 @@
     return {
       convert: (files, presetId) => tauri.core.invoke("convert", { files, presetId }),
       cancel: (jobId) => tauri.core.invoke("cancel_job", { jobId }),
+      handOff: (jobId) => tauri.core.invoke("ring_hand_off", { jobId }),
       close: () => tauri.core.invoke("ring_close"),
       reveal: (path) =>
         tauri.opener && tauri.opener.revealItemInDir
@@ -957,6 +1028,10 @@
             resolve();
           };
         }),
+      handOff: (jobId) => {
+        console.info("demo: would hand job", jobId, "to the toast");
+        return Promise.resolve();
+      },
       cancel: () => {
         if (stopDemo) setTimeout(stopDemo, 150);
         return Promise.resolve();
