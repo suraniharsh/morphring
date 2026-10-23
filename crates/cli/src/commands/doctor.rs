@@ -172,6 +172,7 @@ mod tests {
                 err: &mut err,
                 cwd: PathBuf::from("/"),
                 cancel: CancelToken::new(),
+                quit: CancelToken::new(),
                 engines,
                 config_dir: None,
             };
@@ -328,6 +329,7 @@ temp     /tmp/morphring
                     err: &mut err,
                     cwd: PathBuf::from("/"),
                     cancel: CancelToken::new(),
+                    quit: CancelToken::new(),
                     engines: all_missing(),
                     config_dir: None,
                 };

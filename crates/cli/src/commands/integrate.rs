@@ -301,6 +301,7 @@ mod tests {
                     err: &mut err,
                     cwd: self.dir.path().to_path_buf(),
                     cancel: CancelToken::new(),
+                    quit: CancelToken::new(),
                     engines: Vec::new(),
                     config_dir: None,
                 };

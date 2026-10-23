@@ -139,6 +139,7 @@ mod tests {
                 err: &mut err,
                 cwd: PathBuf::from("/"),
                 cancel: CancelToken::new(),
+                quit: CancelToken::new(),
                 engines: engines
                     .into_iter()
                     .map(|e| Box::new(e) as Box<dyn Converter>)
@@ -249,6 +250,7 @@ mod tests {
                 err: &mut err,
                 cwd: PathBuf::from("/"),
                 cancel: CancelToken::new(),
+                quit: CancelToken::new(),
                 engines: morphring_engines::registry::all(),
                 config_dir: None,
             };

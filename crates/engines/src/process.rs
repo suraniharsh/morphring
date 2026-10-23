@@ -11,8 +11,8 @@ use std::ffi::{OsStr, OsString};
 use std::io::{self, BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -134,6 +134,9 @@ pub fn run(
         source,
     })?;
     let tree = attach_tree(&child);
+    // Dropped when this function returns, which is after the final sweep
+    // below, so a hard quit can find the group for as long as it may exist.
+    let _registered = group_of(&child, &tree).map(|group| LIVE.register(group));
 
     // Both pipes must be drained while we wait, or a chatty tool fills the
     // 64 KiB pipe buffer and we stare at each other forever.
@@ -308,9 +311,125 @@ fn failed_status() -> ExitStatus {
 struct Tree;
 
 /// What it takes to kill a child together with everything it started: the Job
-/// Object it was put in, when that worked.
+/// Object it was put in, when that worked. Shared, because the registry of
+/// live children holds on to it too.
 #[cfg(windows)]
-type Tree = Option<crate::win_job::Job>;
+type Tree = Option<std::sync::Arc<crate::win_job::Job>>;
+
+/// Every engine child group still alive in this process.
+///
+/// Engine children get their own process group (see [`run`]), which also
+/// means a terminal Ctrl+C never reaches them. That is exactly what we want
+/// while we are around to cancel them ourselves, and exactly what we don't
+/// want when we exit first and leave an ffmpeg encoding for nobody, adopted
+/// by init like a stray cat. [`kill_all_children`] reads this list on the way
+/// out.
+static LIVE: Registry = Registry::new();
+
+/// What a registered child is killed through: its process group id.
+#[cfg(unix)]
+type Group = libc::pid_t;
+
+/// What a registered child is killed through: its Job Object.
+#[cfg(windows)]
+type Group = std::sync::Arc<crate::win_job::Job>;
+
+#[cfg(unix)]
+fn group_of(child: &Child, _tree: &Tree) -> Option<Group> {
+    libc::pid_t::try_from(child.id()).ok()
+}
+
+#[cfg(windows)]
+fn group_of(_child: &Child, tree: &Tree) -> Option<Group> {
+    // No job, no entry: without one there is no tree to kill, the same
+    // shrug the cancel path gives in that case.
+    tree.clone()
+}
+
+/// Kills every engine child that is still running, together with whatever
+/// it started, and makes sure any child spawned from now on is killed as soon
+/// as it starts.
+///
+/// Meant for a process that is about to exit without waiting for its jobs:
+/// the child groups would otherwise outlive it. Jobs whose children were
+/// killed this way fail; their own clean-up still runs if they get the time.
+pub fn kill_all_children() {
+    LIVE.kill_all();
+}
+
+/// The list behind [`LIVE`]: a type of its own so tests can have a private
+/// one instead of shooting at the children of every other test in the binary.
+struct Registry {
+    inner: Mutex<Live>,
+}
+
+struct Live {
+    next_id: u64,
+    groups: Vec<(u64, Group)>,
+    /// Set by `kill_all`. A child registered after that is killed on arrival,
+    /// which closes the gap between the sweep and the actual exit.
+    closed: bool,
+}
+
+impl Registry {
+    const fn new() -> Self {
+        Self {
+            inner: Mutex::new(Live {
+                next_id: 0,
+                groups: Vec::new(),
+                closed: false,
+            }),
+        }
+    }
+
+    fn lock(&self) -> MutexGuard<'_, Live> {
+        // The list stays consistent whatever panicked while holding it.
+        self.inner.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Adds `group` until the returned registration is dropped.
+    fn register(&self, group: Group) -> Registration<'_> {
+        let mut live = self.lock();
+        if live.closed {
+            kill_one(&group);
+        }
+        let id = live.next_id;
+        live.next_id += 1;
+        live.groups.push((id, group));
+        Registration { registry: self, id }
+    }
+
+    /// Kills every registered group, and every one registered later.
+    fn kill_all(&self) {
+        let mut live = self.lock();
+        live.closed = true;
+        for (_, group) in &live.groups {
+            kill_one(group);
+        }
+    }
+}
+
+/// One entry in a [`Registry`]; dropping it removes the entry.
+struct Registration<'a> {
+    registry: &'a Registry,
+    id: u64,
+}
+
+impl Drop for Registration<'_> {
+    fn drop(&mut self) {
+        self.registry.lock().groups.retain(|(id, _)| *id != self.id);
+    }
+}
+
+#[cfg(unix)]
+fn kill_one(group: &Group) {
+    killpg(*group);
+}
+
+#[cfg(windows)]
+fn kill_one(group: &Group) {
+    group.terminate();
+}
 
 #[cfg(not(windows))]
 fn attach_tree(_child: &Child) -> Tree {
@@ -322,7 +441,7 @@ fn attach_tree(child: &Child) -> Tree {
     // The child gets a head start between spawn and attach, so a grandchild
     // forked in that sliver escapes the job. Tools take longer than that to
     // even find their config files, so the race stays theoretical.
-    crate::win_job::attach(child)
+    crate::win_job::attach(child).map(std::sync::Arc::new)
 }
 
 /// Kills the child's whole process group. Safe to call more than once.
@@ -335,12 +454,18 @@ fn kill_group(child: &mut Child, _tree: &Tree) {
     // the child leaks a headless office suite per cancelled job, so the whole
     // group goes. After a normal exit this just sweeps leftovers, or gets
     // ESRCH when there are none, which is the happy path.
+    killpg(pgid);
+}
+
+/// SIGKILLs the process group `pgid`. Safe to call more than once.
+#[cfg(unix)]
+fn killpg(pgid: libc::pid_t) {
     #[allow(
         unsafe_code,
         reason = "killpg takes plain integers and has no memory-safety preconditions"
     )]
-    // SAFETY: killpg only sends a signal; pgid came from a child we spawned
-    // with process_group(0), so it names that child's group.
+    // SAFETY: killpg only sends a signal; every pgid passed here came from a
+    // child we spawned with process_group(0), so it names that child's group.
     unsafe {
         libc::killpg(pgid, libc::SIGKILL);
     }
@@ -782,6 +907,86 @@ mod tests {
             // 100 ms of setup slack on top of the 1 s budget for the kill itself.
             assert!(started.elapsed() < Duration::from_millis(1500));
             assert!(gone_within(&cancelled_at, Duration::from_secs(1)));
+        }
+
+        /// Waits for `child` to exit, giving up (and killing it) after `limit`,
+        /// so a broken test fails in seconds rather than a sleep 30 later.
+        fn exit_within(child: &mut Child, limit: Duration) -> Option<ExitStatus> {
+            let start = Instant::now();
+            while start.elapsed() < limit {
+                if let Ok(Some(status)) = child.try_wait() {
+                    return Some(status);
+                }
+                thread::sleep(Duration::from_millis(20));
+            }
+            let _ = child.kill();
+            let _ = child.wait();
+            None
+        }
+
+        fn sleep_in_own_group() -> (Child, Group) {
+            use std::os::unix::process::CommandExt;
+            let child = Command::new("sleep")
+                .arg("30")
+                .process_group(0)
+                .spawn()
+                .unwrap();
+            let group = Group::try_from(child.id()).unwrap();
+            (child, group)
+        }
+
+        #[test]
+        fn kill_all_kills_registered_groups_and_late_arrivals() {
+            use std::os::unix::process::ExitStatusExt;
+            // A private registry: the global one also holds the children of
+            // every other test running next to us.
+            let registry = Registry::new();
+            let (mut early, group) = sleep_in_own_group();
+            let registration = registry.register(group);
+
+            registry.kill_all();
+            let status = exit_within(&mut early, Duration::from_secs(5));
+            assert_eq!(status.and_then(|s| s.signal()), Some(libc::SIGKILL));
+            drop(registration);
+            assert!(registry.lock().groups.is_empty());
+
+            // Spawned after the sweep, while the process is still on its way
+            // out: killed the moment it registers.
+            let (mut late, group) = sleep_in_own_group();
+            let _registration = registry.register(group);
+            let status = exit_within(&mut late, Duration::from_secs(5));
+            assert_eq!(status.and_then(|s| s.signal()), Some(libc::SIGKILL));
+        }
+
+        #[test]
+        fn run_registers_its_child_group_until_it_returns() {
+            let dir = tempfile::tempdir().unwrap();
+            let pid_file = dir.path().join("pid");
+            let (prog, args) = sh(&format!(
+                "echo $$ > '{}'; exec sleep 30",
+                pid_file.display()
+            ));
+            let cancel = CancelToken::new();
+            let registered = |pid: Group| LIVE.lock().groups.iter().any(|(_, g)| *g == pid);
+            let res = thread::scope(|scope| {
+                let runner = scope.spawn(|| run(&prog, &args, RunOptions::default(), &cancel));
+                let pid: Group = read_pid(&pid_file).parse().unwrap();
+                // Registration happens right after spawn, long before sh gets
+                // round to the echo, but "long" in scheduler terms is a guess.
+                let start = Instant::now();
+                while !registered(pid) && start.elapsed() < Duration::from_secs(2) {
+                    thread::sleep(Duration::from_millis(10));
+                }
+                assert!(registered(pid), "{pid} is running but not registered");
+                cancel.cancel();
+                let res = runner.join().unwrap();
+                assert!(
+                    !registered(pid),
+                    "{pid} is still registered after run returned"
+                );
+                res
+            });
+            assert!(matches!(res, Err(RunError::Cancelled)), "{res:?}");
         }
 
         #[test]

@@ -15,6 +15,9 @@ pub struct Ctx<'a> {
     pub cwd: PathBuf,
     /// Fired by Ctrl+C.
     pub cancel: CancelToken,
+    /// Fired by a second Ctrl+C: stop everything now, including work that
+    /// `cancel` lets finish (the batch `watch` is converting).
+    pub quit: CancelToken,
     /// Engines in priority order.
     pub engines: Vec<Box<dyn Converter>>,
     /// Where settings and presets live. `None` means the built-in defaults

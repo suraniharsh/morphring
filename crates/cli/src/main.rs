@@ -4,13 +4,19 @@
 use std::ffi::OsString;
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Duration;
 
 use morphring_core::CancelToken;
+use morphring_engines::process;
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::filter::LevelFilter;
 
 /// Exit code of the second Ctrl+C, the shell's usual 128 + SIGINT.
 const EXIT_INTERRUPTED: i32 = 130;
+
+/// How long the second Ctrl+C lets the running job tidy up (kill its engine,
+/// delete its temp folder) before we stop being polite about it.
+const QUIT_GRACE: Duration = Duration::from_secs(3);
 
 /// Our crates, which `--verbose` turns up to debug.
 const OUR_CRATES: [&str; 3] = ["morphring", "morphring_core", "morphring_engines"];
@@ -20,9 +26,18 @@ fn main() -> ExitCode {
     init_logging(verbose_requested(&args));
 
     let cancel = CancelToken::new();
-    let presses = Presses::new(cancel.clone());
+    let quit = CancelToken::new();
+    let presses = Presses::new(cancel.clone(), quit.clone());
     if let Err(e) = ctrlc::set_handler(move || {
         if presses.press() == Press::Quit {
+            // The quit token has fired, so run() is cancelling whatever is in
+            // flight and main() exits with 130 the moment it returns. This
+            // thread is only the backstop for a job that won't hurry up:
+            // exiting ends the sleep early, so in the good case we never wake.
+            std::thread::sleep(QUIT_GRACE);
+            // Engine children sit in their own process groups and would
+            // happily keep encoding after we are gone.
+            process::kill_all_children();
             std::process::exit(EXIT_INTERRUPTED);
         }
     }) {
@@ -33,8 +48,26 @@ fn main() -> ExitCode {
     // Unlocked handles on purpose: worker threads log to stderr through
     // tracing, and holding the stderr lock here would leave them waiting on a
     // lock we never let go of.
-    let code = morphring::run(args, &mut std::io::stdout(), &mut std::io::stderr(), cancel);
-    ExitCode::from(u8::try_from(code).unwrap_or(1))
+    let code = morphring::run(
+        args,
+        &mut std::io::stdout(),
+        &mut std::io::stderr(),
+        cancel,
+        quit.clone(),
+    );
+    ExitCode::from(u8::try_from(exit_code(code, &quit)).unwrap_or(1))
+}
+
+/// The exit code for what `run` returned. After a second Ctrl+C that is 130
+/// whatever the command thought of its own day, and any engine child that
+/// slipped through the cancellation goes down with us.
+fn exit_code(code: i32, quit: &CancelToken) -> i32 {
+    if quit.is_cancelled() {
+        process::kill_all_children();
+        EXIT_INTERRUPTED
+    } else {
+        code
+    }
 }
 
 /// Logs go to stderr at `warn` by default. `RUST_LOG` picks any level, and
@@ -74,17 +107,20 @@ enum Press {
     Quit,
 }
 
-/// Counts Ctrl+C presses: the first fires the cancel token, every later one quits.
+/// Counts Ctrl+C presses: the first fires the cancel token, every later one
+/// fires the quit token too and quits.
 struct Presses {
     count: AtomicUsize,
     cancel: CancelToken,
+    quit: CancelToken,
 }
 
 impl Presses {
-    fn new(cancel: CancelToken) -> Self {
+    fn new(cancel: CancelToken, quit: CancelToken) -> Self {
         Self {
             count: AtomicUsize::new(0),
             cancel,
+            quit,
         }
     }
 
@@ -93,6 +129,7 @@ impl Presses {
             self.cancel.cancel();
             Press::Cancel
         } else {
+            self.quit.cancel();
             Press::Quit
         }
     }
@@ -123,12 +160,25 @@ mod tests {
 
     #[test]
     fn first_ctrl_c_cancels_and_the_second_quits() {
-        let cancel = CancelToken::new();
-        let presses = Presses::new(cancel.clone());
+        let (cancel, quit) = (CancelToken::new(), CancelToken::new());
+        let presses = Presses::new(cancel.clone(), quit.clone());
         assert!(!cancel.is_cancelled());
         assert_eq!(presses.press(), Press::Cancel);
         assert!(cancel.is_cancelled());
+        // One press stops politely; the batch in flight keeps going.
+        assert!(!quit.is_cancelled());
         assert_eq!(presses.press(), Press::Quit);
+        assert!(quit.is_cancelled());
         assert_eq!(presses.press(), Press::Quit);
+    }
+
+    #[test]
+    fn a_quit_turns_any_exit_code_into_130() {
+        let quit = CancelToken::new();
+        assert_eq!(exit_code(0, &quit), 0);
+        assert_eq!(exit_code(1, &quit), 1);
+        quit.cancel();
+        assert_eq!(exit_code(0, &quit), EXIT_INTERRUPTED);
+        assert_eq!(exit_code(1, &quit), EXIT_INTERRUPTED);
     }
 }

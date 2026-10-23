@@ -27,11 +27,15 @@ pub const EXIT_USAGE: i32 = 2;
 
 /// Runs the command line with the process's current folder and the installed
 /// engines. `args` excludes the program name. Returns the exit code.
+///
+/// `cancel` asks the command to stop (the first Ctrl+C); `quit` asks it to
+/// stop everything at once, work in progress included (the second).
 pub fn run(
     args: impl IntoIterator<Item = OsString>,
     out: &mut dyn Write,
     err: &mut dyn Write,
     cancel: CancelToken,
+    quit: CancelToken,
 ) -> i32 {
     // Help, version and typos are answered before we go looking for engines,
     // so `morphring --help` works on a machine with nothing installed.
@@ -51,6 +55,7 @@ pub fn run(
         err,
         cwd,
         cancel,
+        quit,
         engines: morphring_engines::registry::all(),
         config_dir: config_dir(),
     };
@@ -287,6 +292,7 @@ mod tests {
                 err: &mut err,
                 cwd: PathBuf::from("/"),
                 cancel: CancelToken::new(),
+                quit: CancelToken::new(),
                 engines: Vec::new(),
                 config_dir: None,
             };

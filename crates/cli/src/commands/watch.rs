@@ -20,7 +20,7 @@ use morphring_core::preset;
 use morphring_core::profiles::Library;
 use morphring_core::settings::Store;
 use morphring_core::watch::{self, AfterConversion, Settler, Stat, WatchRule};
-use morphring_core::{CancelToken, Converter, FileResult, FileState, formats};
+use morphring_core::{Converter, FileResult, FileState, formats};
 use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use walkdir::WalkDir;
 
@@ -39,6 +39,10 @@ const CANCEL_POLL: Duration = Duration::from_millis(100);
 
 /// How many handled files the settler remembers (the LRU cap).
 const HANDLED_CAP: usize = 10_000;
+
+/// Printed once when Ctrl+C arrives while a batch is still converting.
+const STOPPING_AFTER_BATCH: &str =
+    "Stopping after the current batch... press Ctrl+C again to quit now.";
 
 /// Runs `morphring watch` and returns the exit code.
 pub fn run(args: &WatchArgs, ctx: &mut Ctx) -> i32 {
@@ -152,9 +156,10 @@ pub fn run(args: &WatchArgs, ctx: &mut Ctx) -> i32 {
 
     let engines: Vec<&dyn Converter> = ctx.engines.iter().map(|e| e.as_ref()).collect();
     // Ctrl+C stops the watching, not the batch in flight: that one finishes
-    // and moves its originals, like Filee's Dispose. A second Ctrl+C is
-    // main.rs's business and ends everything at once.
-    let batch_cancel = CancelToken::new();
+    // and moves its originals, like Filee's Dispose. A second Ctrl+C fires
+    // quit, which cancels the batch too, so the engine gets killed and its
+    // temp folder cleaned up by the job instead of being orphaned by exit().
+    let batch_cancel = ctx.quit.clone();
     let mut told_about_limit = false;
     let mut next_tick = Instant::now() + TICK;
 
@@ -223,15 +228,35 @@ pub fn run(args: &WatchArgs, ctx: &mut Ctx) -> i32 {
                 )
             });
             // Same lines as convert, as each file finishes. --json is ignored
-            // here: a report that never ends is not a JSON document.
-            for result in rx {
-                let bad = matches!(
-                    result.state,
-                    FileState::Failed { .. } | FileState::Cancelled
-                );
-                if !args.quiet || bad {
-                    let _ = writeln!(ctx.out, "{}", report::file_line(&result, &ctx.cwd));
-                    let _ = ctx.out.flush();
+            // here: a report that never ends is not a JSON document. We poll
+            // rather than block, so a Ctrl+C mid-batch gets an answer now and
+            // not after a fifty-second encode.
+            let mut finished = 0;
+            let mut told_about_stop = false;
+            loop {
+                match rx.recv_timeout(CANCEL_POLL) {
+                    Ok(result) => {
+                        finished += 1;
+                        let bad = matches!(
+                            result.state,
+                            FileState::Failed { .. } | FileState::Cancelled
+                        );
+                        if !args.quiet || bad {
+                            let _ = writeln!(ctx.out, "{}", report::file_line(&result, &ctx.cwd));
+                            let _ = ctx.out.flush();
+                        }
+                    }
+                    Err(RecvTimeoutError::Timeout) => {}
+                    Err(RecvTimeoutError::Disconnected) => break,
+                }
+                if !told_about_stop
+                    && finished < ready.len()
+                    && ctx.cancel.is_cancelled()
+                    && !ctx.quit.is_cancelled()
+                {
+                    let _ = writeln!(ctx.err, "{STOPPING_AFTER_BATCH}");
+                    let _ = ctx.err.flush();
+                    told_about_stop = true;
                 }
             }
             worker.join()

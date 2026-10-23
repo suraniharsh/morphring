@@ -70,6 +70,7 @@ pub fn run_in_with_config(
         engines,
         args,
         CancelToken::new(),
+        CancelToken::new(),
     )
 }
 
@@ -80,7 +81,18 @@ pub fn run_with_cancel(
     args: &[&str],
     cancel: CancelToken,
 ) -> Outcome {
-    run_full(cwd, None, engines, args, cancel)
+    run_full(cwd, None, engines, args, cancel, CancelToken::new())
+}
+
+/// Like [`run_with_cancel`], plus the quit token of a second Ctrl+C.
+pub fn run_with_quit(
+    cwd: &Path,
+    engines: Vec<Box<dyn Converter>>,
+    args: &[&str],
+    cancel: CancelToken,
+    quit: CancelToken,
+) -> Outcome {
+    run_full(cwd, None, engines, args, cancel, quit)
 }
 
 /// The one place that builds a `Ctx`; the helpers above pick the knobs.
@@ -90,6 +102,7 @@ fn run_full(
     engines: Vec<Box<dyn Converter>>,
     args: &[&str],
     cancel: CancelToken,
+    quit: CancelToken,
 ) -> Outcome {
     let (mut out, mut err) = (Vec::new(), Vec::new());
     let code = {
@@ -98,6 +111,7 @@ fn run_full(
             err: &mut err,
             cwd: cwd.to_path_buf(),
             cancel,
+            quit,
             engines,
             config_dir,
         };
