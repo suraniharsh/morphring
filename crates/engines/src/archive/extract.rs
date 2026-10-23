@@ -3,9 +3,10 @@
 //! A port of Filee's `ArchiveConverter.ExtractToFolderAsync` with the 7-Zip
 //! call swapped for our own loop per format. Every entry goes through the
 //! checks in [`super::safety`]: encrypted ZIP entries refuse the whole
-//! archive, links are skipped, unsafe names refuse the whole archive, sizes
-//! are enforced while copying, and the entry count and free disk space are
-//! capped. Archive to archive (zip -> tgz) is P2-35's business: it routes
+//! archive, symlinks are skipped, a TAR hard link to a file unpacked earlier
+//! becomes a copy of it (any other hard link refuses the whole archive),
+//! unsafe names refuse the whole archive, sizes are enforced while copying,
+//! and the entry count and free disk space are capped. Archive to archive (zip -> tgz) is P2-35's business: it routes
 //! through `folder` and the packer's folder edges.
 //!
 //! The dance, in order: allocate the output folder, unpack into a hidden
@@ -13,6 +14,7 @@
 //! peel off a single top folder, then rename or merge into place. The staging
 //! folder is a `TempDir`, so every early return cleans up after itself.
 
+use std::collections::HashSet;
 use std::fs::{self, File};
 use std::io::{self, BufReader, Read};
 use std::path::{Path, PathBuf};
@@ -149,6 +151,15 @@ impl Context<'_> {
 
     fn unsafe_entry(&self, entry: &str) -> EngineError {
         EngineError::Failed(unsafe_message(&self.archive, entry))
+    }
+
+    /// The message for a hard link whose target is not a file we already
+    /// unpacked: missing, later in the archive, outside it, or a folder.
+    fn dangling_link(&self, entry: &str, target: &str) -> EngineError {
+        EngineError::Failed(format!(
+            "{} has a link '{entry}' to '{target}', which is not in the archive.",
+            self.archive
+        ))
     }
 
     fn too_many(&self) -> EngineError {
@@ -321,6 +332,9 @@ fn untar<R: Read>(reader: R, dest: &Path, ctx: &Context<'_>) -> Result<(), Engin
     let entries = archive.entries().map_err(|e| ctx.damaged(e))?;
     let mut count: usize = 0;
     let mut written: u64 = 0;
+    // Every file this loop has written, so a hard link can only ever copy
+    // something the archive itself put here (and not, say, /etc/shadow).
+    let mut unpacked: HashSet<PathBuf> = HashSet::new();
     for entry in entries {
         ctx.check_cancel()?;
         let mut entry = entry.map_err(|e| ctx.damaged(e))?;
@@ -332,10 +346,13 @@ fn untar<R: Read>(reader: R, dest: &Path, ctx: &Context<'_>) -> Result<(), Engin
         let kind = entry.header().entry_type();
         let is_dir = kind.is_dir();
         let is_file = kind.is_file() || kind.is_contiguous() || kind.is_gnu_sparse();
-        if !is_dir && !is_file {
-            // Symlinks, hard links, devices, FIFOs and global PAX headers: none
-            // of them is a file we want, and the first two are how archives
-            // escape their folder.
+        let is_hard_link = kind.is_hard_link();
+        if !is_dir && !is_file && !is_hard_link {
+            // Symlinks, devices, FIFOs and global PAX headers: none of them is
+            // a file we want, and symlinks are how archives escape their
+            // folder. Hard links get their own branch below, because plain GNU
+            // tar uses them for every second name of the same file and
+            // dropping those loses real data.
             continue;
         }
 
@@ -349,17 +366,57 @@ fn untar<R: Read>(reader: R, dest: &Path, ctx: &Context<'_>) -> Result<(), Engin
 
         if is_dir {
             make_dir(dest, &path, ctx)?;
+        } else if is_hard_link {
+            let copied = copy_hard_link(&entry, &name, dest, &path, &unpacked, ctx)?;
+            written = written.saturating_add(copied);
+            unpacked.insert(path);
         } else {
             let declared = entry.header().size().map_err(|e| ctx.damaged(e))?;
             written = written.saturating_add(declared);
             ctx.ensure_room(declared)?;
             write_file(dest, &path, &mut entry, declared, ctx)?;
+            unpacked.insert(path);
         }
         // Without a total, ease towards 0.95 instead of pretending to know.
         let done = written as f32 / (written as f32 + 64.0 * 1024.0 * 1024.0);
         (ctx.progress)(0.02 + 0.93 * done.max(count as f32 / (count as f32 + 1000.0)));
     }
     Ok(())
+}
+
+/// Writes the hard-link `entry` (called `name`, landing at `path`) as a copy
+/// of the file it points at, and returns the bytes copied.
+///
+/// We never make a real hard link: a copy cannot alias anything, so a later
+/// entry rewriting one name can never sneak changes into the other. The target
+/// must be a file this archive already unpacked (`unpacked`); a target that
+/// is missing, comes later, sits outside the tree or is a folder refuses the
+/// archive instead of quietly losing a file and calling it a day.
+fn copy_hard_link<R: Read>(
+    entry: &tar::Entry<'_, R>,
+    name: &str,
+    dest: &Path,
+    path: &Path,
+    unpacked: &HashSet<PathBuf>,
+    ctx: &Context<'_>,
+) -> Result<u64, EngineError> {
+    let target_name = entry
+        .link_name_bytes()
+        .map(|raw| String::from_utf8_lossy(&raw).into_owned())
+        .unwrap_or_default();
+    let target = resolve_entry_path(dest, &target_name)
+        .filter(|target| unpacked.contains(target))
+        .filter(|target| target.symlink_metadata().is_ok_and(|m| m.is_file()))
+        .ok_or_else(|| ctx.dangling_link(name, &target_name))?;
+    if target == path {
+        // A link to itself: the file is already right where it wants to be,
+        // and File::create on it would truncate the very bytes we copy from.
+        return Ok(0);
+    }
+    let size = target.metadata()?.len();
+    ctx.ensure_room(size)?;
+    write_file(dest, path, &mut open(&target)?, size, ctx)?;
+    Ok(size)
 }
 
 /// Writes one entry to `path`, at most `declared` bytes of it.

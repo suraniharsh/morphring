@@ -469,7 +469,7 @@ fn a_symlink_then_a_file_through_it_stays_inside() {
 }
 
 #[test]
-fn hard_links_are_skipped() {
+fn a_hard_link_out_of_the_tree_is_refused_and_the_victim_untouched() {
     let sandbox = Sandbox::new();
     let victim = sandbox.outside().join("victim.txt");
     fs::write(&victim, "precious").unwrap();
@@ -478,14 +478,185 @@ fn hard_links_are_skipped() {
     write_tar(
         &input,
         &[
-            TarEntry::HardLink("hl", &target),
             TarEntry::File("real.txt", b"ok"),
+            TarEntry::HardLink("hl", &target),
         ],
     );
-    sandbox.run(&input, "tar").unwrap();
-    assert!(!sandbox.output().join("hl").exists());
-    assert!(sandbox.output().join("real.txt").is_file());
+    let err = message(sandbox.run(&input, "tar"));
+    assert_eq!(
+        err,
+        format!("hard.tar has a link 'hl' to '{target}', which is not in the archive.")
+    );
+    // Not even real.txt, which came first: the half-done staging is binned.
+    assert_eq!(sandbox.tree(), ["out", "outside", "outside/victim.txt"]);
     assert_eq!(fs::read_to_string(&victim).unwrap(), "precious");
+}
+
+/// What plain GNU tar writes for `report.txt` with a second hard-linked name:
+/// the first name it meets carries the bytes, the second is a link entry.
+fn write_hard_linked_tar(path: &Path) {
+    write_tar(
+        path,
+        &[
+            TarEntry::Dir("hl/"),
+            TarEntry::Dir("hl/docs/"),
+            TarEntry::File("hl/docs/report-copy.txt", b"important\n"),
+            TarEntry::HardLink("hl/docs/report.txt", "hl/docs/report-copy.txt"),
+        ],
+    );
+}
+
+#[test]
+fn a_hard_link_to_an_earlier_file_unpacks_as_a_copy() {
+    let sandbox = Sandbox::new();
+    let input = sandbox.input("hardlinked.tar");
+    write_hard_linked_tar(&input);
+    sandbox.run(&input, "tar").unwrap();
+
+    assert_eq!(
+        sandbox.tree(),
+        [
+            "out",
+            "out/result",
+            "out/result/docs",
+            "out/result/docs/report-copy.txt",
+            "out/result/docs/report.txt",
+            "outside",
+        ]
+    );
+    let docs = sandbox.output().join("docs");
+    assert_eq!(fs::read(docs.join("report.txt")).unwrap(), b"important\n");
+    assert_eq!(
+        fs::read(docs.join("report-copy.txt")).unwrap(),
+        b"important\n"
+    );
+    // A copy, not a real link: writing one name must not touch the other.
+    fs::write(docs.join("report.txt"), "edited").unwrap();
+    assert_eq!(
+        fs::read(docs.join("report-copy.txt")).unwrap(),
+        b"important\n"
+    );
+    sandbox.assert_contained();
+}
+
+/// Hands out `<dir>/<stem>.<ext>` for an archive file.
+struct FileAllocator {
+    dir: PathBuf,
+    stem: &'static str,
+}
+
+impl OutputAllocator for FileAllocator {
+    fn allocate(&mut self, ext: &str, _suffix: &str) -> Option<PathBuf> {
+        Some(self.dir.join(format!("{}.{ext}", self.stem)))
+    }
+}
+
+#[test]
+fn a_hard_linked_tar_repacked_to_zip_keeps_both_files() {
+    let sandbox = Sandbox::new();
+    let input = sandbox.input("hardlinked.tar");
+    write_hard_linked_tar(&input);
+    // tar -> zip is tar -> folder -> zip, so the unpack is where files go missing.
+    sandbox.run(&input, "tar").unwrap();
+    let pack = Step {
+        input: sandbox.output(),
+        from: FormatId::new("folder"),
+        to: FormatId::new("zip"),
+        options: ConvertOptions::default(),
+        work_dir: sandbox.root().join("work-not-used"),
+    };
+    let mut alloc = FileAllocator {
+        dir: sandbox.root().join("in"),
+        stem: "repacked",
+    };
+    let zips = ArchiveEngine::new()
+        .convert(&pack, &mut alloc, &|_| {}, &CancelToken::new())
+        .unwrap();
+    assert_eq!(zips.len(), 1);
+
+    let mut zip = zip::ZipArchive::new(File::open(&zips[0]).unwrap()).unwrap();
+    let mut files: Vec<(String, String)> = Vec::new();
+    for index in 0..zip.len() {
+        let mut entry = zip.by_index(index).unwrap();
+        if entry.is_dir() {
+            continue;
+        }
+        let name = entry.name().unwrap().into_owned();
+        let mut text = String::new();
+        std::io::Read::read_to_string(&mut entry, &mut text).unwrap();
+        files.push((name, text));
+    }
+    files.sort();
+    assert_eq!(files.len(), 2, "{files:?}");
+    assert!(files[0].0.ends_with("docs/report-copy.txt"), "{files:?}");
+    assert!(files[1].0.ends_with("docs/report.txt"), "{files:?}");
+    assert!(files.iter().all(|(_, text)| text == "important\n"));
+}
+
+#[test]
+fn a_hard_link_climbing_out_with_dotdot_is_refused() {
+    let sandbox = Sandbox::new();
+    let input = sandbox.input("climb.tar");
+    write_tar(
+        &input,
+        &[
+            TarEntry::File("a.txt", b"a"),
+            TarEntry::HardLink("b.txt", "../outside"),
+        ],
+    );
+    let err = message(sandbox.run(&input, "tar"));
+    assert_eq!(
+        err,
+        "climb.tar has a link 'b.txt' to '../outside', which is not in the archive."
+    );
+    assert_eq!(sandbox.tree(), ["out", "outside"]);
+}
+
+#[test]
+fn a_hard_link_to_a_missing_or_later_entry_is_refused() {
+    let sandbox = Sandbox::new();
+    let input = sandbox.input("dangling.tar");
+    write_tar(
+        &input,
+        &[
+            TarEntry::File("a.txt", b"a"),
+            TarEntry::HardLink("b.txt", "nowhere.txt"),
+        ],
+    );
+    let err = message(sandbox.run(&input, "tar"));
+    assert_eq!(
+        err,
+        "dangling.tar has a link 'b.txt' to 'nowhere.txt', which is not in the archive."
+    );
+    assert_eq!(sandbox.tree(), ["out", "outside"]);
+
+    // A target that only shows up after the link is just as missing when the
+    // link is written, since TAR streams strictly front to back.
+    write_tar(
+        &input,
+        &[
+            TarEntry::HardLink("b.txt", "a.txt"),
+            TarEntry::File("a.txt", b"a"),
+        ],
+    );
+    let err = message(sandbox.run(&input, "tar"));
+    assert_eq!(
+        err,
+        "dangling.tar has a link 'b.txt' to 'a.txt', which is not in the archive."
+    );
+    assert_eq!(sandbox.tree(), ["out", "outside"]);
+
+    // A folder is not a file to copy, even when the archive made it.
+    write_tar(
+        &input,
+        &[TarEntry::Dir("d/"), TarEntry::HardLink("b.txt", "d")],
+    );
+    let err = message(sandbox.run(&input, "tar"));
+    assert_eq!(
+        err,
+        "dangling.tar has a link 'b.txt' to 'd', which is not in the archive."
+    );
+    assert_eq!(sandbox.tree(), ["out", "outside"]);
 }
 
 #[test]
