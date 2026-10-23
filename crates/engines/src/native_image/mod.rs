@@ -4,7 +4,10 @@
 //! It covers png, jpg, gif, bmp, tiff, ico, qoi, ppm and tga, each to each,
 //! at a lower cost than ImageMagick so the planner reaches for it first. A
 //! preset it cannot honour (see [`ops::accepts`]) benches it for the job, and
-//! ImageMagick takes over.
+//! ImageMagick takes over. So does any source that may hold several pictures
+//! (a TIFF, or a GIF leaving GIF): this engine writes one picture per file,
+//! so it prices itself out of those and refuses a multi-page file outright
+//! rather than keeping page 1 and losing the rest.
 
 pub mod ops;
 
@@ -91,6 +94,11 @@ impl Converter for ImageEngine {
             return Ok(Vec::new());
         };
 
+        // The planner sends multi-page sources to ImageMagick when it can. When
+        // it can't, say so out loud: writing page 1 and calling it a day is
+        // how three pages of a contract became one.
+        refuse_extra_pictures(step)?;
+
         let picture = if step.from.as_str() == "gif" && step.to.as_str() == "gif" {
             Picture::Animation(read_animation(step, cancel)?)
         } else {
@@ -171,11 +179,94 @@ fn too_large(path: &Path) -> EngineError {
     ))
 }
 
+/// Fails when `step.input` holds more pictures than this engine would write:
+/// any multi-page TIFF, and an animated GIF on every road but GIF to GIF (the
+/// only one that carries the frames across). The file is sniffed rather than
+/// trusted by name, like [`read_still`] does, so a TIFF wearing a .png
+/// extension gets the same answer.
+fn refuse_extra_pictures(step: &Step) -> Result<(), EngineError> {
+    let animated_road = step.from.as_str() == "gif" && step.to.as_str() == "gif";
+    let (count, unit) = match sniff(&step.input)? {
+        Sniffed::Tiff => (tiff_pages(&step.input)?, "page"),
+        Sniffed::Gif if !animated_road => (gif_frames(&step.input)?, "frame"),
+        _ => return Ok(()),
+    };
+    if count <= 1 {
+        return Ok(());
+    }
+    let name = step.input.file_name().map_or_else(
+        || step.input.display().to_string(),
+        |n| n.to_string_lossy().into_owned(),
+    );
+    Err(EngineError::Failed(format!(
+        "{name} has {count} {unit}s; the built-in image engine converts only one. \
+         Install ImageMagick to convert every {unit}."
+    )))
+}
+
+/// The container formats that can hide extra pictures, by magic bytes.
+enum Sniffed {
+    Tiff,
+    Gif,
+    Other,
+}
+
+fn sniff(path: &Path) -> Result<Sniffed, EngineError> {
+    use std::io::Read;
+    let mut head = [0u8; 4];
+    let mut file = File::open(path)?;
+    let n = file.read(&mut head)?;
+    Ok(match &head[..n] {
+        // Classic TIFF (42) and BigTIFF (43), in both byte orders.
+        b"II*\0" | b"MM\0*" | b"II+\0" | b"MM\0+" => Sniffed::Tiff,
+        b"GIF8" => Sniffed::Gif,
+        _ => Sniffed::Other,
+    })
+}
+
+/// The number of pages (IFDs) in a TIFF. Only the directories are read, not
+/// the pixels. A file the `tiff` crate cannot even open counts as one page,
+/// so the decoder proper gets to explain what is wrong with it; a chain that
+/// breaks halfway counts the pages found before the break.
+fn tiff_pages(path: &Path) -> Result<usize, EngineError> {
+    let Ok(mut decoder) = tiff::decoder::Decoder::new(BufReader::new(File::open(path)?)) else {
+        return Ok(1);
+    };
+    let mut pages = 1;
+    while decoder.more_images() && decoder.next_image().is_ok() {
+        pages += 1;
+    }
+    Ok(pages)
+}
+
+/// The number of frames in a GIF. The format has no frame count in its
+/// header, so this decodes them all and throws them away; it only runs for a
+/// GIF leaving the format, and GIFs are rarely the big files in the room.
+fn gif_frames(path: &Path) -> Result<usize, EngineError> {
+    let Ok(mut decoder) = GifDecoder::new(BufReader::new(File::open(path)?)) else {
+        return Ok(1);
+    };
+    let (w, h) = decoder.dimensions();
+    // Too big, or not willing to live under our limits: let the real read
+    // give the real error.
+    if u64::from(w) * u64::from(h) > ops::MAX_PIXELS || decoder.set_limits(limits()).is_err() {
+        return Ok(1);
+    }
+    let mut frames = 0;
+    for frame in decoder.into_frames() {
+        if frame.is_err() {
+            break;
+        }
+        frames += 1;
+    }
+    Ok(frames.max(1))
+}
+
 /// Decodes the first frame of `step.input`, upright, with its ICC profile.
 ///
-/// For a multi-frame source (an animated GIF, a multi-page TIFF) that is the
-/// first frame; for an ICO it is the largest icon, which is the one the
-/// `image` crate's ICO decoder picks.
+/// For an ICO it is the largest icon, which is the one the `image` crate's
+/// ICO decoder picks. A multi-page TIFF or an animated GIF never gets here:
+/// [`refuse_extra_pictures`] turns those away first.
 fn read_still(step: &Step) -> Result<(DynamicImage, Option<Vec<u8>>), EngineError> {
     let path = &step.input;
     let mut reader = ImageReader::new(BufReader::new(File::open(path)?)).with_guessed_format()?;

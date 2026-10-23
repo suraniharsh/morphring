@@ -25,6 +25,19 @@ pub const COST: u32 = 8;
 /// 256-colour GIF, and this number is what keeps it on the right road.
 pub const STILL_TO_GIF_COST: u32 = 12;
 
+/// Cost of a native edge out of a source that can hold several pictures: any
+/// TIFF, and a GIF going anywhere but GIF. This engine decodes one picture
+/// per file, so these jobs belong to ImageMagick, which writes every page.
+///
+/// The number is squeezed between two roads. It has to lose to magick
+/// straight there (10 plus magick's registry penalty of 3) and to magick into
+/// PNG plus our PNG to X (13 + 8 = 21, the only road to QOI), so it starts
+/// above 21. It also has to beat the detour through PDF (PDF engine 12, then
+/// poppler rendering it back, 14), or a box without ImageMagick would
+/// rasterise a TIFF through a PDF just to dodge us. So 22 to 25 works, and
+/// 22 it is: not a pretty number, but routes_images.rs pins both ends.
+pub const MULTI_FRAME_COST: u32 = 22;
+
 /// Longest side a JPEG may have. The format's real limit is 65,535; 65,500
 /// keeps clear of encoder rounding (Filee's `MaxSide`, issue #50).
 pub const JPEG_MAX_SIDE: u32 = 65_500;
@@ -63,10 +76,14 @@ const fn build_edges() -> [Edge; FORMATS.len() * FORMATS.len()] {
     edges
 }
 
-/// 12 for a still picture into GIF, 8 for everything else. TIFF counts as a
-/// still here: this engine only ever reads its first page.
+/// [`MULTI_FRAME_COST`] out of a source that may hold several pictures (a
+/// TIFF, or a GIF that is not staying a GIF), 12 for a still picture into
+/// GIF, 8 for everything else. GIF to GIF keeps the plain cost: it is the one
+/// road where this engine carries every frame across.
 const fn edge_cost(from: &str, to: &str) -> u32 {
-    if is(to, "gif") && !is(from, "gif") {
+    if is(from, "tiff") || (is(from, "gif") && !is(to, "gif")) {
+        MULTI_FRAME_COST
+    } else if is(to, "gif") && !is(from, "gif") {
         STILL_TO_GIF_COST
     } else {
         COST
@@ -326,7 +343,12 @@ mod tests {
     fn every_pair_is_an_edge_and_still_to_gif_costs_more() {
         assert_eq!(EDGES.len(), 81);
         for edge in EDGES {
-            let want = if edge.to.as_str() == "gif" && edge.from.as_str() != "gif" {
+            let (from, to) = (edge.from.as_str(), edge.to.as_str());
+            // A multi-page TIFF or an animated GIF is magick's job, so those
+            // edges are priced out of the running whenever magick is around.
+            let want = if from == "tiff" || (from == "gif" && to != "gif") {
+                22
+            } else if to == "gif" && from != "gif" {
                 12
             } else {
                 8

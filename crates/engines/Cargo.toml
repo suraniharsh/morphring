@@ -31,7 +31,7 @@ default = [
     "trace",
     "pdf-native-render",
 ]
-img = ["dep:image"]
+img = ["dep:image", "dep:tiff"]
 svg = ["dep:resvg", "dep:usvg", "dep:flate2"]
 pdf = ["dep:lopdf", "dep:krilla", "dep:krilla-svg", "dep:usvg", "dep:image"]
 archive = ["dep:zip", "dep:tar", "dep:flate2", "dep:bzip2", "dep:lzma-rust2", "dep:sevenz-rust2", "dep:encoding_rs", "dep:chrono"]
@@ -76,6 +76,7 @@ url.workspace = true
 directories.workspace = true
 dunce.workspace = true
 image = { workspace = true, optional = true }
+tiff = { workspace = true, optional = true }
 resvg = { workspace = true, optional = true }
 usvg = { workspace = true, optional = true }
 krilla = { workspace = true, optional = true }

@@ -2111,6 +2111,7 @@ dependencies = [
  "tar",
  "tempfile",
  "thiserror 2.0.21",
+ "tiff",
  "tobj",
  "toml",
  "tracing",

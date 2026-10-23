@@ -9,7 +9,7 @@
 
 use morphring_core::planner::{MAX_PRIORITY_PENALTY, Planner, Route};
 use morphring_core::testing::FakeConverter;
-use morphring_core::{ConvertOptions, Converter, FormatId};
+use morphring_core::{ConvertOptions, Converter, FormatId, Resize};
 use morphring_engines::registry;
 
 /// The registry's engines plus a planner that pretends they're all installed.
@@ -27,10 +27,20 @@ impl Graph {
     /// engine that declines the options is swapped for a stand-in with no
     /// edges, so every other engine keeps its place (and its penalty).
     fn for_options(options: &ConvertOptions) -> Self {
+        Self::build(options, &[])
+    }
+
+    /// The default graph on a machine without the engines in `missing`: each
+    /// one keeps its place in the list but brings no edges.
+    fn without(missing: &[&str]) -> Self {
+        Self::build(&ConvertOptions::default(), missing)
+    }
+
+    fn build(options: &ConvertOptions, missing: &[&str]) -> Self {
         let engines: Vec<Box<dyn Converter>> = registry::all()
             .into_iter()
             .map(|e| {
-                if e.accepts(options) {
+                if e.accepts(options) && !missing.contains(&e.id()) {
                     e
                 } else {
                     Box::new(FakeConverter::new(e.id())) as Box<dyn Converter>
@@ -117,4 +127,100 @@ fn a_preset_the_builtin_engine_declines_goes_to_magick() {
     let route = g.plan("png", "jpg").expect("png -> jpg has a route");
     assert_eq!(g.steps(&route), ["magick(png->jpg)"]);
     assert_eq!(route.cost, 10 + g.penalty("magick"));
+}
+
+// FX-03: the built-in engine decodes one picture per file, so a multi-page
+// TIFF or an animated GIF sent its way lost every page after the first, and
+// said "Converted 1 of 1" with a straight face. With magick installed, those
+// sources must go to magick, whose frame policy keeps every page.
+
+#[test]
+fn multi_page_tiff_to_png_goes_to_magick() {
+    let g = Graph::new();
+    let route = g.plan("tiff", "png").expect("tiff -> png has a route");
+    assert_eq!(g.steps(&route), ["magick(tiff->png)"]);
+}
+
+#[test]
+fn animated_gif_to_png_and_tiff_go_to_magick() {
+    let g = Graph::new();
+    for to in ["png", "jpg", "bmp", "tga", "ppm", "tiff"] {
+        let route = g.plan("gif", to).expect("gif has a route");
+        assert_eq!(
+            g.steps(&route),
+            [format!("magick(gif->{to})")],
+            "gif -> {to}"
+        );
+    }
+    // GIF to GIF is the one road the built-in engine carries every frame on.
+    let route = g.plan("gif", "gif").expect("gif -> gif has a route");
+    assert_eq!(g.steps(&route), ["image(gif->gif)"]);
+}
+
+#[test]
+fn every_tiff_target_magick_writes_goes_to_magick() {
+    let g = Graph::new();
+    for to in ["jpg", "bmp", "gif", "tga", "ppm", "ico", "tiff"] {
+        let route = g.plan("tiff", to).expect("tiff has a route");
+        assert_eq!(
+            g.steps(&route),
+            [format!("magick(tiff->{to})")],
+            "tiff -> {to}"
+        );
+    }
+}
+
+#[test]
+fn a_half_size_tiff_to_tiff_goes_to_magick() {
+    let mut options = ConvertOptions::default();
+    options.image.resize = Resize::Percent;
+    options.image.resize_percent = 50;
+    let g = Graph::for_options(&options);
+    let route = g.plan("tiff", "tiff").expect("tiff -> tiff has a route");
+    assert_eq!(g.steps(&route), ["magick(tiff->tiff)"]);
+}
+
+#[test]
+fn tiff_and_gif_to_qoi_split_the_pages_in_magick_first() {
+    // magick writes no QOI, so it splits the pages into PNGs and the
+    // built-in engine encodes each one.
+    let g = Graph::new();
+    for from in ["tiff", "gif"] {
+        let route = g.plan(from, "qoi").expect("-> qoi has a route");
+        assert_eq!(
+            g.steps(&route),
+            [format!("magick({from}->png)"), "image(png->qoi)".to_owned()],
+            "{from} -> qoi"
+        );
+    }
+}
+
+#[test]
+fn still_formats_stay_on_the_builtin_engine() {
+    let g = Graph::new();
+    for (from, to) in [("png", "jpg"), ("jpg", "tiff"), ("bmp", "png")] {
+        let route = g.plan(from, to).expect("still has a route");
+        assert_eq!(g.steps(&route), [format!("image({from}->{to})")]);
+    }
+}
+
+#[test]
+fn without_magick_tiff_and_gif_still_go_straight_to_the_builtin_engine() {
+    // No detour through a PDF and back just to avoid the pricier edge: the
+    // built-in engine takes the job and refuses it plainly if it has pages.
+    let g = Graph::without(&["magick"]);
+    for (from, to) in [
+        ("tiff", "png"),
+        ("tiff", "jpg"),
+        ("gif", "png"),
+        ("tiff", "tiff"),
+    ] {
+        let route = g.plan(from, to).expect("still has a route");
+        assert_eq!(
+            g.steps(&route),
+            [format!("image({from}->{to})")],
+            "{from} -> {to}"
+        );
+        assert_eq!(route.cost, 22 + g.penalty("image"));
+    }
 }

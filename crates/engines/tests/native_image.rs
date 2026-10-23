@@ -322,14 +322,95 @@ fn gif_to_gif_keeps_the_animation() {
     assert_eq!(frames(run.output()), frames(&src));
 }
 
+/// Writes a TIFF of `pages` 8 x 6 RGB pages, each a different grey, with the
+/// `tiff` crate directly (the `image` encoder only ever writes one page).
+fn tiff_with_pages(dir: &Path, pages: u8) -> PathBuf {
+    let path = dir.join(format!("pages{pages}.tiff"));
+    let file = std::fs::File::create(&path).unwrap_or_else(|e| panic!("create tiff: {e}"));
+    let mut tiff = tiff::encoder::TiffEncoder::new(std::io::BufWriter::new(file))
+        .unwrap_or_else(|e| panic!("tiff encoder: {e}"));
+    for page in 0..pages {
+        let px = vec![page.wrapping_mul(80); 8 * 6 * 3];
+        tiff.write_image::<tiff::encoder::colortype::RGB8>(8, 6, &px)
+            .unwrap_or_else(|e| panic!("write page: {e}"));
+    }
+    path
+}
+
+/// Asserts the run failed with FX-03's "install ImageMagick" message and
+/// wrote nothing next to where the output would have gone.
+fn assert_refused(run: &Run, needle: &str) {
+    let err = match &run.result {
+        Ok(paths) => panic!("expected a refusal, got {paths:?}"),
+        Err(err) => err.to_string(),
+    };
+    assert!(err.contains(needle), "{err}");
+    assert!(err.contains("Install ImageMagick"), "{err}");
+    let leftovers: Vec<_> = std::fs::read_dir(run._tmp.path())
+        .unwrap_or_else(|e| panic!("list temp dir: {e}"))
+        .filter_map(Result::ok)
+        .filter(|e| e.file_name().to_string_lossy().starts_with("out"))
+        .collect();
+    assert!(leftovers.is_empty(), "{leftovers:?}");
+}
+
+// FX-03: the engine reads one picture per file. It used to write page 1 of a
+// multi-page TIFF (frame 1 of an animated GIF) and report success; now it
+// says it can't, so nothing vanishes without a word.
+
 #[test]
-fn gif_to_png_takes_the_first_frame() {
-    let run = convert(
-        &fixture("sample.gif"),
-        "gif",
+fn a_multi_page_tiff_is_refused_not_cut_to_page_one() {
+    let tmp = tempfile::tempdir().expect("temp dir");
+    let src = tiff_with_pages(tmp.path(), 2);
+    for to in ["png", "jpg", "tiff", "gif", "qoi", "ico"] {
+        let run = convert(&src, "tiff", to, ConvertOptions::default());
+        assert_refused(&run, "pages2.tiff has 2 pages");
+    }
+    // A preset doesn't change the arithmetic.
+    let mut half = ConvertOptions::default();
+    half.image.resize = Resize::Percent;
+    half.image.resize_percent = 50;
+    assert_refused(&convert(&src, "tiff", "tiff", half), "has 2 pages");
+}
+
+#[test]
+fn a_multi_page_tiff_with_the_wrong_name_is_still_refused() {
+    let tmp = tempfile::tempdir().expect("temp dir");
+    let src = tmp.path().join("sneaky.png");
+    std::fs::rename(tiff_with_pages(tmp.path(), 3), &src).expect("rename");
+    let run = convert(&src, "png", "jpg", ConvertOptions::default());
+    assert_refused(&run, "sneaky.png has 3 pages");
+}
+
+#[test]
+fn a_one_page_tiff_still_converts() {
+    let tmp = tempfile::tempdir().expect("temp dir");
+    let src = tiff_with_pages(tmp.path(), 1);
+    let run = convert(&src, "tiff", "png", ConvertOptions::default());
+    assert_eq!(format_of(run.output()), ImageFormat::Png);
+    assert_eq!(open(run.output()).dimensions(), (8, 6));
+}
+
+#[test]
+fn an_animated_gif_leaving_gif_is_refused() {
+    for to in ["png", "tiff", "jpg"] {
+        let run = convert(&fixture("sample.gif"), "gif", to, ConvertOptions::default());
+        assert_refused(&run, "sample.gif has 3 frames");
+    }
+}
+
+#[test]
+fn a_one_frame_gif_still_converts() {
+    let tmp = tempfile::tempdir().expect("temp dir");
+    let src = tmp.path().join("still.gif");
+    let png = convert(
+        &fixture("sample.png"),
         "png",
+        "gif",
         ConvertOptions::default(),
     );
+    std::fs::copy(png.output(), &src).expect("copy");
+    let run = convert(&src, "gif", "png", ConvertOptions::default());
     assert_eq!(format_of(run.output()), ImageFormat::Png);
 }
 
