@@ -102,7 +102,7 @@ pub struct ConvertArgs {
     #[arg(long)]
     pub json: bool,
 
-    /// Print only the summary and errors.
+    /// Print nothing but errors; the exit code tells the rest.
     #[arg(long)]
     pub quiet: bool,
 
@@ -319,7 +319,7 @@ Options:
       --skip             Leave existing output files alone
       --keep-dates       Give each output the dates of its source
       --json             Print the result as JSON (for scripts and other programs)
-      --quiet            Print only the summary and errors
+      --quiet            Print nothing but errors (the exit code tells the rest)
       --verbose          Log what MorphRing runs to stderr
   -h, --help             Show this help
 
@@ -622,5 +622,30 @@ mod tests {
             WATCH_HELP.contains(&format!("(default {secs})")),
             "{WATCH_HELP}"
         );
+    }
+
+    // FX-23: the help once promised a summary under --quiet, while the code
+    // (rightly) prints nothing but errors. Scripts love silence, so the words
+    // bend to the behaviour, not the other way round.
+    #[test]
+    fn quiet_help_promises_errors_only_and_no_summary() {
+        let quiet = |help: &str| {
+            help.lines()
+                .find(|line| line.trim_start().starts_with("--quiet"))
+                .map(str::to_owned)
+                .expect("--quiet is in the help")
+        };
+        for line in [quiet(CONVERT_HELP), quiet(WATCH_HELP)] {
+            assert!(line.contains("nothing but errors"), "{line}");
+            assert!(!line.to_lowercase().contains("summary"), "{line}");
+        }
+        let cmd = Cli::command();
+        let convert = cmd.find_subcommand("convert").expect("convert exists");
+        let arg = convert
+            .get_arguments()
+            .find(|arg| arg.get_id() == "quiet")
+            .expect("convert has --quiet");
+        let doc = arg.get_help().expect("--quiet has a doc").to_string();
+        assert!(!doc.to_lowercase().contains("summary"), "{doc}");
     }
 }
