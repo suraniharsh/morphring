@@ -141,6 +141,15 @@ fn install(args: &IntegrateArgs, ctx: &mut Ctx, host: &Host, home: &Path) -> i32
     if !exe.is_file() {
         return fail(ctx, &format!("{} is not a file.", exe.display()));
     }
+    if !is_executable(&exe) {
+        return fail(
+            ctx,
+            &format!(
+                "{} is not executable. Point --exe at the MorphRing app.",
+                exe.display()
+            ),
+        );
+    }
 
     let changes = match integration::install(&exe, home, args.dry_run) {
         Ok(changes) => changes,
@@ -200,6 +209,26 @@ fn uninstall(args: &IntegrateArgs, ctx: &mut Ctx, home: &Path) -> i32 {
     0
 }
 
+/// Whether `path` can be started as a program. A menu whose Exec= points at
+/// notes.txt installs beautifully and then does absolutely nothing, which is
+/// the worst kind of success.
+#[cfg(unix)]
+fn is_executable(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+
+    // Any of the three x bits will do: whose bit counts is the kernel's call,
+    // and we only want to catch the plainly-not-a-program case.
+    std::fs::metadata(path).is_ok_and(|m| m.permissions().mode() & 0o111 != 0)
+}
+
+/// Windows has no x bit to ask. Whether a file runs is down to PATHEXT, and
+/// demanding `.exe` would turn away a perfectly good `.cmd` wrapper, so here
+/// "is a file" is as far as we check.
+#[cfg(not(unix))]
+fn is_executable(_path: &Path) -> bool {
+    true
+}
+
 /// "Dolphin, Nautilus, Nemo and Thunar".
 fn english_list(names: &[&str]) -> String {
     match names.split_last() {
@@ -228,6 +257,16 @@ mod tests {
 
     use super::*;
 
+    /// chmod for tests. Windows has no x bit, so there it shrugs.
+    #[cfg_attr(not(unix), allow(unused_variables))]
+    fn set_mode(path: &Path, mode: u32) {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(path, fs::Permissions::from_mode(mode)).unwrap();
+        }
+    }
+
     /// A fake world: a temp home and a fake app binary inside it.
     struct World {
         dir: TempDir,
@@ -239,7 +278,9 @@ mod tests {
             fs::create_dir_all(dir.path().join("home")).unwrap();
             fs::create_dir_all(dir.path().join("bin")).unwrap();
             // Not a real app, but the menus only need a path that exists.
-            fs::write(dir.path().join("bin").join(APP_BINARY), "#!/bin/sh\n").unwrap();
+            let app = dir.path().join("bin").join(APP_BINARY);
+            fs::write(&app, "#!/bin/sh\n").unwrap();
+            set_mode(&app, 0o755);
             Self { dir }
         }
 
@@ -433,6 +474,7 @@ mod tests {
     fn exe_flag_overrides_the_app_and_resolves_against_cwd() {
         let world = World::new();
         fs::write(world.dir.path().join("my app"), "").unwrap();
+        set_mode(&world.dir.path().join("my app"), 0o755);
         let host = Host {
             app: None,
             ..world.host(true)
@@ -466,6 +508,32 @@ mod tests {
         let (code, _, err) = world.run(&["install"], &no_home);
         assert_eq!(code, 1);
         assert!(err.contains("home folder"), "{err}");
+    }
+
+    // Unix only: Windows has no x bit, and there "is a file" is the whole check.
+    #[cfg(unix)]
+    #[test]
+    fn exe_that_is_not_executable_is_refused_and_writes_nothing() {
+        let world = World::new();
+        let notes = world.dir.path().join("notes.txt");
+        fs::write(&notes, "not a program").unwrap();
+        set_mode(&notes, 0o644);
+
+        let (code, out, err) = world.run(&["install", "--exe", "notes.txt"], &world.host(true));
+        assert_eq!((code, out.as_str()), (1, ""));
+        assert_eq!(
+            err,
+            format!(
+                "morphring: {} is not executable. Point --exe at the MorphRing app.\n",
+                notes.display()
+            )
+        );
+        assert!(!world.home().join(".local").exists());
+
+        // Same file, now with its x bits: past the check and installed.
+        set_mode(&notes, 0o755);
+        let (code, _, err) = world.run(&["install", "--exe", "notes.txt"], &world.host(true));
+        assert_eq!((code, err.as_str()), (0, ""));
     }
 
     #[test]
