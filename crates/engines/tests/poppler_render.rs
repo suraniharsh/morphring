@@ -199,3 +199,72 @@ fn a_cancelled_token_stops_before_rendering() {
         .unwrap_err();
     assert!(matches!(err, EngineError::Cancelled), "{err}");
 }
+
+/// Builds a PDF locked with a user password in `dir`, using Ghostscript.
+/// The page itself is beside the point; nobody without "u" gets to see it.
+fn locked_pdf(dir: &Path) -> PathBuf {
+    let ps = dir.join("page.ps");
+    fs::write(
+        &ps,
+        "/Helvetica findfont 24 scalefont setfont 72 720 moveto (Locked) show showpage\n",
+    )
+    .unwrap_or_else(|e| panic!("write ps: {e}"));
+    let pdf = dir.join("locked.pdf");
+    let status = std::process::Command::new("gs")
+        .args([
+            "-q",
+            "-dNOPAUSE",
+            "-dBATCH",
+            "-dSAFER",
+            "-sDEVICE=pdfwrite",
+            "-sOwnerPassword=o",
+            "-sUserPassword=u",
+        ])
+        .arg(format!("-sOutputFile={}", pdf.display()))
+        .arg(&ps)
+        .status()
+        .unwrap_or_else(|e| panic!("run gs: {e}"));
+    assert!(status.success(), "gs could not build the locked PDF");
+    pdf
+}
+
+/// Converts `input` to `to` and returns the error it must fail with.
+fn convert_err(input: &Path, to: &'static str, dir: &Path) -> EngineError {
+    let step = Step {
+        input: input.to_path_buf(),
+        from: FormatId::new("pdf"),
+        to: FormatId::new(to),
+        options: ConvertOptions::default(),
+        work_dir: dir.join(format!("work-{to}")),
+    };
+    let result = PopplerEngine::new().convert(
+        &step,
+        &mut DirAllocator {
+            dir: dir.to_path_buf(),
+        },
+        &|_| {},
+        &CancelToken::new(),
+    );
+    match result {
+        Ok(files) => panic!("{to}: a locked PDF must not convert, got {files:?}"),
+        Err(err) => err,
+    }
+}
+
+#[test]
+fn a_password_protected_pdf_is_explained_not_echoed() {
+    require_engine!("pdftoppm");
+    require_engine!("pdftotext");
+    require_engine!("gs");
+    let tmp = TempDir::new().unwrap_or_else(|e| panic!("temp dir: {e}"));
+    let pdf = locked_pdf(tmp.path());
+    for to in ["png", "txt"] {
+        let err = convert_err(&pdf, to, tmp.path());
+        assert!(matches!(err, EngineError::Failed(_)), "{to}: {err:?}");
+        assert_eq!(
+            err.to_string(),
+            "The PDF is password-protected. Remove the password and try again.",
+            "{to}"
+        );
+    }
+}

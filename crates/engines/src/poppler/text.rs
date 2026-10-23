@@ -134,7 +134,9 @@ fn run_error(err: RunError) -> EngineError {
             "pdftotext took longer than {} s and was stopped",
             TIMEOUT.as_secs()
         )),
-        other => EngineError::Failed(format!("pdftotext {other}")),
+        // A locked PDF gets a sentence, not pdftotext's command-line grumbling.
+        other => super::password_error(&other)
+            .unwrap_or_else(|| EngineError::Failed(format!("pdftotext {other}"))),
     }
 }
 

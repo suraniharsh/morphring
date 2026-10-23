@@ -299,10 +299,15 @@ fn page_count(
     match process::run(pdfinfo, &[input.into()], opts, cancel) {
         Ok(output) => Ok(parse_page_count(&output.stdout)),
         Err(RunError::Cancelled) => Err(EngineError::Cancelled),
-        Err(err) => {
-            tracing::debug!(error = %err, "pdfinfo failed; rendering every page");
-            Ok(None)
-        }
+        // pdftoppm would hit the very same lock, so say so now instead of
+        // shrugging and letting it fail with poppler's wording.
+        Err(err) => match super::password_error(&err) {
+            Some(locked) => Err(locked),
+            None => {
+                tracing::debug!(error = %err, "pdfinfo failed; rendering every page");
+                Ok(None)
+            }
+        },
     }
 }
 
@@ -323,7 +328,8 @@ fn run_pdftoppm(
             "Poppler did not finish within {} seconds",
             TIMEOUT.as_secs()
         ))),
-        Err(err) => Err(EngineError::Failed(format!("pdftoppm {err}"))),
+        Err(err) => Err(super::password_error(&err)
+            .unwrap_or_else(|| EngineError::Failed(format!("pdftoppm {err}")))),
     }
 }
 

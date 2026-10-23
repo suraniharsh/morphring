@@ -15,6 +15,30 @@ use morphring_core::{
 
 use crate::discovery::{self, Tool};
 use crate::parts::{Part, Parts};
+use crate::process::RunError;
+
+/// The message for a PDF that won't open without a password. Word for word
+/// what pdf-split says, so the user hears the same sentence whichever engine
+/// tripped over the lock.
+pub(crate) const PASSWORD_PROTECTED: &str =
+    "The PDF is password-protected. Remove the password and try again.";
+
+/// What every poppler tool prints when the PDF needs a password nobody gave
+/// it. Owner-only locks open fine, so this only shows up for the real thing.
+const INCORRECT_PASSWORD: &str = "Incorrect password";
+
+/// The friendly error for a failed poppler run that tripped over a password,
+/// or `None` when the failure was about something else. Poppler shouts
+/// "Command Line Error: Incorrect password" at people who never typed one;
+/// we would rather tell them what actually happened.
+pub(crate) fn password_error(err: &RunError) -> Option<EngineError> {
+    match err {
+        RunError::Failed { tail, .. } if tail.iter().any(|l| l.contains(INCORRECT_PASSWORD)) => {
+            Some(EngineError::Failed(PASSWORD_PROTECTED.to_owned()))
+        }
+        _ => None,
+    }
+}
 
 /// The Poppler engine.
 #[derive(Clone, Copy, Debug, Default)]
@@ -106,6 +130,30 @@ mod tests {
             )
             .unwrap_err();
         assert_eq!(err.to_string(), "Poppler cannot convert pdf to mp3");
+    }
+
+    #[test]
+    fn an_incorrect_password_becomes_the_password_message() {
+        let err = RunError::Failed {
+            code: Some(1),
+            tail: vec!["Command Line Error: Incorrect password".to_owned()],
+        };
+        let mapped = password_error(&err).expect("a password error");
+        assert_eq!(
+            mapped.to_string(),
+            "The PDF is password-protected. Remove the password and try again."
+        );
+    }
+
+    #[test]
+    fn other_failures_are_not_password_errors() {
+        let broken = RunError::Failed {
+            code: Some(1),
+            tail: vec!["Syntax Error: Couldn't find trailer dictionary".to_owned()],
+        };
+        assert!(password_error(&broken).is_none());
+        assert!(password_error(&RunError::TimedOut).is_none());
+        assert!(password_error(&RunError::Cancelled).is_none());
     }
 
     #[test]
