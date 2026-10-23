@@ -14,7 +14,7 @@
 //! own: text and audio extraction refuse to run after a raster image, because
 //! no amount of `pdftotext` finds words in a photo of a page.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::contract::{Converter, EdgeFlags, FormatId};
 use crate::formats::{self, Category};
@@ -247,6 +247,21 @@ impl Planner {
         targets
     }
 
+    /// Every format some edge writes, self edges included. Build the planner
+    /// with `assume_all_available` to ask "can this build write it at all",
+    /// which is what the catalog's own `writable` flag (copied from Filee,
+    /// who had more engines than we do) can't answer.
+    pub fn writable_targets(&self) -> HashSet<FormatId> {
+        self.edges.iter().map(|edge| edge.to).collect()
+    }
+
+    /// Every format some edge reads. Same deal as
+    /// [`Planner::writable_targets`]: a format missing here has no engine at
+    /// all, not merely one the user hasn't installed.
+    pub fn readable_sources(&self) -> HashSet<FormatId> {
+        self.edges.iter().map(|edge| edge.from).collect()
+    }
+
     /// The cheapest `from -> from` edge, first registered on a tie.
     fn self_edge(&self, format: FormatId) -> Option<Hop> {
         self.edges
@@ -352,6 +367,30 @@ mod tests {
             .iter()
             .map(|h| format!("{}→{}", h.from, h.to))
             .collect()
+    }
+
+    #[test]
+    fn writable_and_readable_sets_come_from_the_edges() {
+        // FX-08: the catalog said aac was writable; only the edges know.
+        let engines = [
+            FakeConverter::new("magick")
+                .edge("raw", "png", 10)
+                .edge("png", "png", 10),
+            FakeConverter::new("soffice")
+                .edge("docx", "pdf", 10)
+                .missing("install it"),
+        ];
+        let set = |ids: &[&'static str]| ids.iter().map(|id| f(id)).collect::<HashSet<_>>();
+        assert_eq!(planner(&engines).writable_targets(), set(&["png"]));
+        assert_eq!(
+            planner_all(&engines).writable_targets(),
+            set(&["png", "pdf"])
+        );
+        assert_eq!(
+            planner_all(&engines).readable_sources(),
+            set(&["raw", "png", "docx"])
+        );
+        assert!(Planner::default().writable_targets().is_empty());
     }
 
     // --- Ported from tests/Filee.Core.Tests/RoutePlannerTests.cs ---

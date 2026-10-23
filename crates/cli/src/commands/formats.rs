@@ -12,7 +12,7 @@ use crate::ctx::Ctx;
 /// Runs `morphring formats` and returns the exit code.
 pub fn run(args: &FormatsArgs, ctx: &mut Ctx) -> i32 {
     let text = match args.format.as_deref() {
-        None => list_all(),
+        None => list_all(&ctx.engines),
         Some(name) => match formats::lookup_target(name) {
             Some(from) => list_targets(from, &ctx.engines),
             None => {
@@ -27,7 +27,15 @@ pub fn run(args: &FormatsArgs, ctx: &mut Ctx) -> i32 {
 
 /// Every format but the folder, grouped by category in order of first
 /// appearance (LINQ's GroupBy, which is what Filee used).
-fn list_all() -> String {
+///
+/// A format is only shown as writable when some registered engine (installed
+/// or not) writes it. The catalog's `writable` flag is Filee's opinion, and
+/// Filee had an engine for aac; we have a to-do list.
+fn list_all(engines: &[Box<dyn Converter>]) -> String {
+    let engines: Vec<&dyn Converter> = engines.iter().map(Box::as_ref).collect();
+    let dream = Planner::new(&engines, true);
+    let writable = dream.writable_targets();
+    let readable = dream.readable_sources();
     let known: Vec<&Format> = formats::all().iter().filter(|f| !f.is_folder()).collect();
     let mut categories: Vec<Category> = Vec::new();
     for format in &known {
@@ -41,9 +49,15 @@ fn list_all() -> String {
         text.push_str(category.name());
         text.push_str(":\n");
         for format in known.iter().filter(|f| f.category == category) {
-            let read_only = if format.writable { "" } else { " (read only)" };
+            let tag = if format.writable && writable.contains(&format.id) {
+                ""
+            } else if readable.contains(&format.id) {
+                " (read only)"
+            } else {
+                " (not supported yet)"
+            };
             text.push_str(&format!(
-                "  {:<10} {}{read_only}  .{}\n",
+                "  {:<10} {}{tag}  .{}\n",
                 format.id.as_str(),
                 format.name,
                 format.extensions.join(" .")
@@ -57,6 +71,16 @@ fn list_all() -> String {
 /// What `from` converts to with the installed engines, then what it would
 /// convert to if the user installed the missing ones (and which ones, and how).
 fn list_targets(from: &Format, engines: &[Box<dyn Converter>]) -> String {
+    // The folder is where archives land, not something to convert from: the
+    // CLI opens a folder and converts what it finds inside. The pack engine's
+    // folder edges are real, but no command hands it a folder, so promising
+    // "Folder converts to zip" would be writing cheques we can't cash.
+    if from.is_folder() {
+        return format!(
+            "{}:\n  Archives extract into folders. 'morphring convert <folder>' converts the files inside it, one by one.\n",
+            from.name
+        );
+    }
     let engines: Vec<&dyn Converter> = engines.iter().map(Box::as_ref).collect();
     let installed = Planner::new(&engines, false);
     let dream = Planner::new(&engines, true);
@@ -91,7 +115,15 @@ fn list_targets(from: &Format, engines: &[Box<dyn Converter>]) -> String {
         from.name,
         from.extensions.join(", ")
     );
-    if now.is_empty() {
+    if now.is_empty() && later.is_empty() {
+        // Not a missing engine: there is no engine to miss. Saying "installed
+        // now" here sent people to `doctor`, which then cheerfully reported
+        // every engine present.
+        text.push_str(&format!(
+            "  (nothing yet: this version of MorphRing cannot convert {})\n",
+            from.name
+        ));
+    } else if now.is_empty() {
         text.push_str("  (nothing with the engines installed now)\n");
     } else {
         text.push_str(&format!("  {}\n", now.join(", ")));
@@ -165,7 +197,11 @@ mod tests {
 
     #[test]
     fn listing_groups_by_category_and_marks_read_only() {
-        let (code, out, err) = run_args(&["formats"], vec![]);
+        let magick = FakeConverter::new("magick")
+            .edge("raw", "png", 10)
+            .edge("png", "jpg", 10)
+            .missing("pacman -S imagemagick");
+        let (code, out, err) = run_args(&["formats"], vec![magick]);
         assert_eq!(code, 0);
         assert_eq!(err, "");
         assert!(out.starts_with("Image:\n"), "{out}");
@@ -174,6 +210,10 @@ mod tests {
         assert!(out.contains("\n  docx "), "{out}");
         let raw = out.lines().find(|l| l.starts_with("  raw ")).unwrap();
         assert!(raw.contains("(read only)"), "{raw}");
+        // png and jpg stay writable although magick is missing: a missing
+        // engine still counts, a nonexistent one does not.
+        let docx = out.lines().find(|l| l.starts_with("  docx ")).unwrap();
+        assert!(docx.contains("(not supported yet)"), "{docx}");
         assert!(!out.contains("folder"), "{out}");
         assert!(
             out.ends_with(
@@ -206,13 +246,94 @@ mod tests {
     }
 
     #[test]
-    fn nothing_installed_says_so() {
+    fn no_engine_at_all_is_not_blamed_on_the_install() {
         let (code, out, _) = run_args(&["formats", "jpeg"], vec![]);
         assert_eq!(code, 0);
         assert_eq!(
             out,
-            "JPG (jpg, jpeg, jpe, jfif) converts to:\n  (nothing with the engines installed now)\n"
+            "JPG (jpg, jpeg, jpe, jfif) converts to:\n  \
+             (nothing yet: this version of MorphRing cannot convert JPG)\n"
         );
+    }
+
+    /// The `formats` line of `id`, listed with the real engines.
+    fn real_listing_line(listing: &str, id: &str) -> String {
+        let prefix = format!("  {id:<10} ");
+        listing
+            .lines()
+            .find(|l| l.starts_with(&prefix))
+            .unwrap_or_else(|| panic!("no line for {id}"))
+            .to_owned()
+    }
+
+    fn real_run(args: &[&str]) -> String {
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+        let code = {
+            let mut ctx = Ctx {
+                out: &mut out,
+                err: &mut err,
+                cwd: PathBuf::from("/"),
+                cancel: CancelToken::new(),
+                quit: CancelToken::new(),
+                engines: morphring_engines::registry::all(),
+                config_dir: None,
+            };
+            run_with(args.iter().map(OsString::from), &mut ctx)
+        };
+        assert_eq!(code, 0);
+        String::from_utf8(out).unwrap()
+    }
+
+    #[test]
+    fn only_formats_an_engine_writes_look_writable() {
+        // FX-08: 105 formats looked writable and failed at runtime instead.
+        let listing = real_run(&["formats"]);
+        for id in ["tsv", "docm", "xlsm", "m4v", "aac", "wmv", "eps", "jp2"] {
+            let line = real_listing_line(&listing, id);
+            assert!(line.contains(" (read only)  ."), "{line}");
+        }
+        for id in ["7z", "rar", "txz", "gz"] {
+            let line = real_listing_line(&listing, id);
+            assert!(line.contains(" (not supported yet)  ."), "{line}");
+        }
+        for id in ["png", "jpg", "pdf", "docx", "mp3", "mp4", "zip"] {
+            let line = real_listing_line(&listing, id);
+            assert!(!line.contains(" ("), "{line}");
+        }
+        // And the other way round: every format left untagged is a target
+        // that some `formats <src>` actually offers.
+        let offered: std::collections::HashSet<String> = formats::all()
+            .iter()
+            .filter(|f| !f.is_folder())
+            .flat_map(|f| real_targets(f.id.as_str()))
+            .collect();
+        for line in listing
+            .lines()
+            .filter(|l| l.starts_with("  ") && !l.contains(" ("))
+        {
+            let id = line.split_whitespace().next().unwrap();
+            assert!(
+                offered.contains(id),
+                "{id} looks writable but nothing makes it"
+            );
+        }
+    }
+
+    #[test]
+    fn a_format_no_engine_reads_says_not_yet() {
+        let out = real_run(&["formats", "7z"]);
+        assert_eq!(
+            out,
+            "7Z (7z) converts to:\n  (nothing yet: this version of MorphRing cannot convert 7Z)\n"
+        );
+    }
+
+    #[test]
+    fn the_folder_is_not_offered_as_a_source() {
+        let out = real_run(&["formats", "folder"]);
+        assert!(out.starts_with("Folder:\n"), "{out}");
+        assert!(!out.contains("()"), "{out}");
+        assert!(!out.contains("zip"), "{out}");
     }
 
     #[test]

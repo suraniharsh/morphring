@@ -10,11 +10,13 @@
 use std::fmt;
 use std::path::Path;
 
+use morphring_core::formats::Format;
 use morphring_core::output::{ConflictPolicy, OutputLocation, OutputRule};
+use morphring_core::planner::Planner;
 use morphring_core::preset::{self, Preset};
 use morphring_core::profiles::Library;
 use morphring_core::settings::AppSettings;
-use morphring_core::{ConvertOptions, Target, formats};
+use morphring_core::{ConvertOptions, Converter, Target, formats};
 
 use crate::commands::presets;
 
@@ -52,7 +54,10 @@ impl std::error::Error for UsageError {}
 /// keep-dates switch), `quality`, `overwrite`/`skip`, `keep_dates`, then
 /// `output`, which sends every file flat into that folder (relative to
 /// `cwd`).
-// Ten arguments is a lot, but they are exactly the flags convert and watch
+///
+/// `engines` are every registered engine, installed or not: a target none of
+/// them writes is refused here, before a single file is touched.
+// Eleven arguments is a lot, but they are exactly the flags convert and watch
 // share, and a struct holding them would just be ConvertArgs wearing a hat.
 #[allow(clippy::too_many_arguments)]
 pub fn job_from_args(
@@ -66,9 +71,15 @@ pub fn job_from_args(
     cwd: &Path,
     library: &Library,
     settings: &AppSettings,
+    engines: &[Box<dyn Converter>],
 ) -> Result<JobSpec, UsageError> {
-    let mut chosen = choose_preset(to, preset, library)?;
-    let target = job_target(&chosen)?;
+    // The dream planner: every engine counts, installed or not. A missing
+    // engine gets its own friendly "needs LibreOffice" later on; a format
+    // with no engine at all should not get as far as a job.
+    let engines: Vec<&dyn Converter> = engines.iter().map(Box::as_ref).collect();
+    let planner = Planner::new(&engines, true);
+    let mut chosen = choose_preset(to, preset, library, &planner)?;
+    let target = job_target(&chosen, &planner)?;
 
     // 1. The settings fill in a "Default" location and may force keep-dates.
     chosen.output = settings.with_default_output(&chosen.output);
@@ -113,6 +124,7 @@ fn choose_preset(
     to: Option<&str>,
     preset: Option<&str>,
     library: &Library,
+    planner: &Planner,
 ) -> Result<Preset, UsageError> {
     match (to, preset) {
         (Some(to), None) => {
@@ -121,9 +133,7 @@ fn choose_preset(
                     "unknown format '{to}'. Run 'morphring formats' for the list."
                 )));
             };
-            if !format.writable {
-                return Err(cannot_write(format.name));
-            }
+            refuse_unwritable(format, planner)?;
             Ok(preset::for_target(format))
         }
         (None, Some(key)) => {
@@ -156,11 +166,14 @@ fn choose_preset(
 
 /// The job target of a preset, refusing targets we can't produce. Only a
 /// hand-edited presets.json can get here, but hand-editing is a hobby.
-fn job_target(chosen: &Preset) -> Result<Target, UsageError> {
+fn job_target(chosen: &Preset, planner: &Planner) -> Result<Target, UsageError> {
     match chosen.job_target() {
         Some(Target::Format(id)) => match formats::find_by_id(id.as_str()) {
-            Some(format) if !format.writable => Err(cannot_write(format.name)),
-            _ => Ok(Target::Format(id)),
+            Some(format) => {
+                refuse_unwritable(format, planner)?;
+                Ok(Target::Format(id))
+            }
+            None => Ok(Target::Format(id)),
         },
         Some(target) => Ok(target),
         None => Err(UsageError(format!(
@@ -168,6 +181,23 @@ fn job_target(chosen: &Preset) -> Result<Target, UsageError> {
             chosen.display_name(),
             chosen.target
         ))),
+    }
+}
+
+/// Refuses `format` as a target unless the catalog calls it writable *and*
+/// some engine actually writes it. The catalog came from Filee, who had a few
+/// more engines than we do, so its word alone used to send `--to aac` all the
+/// way to the job runner just to hear "No engine can do this conversion".
+fn refuse_unwritable(format: &Format, planner: &Planner) -> Result<(), UsageError> {
+    if format.writable && planner.writable_targets().contains(&format.id) {
+        Ok(())
+    } else if planner.readable_sources().contains(&format.id) {
+        Err(cannot_write(format.name))
+    } else {
+        Err(UsageError(format!(
+            "MorphRing can't write {} yet.",
+            format.name
+        )))
     }
 }
 
@@ -197,6 +227,7 @@ mod tests {
             Path::new("/work"),
             &Library::builtin(),
             &AppSettings::default(),
+            &morphring_engines::registry::all(),
         )
     }
 
@@ -221,6 +252,70 @@ mod tests {
         );
         let err = resolve(Some("xcf"), None).unwrap_err().0;
         assert!(err.starts_with("MorphRing reads ") && err.ends_with(" but can't write it."));
+    }
+
+    #[test]
+    fn to_refuses_what_no_engine_writes() {
+        // FX-08: the catalog called these writable, the engines disagreed,
+        // and the user found out one "No engine can do this conversion" later.
+        for (to, name) in [
+            ("aac", "AAC"),
+            ("tsv", "TSV"),
+            (".m4v", "M4V"),
+            ("docm", "DOCM"),
+        ] {
+            assert_eq!(
+                resolve(Some(to), None).unwrap_err().0,
+                format!("MorphRing reads {name} but can't write it."),
+                "{to}"
+            );
+        }
+        // Nothing reads a 7z either, so "reads" would be a fib.
+        assert_eq!(
+            resolve(Some("7z"), None).unwrap_err().0,
+            "MorphRing can't write 7Z yet."
+        );
+        // Without any engine, nothing is writable, not even good old PNG.
+        let err = job_from_args(
+            Some("png"),
+            None,
+            None,
+            false,
+            false,
+            false,
+            None,
+            Path::new("/"),
+            &Library::builtin(),
+            &AppSettings::default(),
+            &[],
+        )
+        .unwrap_err();
+        assert_eq!(err.0, "MorphRing can't write PNG yet.");
+    }
+
+    #[test]
+    fn a_preset_whose_target_no_engine_writes_is_refused() {
+        let mut library = Library::builtin();
+        library.presets.push(Preset {
+            id: "to-aac".into(),
+            target: "aac".into(),
+            ..Preset::default()
+        });
+        let err = job_from_args(
+            None,
+            Some("to-aac"),
+            None,
+            false,
+            false,
+            false,
+            None,
+            Path::new("/"),
+            &library,
+            &AppSettings::default(),
+            &morphring_engines::registry::all(),
+        )
+        .unwrap_err();
+        assert_eq!(err.0, "MorphRing reads AAC but can't write it.");
     }
 
     #[test]
@@ -271,6 +366,7 @@ mod tests {
             Path::new("/"),
             &library,
             &AppSettings::default(),
+            &morphring_engines::registry::all(),
         )
         .unwrap_err();
         assert!(err.0.contains("'floppy'"), "{err}");
@@ -300,6 +396,7 @@ mod tests {
                 Path::new("/work"),
                 &library,
                 &settings,
+                &morphring_engines::registry::all(),
             )
             .unwrap()
         };
@@ -347,6 +444,7 @@ mod tests {
             Path::new("/"),
             &Library::builtin(),
             &settings,
+            &morphring_engines::registry::all(),
         )
         .unwrap();
         assert!(spec.rule.keep_dates);

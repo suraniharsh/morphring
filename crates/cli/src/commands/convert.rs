@@ -49,6 +49,7 @@ pub fn run(args: &ConvertArgs, ctx: &mut Ctx) -> i32 {
         &ctx.cwd,
         &library,
         &settings,
+        &ctx.engines,
     ) {
         Ok(spec) => spec,
         Err(e) => {

@@ -293,7 +293,10 @@ mod tests {
                 cwd: PathBuf::from("/"),
                 cancel: CancelToken::new(),
                 quit: CancelToken::new(),
-                engines: Vec::new(),
+                // The real registry, not an empty one: `--to pdf` is refused
+                // up front when no engine writes pdf (FX-08), and these tests
+                // want to reach the checks that come after.
+                engines: morphring_engines::registry::all(),
                 config_dir: None,
             };
             run_with(args.iter().map(OsString::from), &mut ctx)

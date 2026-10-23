@@ -259,9 +259,11 @@ fn unknown_and_read_only_targets_are_usage_errors() {
         r.err
     );
 
+    // Something has to read raw for "reads" to be true (FX-08).
+    let raw_reader = FakeConverter::new("fake").edge("raw", "png", 10);
     let r = run_in(
         tmp.path(),
-        png_to_jpg(),
+        vec![Box::new(raw_reader)],
         &["convert", "a.png", "--to", "raw"],
     );
     assert_eq!(r.code, 2);
@@ -287,7 +289,9 @@ fn an_unsupported_file_fails_with_exit_1() {
     let r = run_in(
         tmp.path(),
         png_to_jpg(),
-        &["convert", "notes.unknownext", "--to", "pdf"],
+        // jpg, which the fake engine writes: --to pdf would now be refused
+        // before the file is even looked at (FX-08).
+        &["convert", "notes.unknownext", "--to", "jpg"],
     );
     assert_eq!(r.code, 1);
     assert!(r.out.starts_with("fail  notes.unknownext: "), "{}", r.out);

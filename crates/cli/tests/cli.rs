@@ -177,6 +177,35 @@ fn wrong_arguments_explain_themselves_with_exit_code_2() {
 }
 
 #[test]
+fn targets_no_engine_writes_are_refused_before_any_job() {
+    // FX-08: the catalog said aac and tsv were writable, so these went all
+    // the way to the job runner and came back as "No engine can do this
+    // conversion", exit 1. Now they don't get past the front door.
+    let tmp = TempDir::new().unwrap();
+    let wav = tmp.path().join("a.wav");
+    fs::copy(fixture("sample.wav"), &wav).unwrap();
+    let csv = tmp.path().join("sheet.csv");
+    fs::write(&csv, "a,b\n1,2\n").unwrap();
+    let out = tmp.path().join("out");
+
+    let cases = [
+        (&wav, "aac", "MorphRing reads AAC but can't write it."),
+        (&csv, "tsv", "MorphRing reads TSV but can't write it."),
+        (&wav, "7z", "MorphRing can't write 7Z yet."),
+    ];
+    for (input, to, message) in cases {
+        let r = run(
+            tmp.path(),
+            &["convert", str_of(input), "--to", to, "-o", str_of(&out)],
+        );
+        assert_eq!(r.code, 2, "--to {to}: {r:?}");
+        assert_eq!(r.out, "", "--to {to}: a job started");
+        assert_eq!(r.err, format!("morphring: {message}\n"), "--to {to}");
+    }
+    assert!(!out.exists(), "nothing should have been written");
+}
+
+#[test]
 fn a_missing_input_is_reported() {
     let tmp = TempDir::new().unwrap();
     let missing = tmp.path().join("missing.png");
